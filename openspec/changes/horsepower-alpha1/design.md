@@ -18,6 +18,8 @@ The first release targets Node.js 22.19+, Pi 0.80.10-compatible extension/RPC in
 - Keep observation and cleanup available even when OpenSpec is broken or unavailable.
 - Package and install verified GitHub Releases through stable symlinks without Pi package installation.
 - Keep public resources model-neutral and free of private configuration.
+- Require the Captain to choose change-specific E2E verification before reporting completion, while allowing an explicit reasoned waiver with alternative evidence.
+- Notify optional webhooks only when an explicit dispatch or Captain-reported change reaches a terminal state.
 
 **Non-Goals:**
 
@@ -115,6 +117,9 @@ The implementation is divided by stable interfaces:
 - `persistent-manager`: worker/message/event lifecycle.
 - `one-shot`: single/parallel/chain execution.
 - `openspec-boundary`: official CLI detection and permission to advance work, without owning OpenSpec facts.
+- `verification-gate`: validates Captain-selected E2E evidence or an explicit E2E waiver before completion.
+- `run-lifecycle`: owns process-lifetime dispatch/change terminal transitions and requires explicit Captain change termination.
+- `webhook-notifier`: emits redacted terminal notifications with optional HMAC/Bearer/none authentication and bounded in-process retry.
 - `orchestration`: validates explicit dispatch and delegates to runtimes.
 - `global-runtime`: process-level ownership and cleanup.
 - `extension`: thin Pi registration and context adapter.
@@ -155,9 +160,21 @@ The installer atomically switches `current`, refuses unrelated path conflicts, n
 
 The extension registers `horsepower_subagent` and Horsepower-specific commands. It does not register `/team`, `team_*`, or generic `subagent`, and it never removes another extension. OpenSpec-generated `.pi/skills` and `.pi/prompts` remain untouched.
 
-### 11. Incremental delivery
+### 11. Captain-controlled verification and explicit terminal notification
 
-Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, OpenSpec execution gating, CLI setup/doctor/uninstall, release construction, curl installation, tests, and CI.
+The Captain chooses the E2E verification required for each change from the actual impact. Horsepower never guesses the command and does not treat unit tests alone as sufficient completion evidence. Before reporting `completed`, the Captain must provide successful E2E command evidence or an explicit `e2eWaiver` containing a concrete reason and alternative verification evidence. `blocked_needs_human`, `failed`, and `canceled` do not require successful E2E.
+
+A change reaches a terminal state only when the Captain explicitly reports `completed`, `blocked_needs_human`, `failed`, or `canceled`. Horsepower cross-checks `completed` against the verification gate and official OpenSpec context, then emits the change webhook. It never infers completion from a quiet assistant turn. Dispatch runtimes independently emit `completed`, `failed`, or `canceled`; dispatch notification is disabled by default and can be enabled by configuration. Persistent worker `idle` is not terminal.
+
+Webhook configuration is optional during installation and later CLI configuration. Authentication supports `hmac`, `bearer`, and `none`; HMAC is recommended. Secrets are stored in mode-`0600` Horsepower configuration and always redacted. Payloads contain terminal metadata and bounded evidence references, never prompts, model output, API keys, full command output, or authentication secrets. Delivery is non-blocking and retries only within the current Pi process using bounded exponential backoff. Failure never changes the original terminal state, and no daemon or persistent outbox resumes delivery after process exit.
+
+Alternative rejected: inferring terminal state from Pi turn end. A turn ending cannot distinguish ordinary conversational pause from completed work.
+
+Alternative rejected: static or automatically guessed E2E commands. Only the Captain has enough change-specific context to select meaningful E2E coverage.
+
+### 12. Incremental delivery
+
+Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, OpenSpec execution gating, Captain-controlled E2E completion, run lifecycle and optional webhook notification, CLI setup/doctor/uninstall, release construction, curl installation, tests, and CI.
 
 Later changes may add richer execution governance—coder routing, tester/reviewer orchestration, Coder Guard, standards, personas, and TUI—but those features must continue to leave all planning and historical facts with OpenSpec.
 
@@ -166,6 +183,8 @@ Later changes may add richer execution governance—coder routing, tester/review
 - **OpenSpec CLI changes** → Keep interaction CLI-first, test the minimum supported official contract, fail clearly on incompatible behavior, and avoid parsing undocumented internals.
 - **Users can call ordinary OpenSpec apply without Horsepower** → This is valid; Horsepower is an execution enhancement, not owner of OpenSpec facts or an enforcement patch over official skills.
 - **OpenSpec unavailable during worker activity** → Block advancing operations but preserve status/read/abort/destroy.
+- **Captain selects insufficient E2E coverage** → Require an explicit declaration and evidence, surface the selection in terminal reporting, and leave final judgment with the Captain rather than silently substituting unit tests.
+- **Webhook receiver is unavailable** → Preserve the original terminal state, retry only within the current process, redact failures, and document that retries are not resumed after exit.
 - **Symlink support or permissions fail** → Stop with guidance; never copy as fallback.
 - **A GitHub release account is compromised** → Checksums protect transfer integrity but not publisher compromise; release workflows, allowlists, scans, and review remain required.
 - **Process isolation is mistaken for security isolation** → Documentation states workers share the user's filesystem, environment, credentials, and network.

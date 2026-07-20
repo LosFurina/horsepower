@@ -57,3 +57,33 @@ Public repository and release contents SHALL contain no private agents, provider
 #### Scenario: Forbidden data detected
 - **WHEN** release scanning finds a forbidden secret or private path pattern
 - **THEN** release construction fails before publication
+
+### Requirement: Optional webhook setup
+Interactive installation SHALL offer optional webhook configuration and SHALL allow the user to skip it. Configuration SHALL support change notifications enabled by default, dispatch notifications disabled by default, and authentication modes `hmac`, `bearer`, and `none` with HMAC recommended.
+
+#### Scenario: User skips webhook
+- **WHEN** the user leaves webhook setup empty or selects skip
+- **THEN** installation completes with notifications disabled
+
+#### Scenario: User configures HMAC
+- **WHEN** the user provides a URL, selects `hmac`, and provides a secret
+- **THEN** setup writes the secret only to mode-`0600` Horsepower configuration and diagnostics redact it
+
+#### Scenario: User configures Bearer authentication
+- **WHEN** the user provides a URL, selects `bearer`, and provides a token
+- **THEN** webhook requests use the Authorization header and no diagnostic prints the token
+
+### Requirement: Redacted non-blocking webhook delivery
+Terminal webhook payloads SHALL contain event ID, timestamp, scope, run/change identifiers, terminal status, and bounded redacted summary/evidence references. They SHALL NOT contain prompts, model output, API keys, authentication values, or full command output. Delivery SHALL use bounded exponential retries only within the current Pi process and SHALL never change the original terminal status.
+
+#### Scenario: HMAC notification
+- **WHEN** a terminal event uses HMAC authentication
+- **THEN** the request includes an event ID, timestamp, and HMAC-SHA256 signature over the canonical request body
+
+#### Scenario: Receiver remains unavailable
+- **WHEN** all configured in-process delivery attempts fail
+- **THEN** Horsepower records redacted notification failure for current-process status/doctor output and preserves the original terminal status
+
+#### Scenario: Pi process exits during retry
+- **WHEN** the host process exits before a retry completes
+- **THEN** Horsepower does not persist or resume the notification and documentation states this limitation

@@ -13,6 +13,8 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 - Permit status, list, read, abort, destroy, and doctor when OpenSpec is unavailable so workers remain observable and cleanable.
 - Distribute only through verified GitHub Release archives installed by a repository-owned curl bootstrap and stable symlinks; do not use npm publishing or Pi package installation.
 - Add setup, slot configuration, doctor, safe uninstall, release scanning, CI, and real Pi smoke coverage.
+- Add a Captain-controlled verification gate: the Captain explicitly chooses change-specific E2E verification, and completion requires passing evidence or an explicit reasoned E2E waiver with alternative evidence.
+- Add optional terminal-state webhook notification at change and dispatch scope, with change notifications enabled by default, dispatch notifications opt-in, HMAC/Bearer/none authentication, redacted payloads, and non-blocking in-process retries.
 
 ## Capabilities
 
@@ -22,8 +24,8 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 - `agent-catalog`: Model-neutral bundled/global/project agent definitions with deterministic precedence.
 - `explicit-dispatch`: Captain-only one-shot and persistent dispatch with explicit slot selection and no recursive worker creation.
 - `persistent-workers`: Multi-turn RPC worker lifecycle, message delivery, abort/destroy distinction, cursor events, limits, failures, and Pi process lifecycle.
-- `openspec-execution-boundary`: Mandatory official OpenSpec prerequisite for advancing work without duplicating OpenSpec facts or modifying its workflow artifacts.
-- `github-release-installation`: GitHub-only release construction, verification, curl installation, stable symlinks, diagnostics, and safe uninstall.
+- `openspec-execution-boundary`: Mandatory official OpenSpec prerequisite, Captain-controlled E2E completion gate, and explicit change terminal reporting without duplicating OpenSpec facts or modifying its workflow artifacts.
+- `github-release-installation`: GitHub-only release construction, verification, curl installation, optional webhook setup, stable symlinks, diagnostics, and safe uninstall.
 
 ### Modified Capabilities
 
@@ -32,6 +34,7 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 ## Impact
 
 - Creates the Horsepower TypeScript source, tests, bundled resources, Pi extension, CLI, installer, release scripts, documentation, and GitHub workflows.
+- Adds process-lifetime run coordination and webhook delivery state; this runtime evidence does not replace OpenSpec verification or task facts and is not resumed across Pi processes.
 - Requires Node.js 22.19 or newer, Pi 0.80.10-compatible extension/RPC interfaces, and Fission-AI/OpenSpec 1.6.0 or newer.
 - Installs Horsepower globally under `~/.pi/agent/horsepower`, links Pi resources under `~/.pi/agent/extensions` and `~/.pi/agent/skills`, and links the CLI under `~/.local/bin`.
 - Does not publish to npm, call `pi install`/`pi update`, install OpenSpec, or copy private model/provider configuration.

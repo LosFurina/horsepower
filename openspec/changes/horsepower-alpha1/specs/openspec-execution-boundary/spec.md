@@ -50,3 +50,37 @@ Before Horsepower executes a change imported from external Markdown, the approve
 #### Scenario: Source changed before deletion
 - **WHEN** a source digest differs from the imported digest
 - **THEN** deletion is refused and execution remains blocked
+
+### Requirement: Captain-controlled E2E completion gate
+Horsepower SHALL NOT permit a change to be reported `completed` from unit-test evidence alone. The Captain SHALL explicitly select change-specific E2E verification and provide successful command evidence, or provide an `e2eWaiver` with a concrete reason and alternative verification evidence.
+
+#### Scenario: Captain-selected E2E passes
+- **WHEN** the Captain declares E2E commands and each command completes successfully with bounded evidence
+- **THEN** the verification gate permits the Captain to report `completed`
+
+#### Scenario: Captain waives E2E
+- **WHEN** the Captain declares that E2E is unnecessary and supplies a non-empty waiver reason plus alternative verification evidence
+- **THEN** the verification gate records the waiver evidence and permits completion
+
+#### Scenario: Unit tests are the only evidence
+- **WHEN** the Captain attempts to report `completed` without successful declared E2E evidence or a valid waiver
+- **THEN** Horsepower rejects the terminal report without changing OpenSpec facts
+
+#### Scenario: E2E requires human judgment
+- **WHEN** selected E2E cannot proceed without a product or environment decision
+- **THEN** the Captain may explicitly report `blocked_needs_human` without passing the completion gate
+
+### Requirement: Explicit change terminal reporting
+Horsepower SHALL consider a change terminal only when the Captain explicitly reports `completed`, `blocked_needs_human`, `failed`, or `canceled`. It SHALL NOT infer change completion from an assistant turn ending or becoming quiet.
+
+#### Scenario: Captain reports completion
+- **WHEN** the Captain reports `completed` in valid OpenSpec context and the E2E completion gate passes
+- **THEN** Horsepower records process-lifetime terminal runtime evidence and triggers configured change notification
+
+#### Scenario: Captain reports a non-complete terminal state
+- **WHEN** the Captain explicitly reports `blocked_needs_human`, `failed`, or `canceled`
+- **THEN** Horsepower triggers configured change notification without requiring successful E2E evidence
+
+#### Scenario: Assistant turn ends
+- **WHEN** the main assistant finishes a turn without explicit terminal reporting
+- **THEN** Horsepower sends no change-terminal notification and infers no terminal state

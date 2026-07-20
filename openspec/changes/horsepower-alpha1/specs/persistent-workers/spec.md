@@ -22,6 +22,10 @@ Horsepower SHALL allow at most eight persistent workers per host Pi process and 
 - **WHEN** a turn completes
 - **THEN** the worker remains alive and available indefinitely within the host process
 
+#### Scenario: Idle worker has no active dispatch
+- **WHEN** a persistent worker remains idle after its dispatch terminal event
+- **THEN** Horsepower sends no additional terminal webhook merely because the worker is idle
+
 ### Requirement: Multi-turn message delivery
 Horsepower SHALL assign each send a unique message ID and support `reject`, `followUp`, and `steer` delivery with per-message completion correlation.
 

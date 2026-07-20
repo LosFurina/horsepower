@@ -39,3 +39,25 @@ Workflow helpers, fanout, debate, recommendations, and health fallback SHALL NOT
 #### Scenario: Helper recommends multiple workers
 - **WHEN** a helper produces dispatch proposals
 - **THEN** proposals remain inert until the captain explicitly dispatches each requested task
+
+### Requirement: Dispatch terminal lifecycle
+Each explicit `single`, `parallel`, `chain`, or persistent message dispatch SHALL have a process-lifetime run ID and reach exactly one terminal status: `completed`, `failed`, or `canceled`. A persistent worker becoming `idle` without an active dispatch SHALL NOT create another terminal event.
+
+#### Scenario: Dispatch completes
+- **WHEN** an explicitly requested dispatch produces truthful completion evidence
+- **THEN** its run becomes `completed` and optional dispatch notification may be emitted
+
+#### Scenario: Dispatch fails or is canceled
+- **WHEN** execution fails or semantic cancellation is observed
+- **THEN** its run becomes `failed` or `canceled` respectively and optional dispatch notification may be emitted
+
+### Requirement: Optional dispatch notification
+Dispatch-level webhook notification SHALL be disabled by default and MAY be enabled by user configuration. Notification delivery failure SHALL NOT change the dispatch terminal status.
+
+#### Scenario: Dispatch notification disabled
+- **WHEN** a dispatch reaches terminal status under default configuration
+- **THEN** no dispatch webhook is sent
+
+#### Scenario: Dispatch notification enabled
+- **WHEN** a dispatch reaches terminal status and dispatch notification is enabled
+- **THEN** Horsepower sends one logical terminal notification through bounded in-process delivery attempts
