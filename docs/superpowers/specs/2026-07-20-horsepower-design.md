@@ -1,6 +1,6 @@
 # Horsepower Design
 
-**Status:** Proposed for implementation  
+**Status:** Approved for implementation
 **Initial release target:** `0.1.0-alpha.1` through `0.1.0`  
 **Repository and distribution:** `LosFurina/horsepower` GitHub Releases
 **Installer:** repository-owned `install.sh` invoked with `curl`
@@ -35,7 +35,7 @@ Horsepower is an independent implementation. `pi-team` is a design reference for
 - Provide AgentFlow's full workflow, standards, gates, personas, state, archive, and memory capabilities.
 - Load only the standards and role guidance relevant to the current task.
 - Provide human-readable TUI observability and machine-readable event streams.
-- Install through Pi's package mechanism and initialize configuration with one CLI command.
+- Install a verified GitHub Release through the repository-owned curl bootstrap, expose it to Pi through stable symlinks, and initialize configuration in the same flow.
 - Coexist with `pi-team` and existing `subagent` extensions by using a unique namespace.
 - Support user-global and project-local configuration with deterministic override rules.
 - Make configuration upgrades safe, versioned, and non-destructive.
@@ -325,7 +325,7 @@ Lifecycle handling:
 
 The new extension instance claims the existing singleton during `session_start`. It never duplicates a manager in the same process.
 
-The singleton also installs idempotent host-process exit and signal handlers as a final cleanup backstop. This is especially important for project-local installation: if the user switches to a project where Horsepower is not loaded, workers remain alive but temporarily inaccessible until a Horsepower-enabled session is active again. Host process exit still terminates them. Global installation is recommended for users who want cross-project access.
+The singleton also installs idempotent host-process exit and signal handlers as a final cleanup backstop. Horsepower is installed globally in the first release, so the extension can re-acquire the same manager after project changes and Pi session replacement. Host process exit still terminates all workers.
 
 This mechanism is process-local, not a daemon. Host Pi process exit always ends workers. On startup, disk records for previously running workers are marked `orphaned`; Horsepower does not pretend to reconnect.
 
@@ -1061,9 +1061,10 @@ README must state these limitations plainly.
 
 ### `0.1.0-alpha.1`
 
-- private Node project and GitHub Release skeleton
+- private Node project and verified GitHub Release skeleton
+- repository-owned curl bootstrap and stable symlink installation
 - model slots
-- CLI setup/configure/set/slots/doctor
+- CLI setup/configure/set/slots/doctor/uninstall
 - persistent RPC runtime
 - explicit one-shot and persistent dispatch
 - eight-worker limit
