@@ -1,6 +1,6 @@
 ## 1. Project Foundation
 
-- [ ] 1.1 Initialize the private Node.js 22.19+ TypeScript project with strict ESM compilation, Vitest, deterministic CLI/extension bundles, MIT license, and repository-wide `check` command; verify metadata, typecheck, tests, and both build artifacts.
+- [x] 1.1 Initialize the private Node.js 22.19+ TypeScript project with strict ESM compilation, Vitest, deterministic CLI/extension bundles, MIT license, and repository-wide `check` command; verify metadata, typecheck, tests, and both build artifacts.
 - [ ] 1.2 Implement global/project path resolution and mode-0600 transactional JSON storage with atomic rename, temporary-file cleanup, unknown-field preservation, and malformed-JSON diagnostics; verify with focused filesystem tests.
 
 ## 2. Model and Agent Configuration

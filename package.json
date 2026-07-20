@@ -1,0 +1,30 @@
+{
+  "name": "horsepower",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "horsepower": "dist/cli/horsepower.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.10",
+    "@earendil-works/pi-ai": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "typebox": "1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}
