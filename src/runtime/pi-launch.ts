@@ -18,11 +18,15 @@ export interface PiLaunch {
   options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] };
 }
 
-export function buildPersistentPiLaunch(input: PersistentPiLaunchInput): PiLaunch {
-  for (const tool of input.tools) {
+export function safePiTools(tools: readonly string[]): string[] {
+  for (const tool of tools) {
     if (!toolNamePattern.test(tool)) throw new Error(`Invalid Pi tool name: ${tool}`);
   }
-  const tools = input.tools.filter((tool) => !delegationTools.has(tool));
+  return tools.filter((tool) => !delegationTools.has(tool));
+}
+
+export function buildPersistentPiLaunch(input: PersistentPiLaunchInput): PiLaunch {
+  const tools = safePiTools(input.tools);
   const args = [
     "--mode", "rpc",
     "--no-session",
