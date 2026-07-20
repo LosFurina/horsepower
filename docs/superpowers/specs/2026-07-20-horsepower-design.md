@@ -2,9 +2,9 @@
 
 **Status:** Proposed for implementation  
 **Initial release target:** `0.1.0-alpha.1` through `0.1.0`  
-**Repository:** `LosFurina/horsepower`  
-**npm package:** `@losfurina/horsepower`  
-**CLI:** `horsepower`  
+**Repository and distribution:** `LosFurina/horsepower` GitHub Releases
+**Installer:** repository-owned `install.sh` invoked with `curl`
+**CLI:** `horsepower`
 **Pi tools:** `horsepower`, `horsepower_subagent`
 
 ## 1. Summary
@@ -200,7 +200,7 @@ Review actual code and evidence. Do not modify files.
 
 No public agent definition contains a concrete model. The captain still passes `modelSlot` explicitly.
 
-Precedence is project definition over global definition over package default. Package defaults remain model-neutral.
+Precedence is project definition over global definition over bundled default. Bundled defaults remain model-neutral.
 
 ## 8. Persistent runtime
 
@@ -524,7 +524,7 @@ The design supports additional standards such as Rust, React, Vue, security, API
 
 ### 13.2 Resource locations
 
-Package defaults:
+Bundled defaults:
 
 ```text
 resources/standards/
@@ -545,10 +545,10 @@ Project overrides:
 Precedence:
 
 ```text
-project override > global override > package default
+project override > global override > bundled default
 ```
 
-Defaults stay in the installed package and update with package versions. Setup never copies package resources into Pi's `extensions/`, `skills/`, `prompts/`, or Horsepower override directories. Pi loads them through the installed package symlink. This prevents resource duplication and updates from overwriting user changes.
+Defaults stay in the installed release and update with release versions. Setup never copies bundled resources into Pi's `extensions/`, `skills/`, `prompts/`, or Horsepower override directories. Pi loads extension and skill resources through stable directory symlinks; Horsepower resolves other bundled resources through `current`. This prevents resource duplication and updates from overwriting user changes.
 
 ### 13.3 Resolver
 
@@ -632,112 +632,137 @@ A health fallback changes only the model resolved for one explicit worker reques
 
 ## 17. CLI and installation
 
-### 17.1 Package identity
+### 17.1 Distribution identity
 
 ```text
 Product: Horsepower
-GitHub: LosFurina/horsepower
-npm: @losfurina/horsepower
+Source and releases: https://github.com/LosFurina/horsepower
+Bootstrap script: https://raw.githubusercontent.com/LosFurina/horsepower/main/install.sh
 CLI binary: horsepower
-Pi package source: npm:@losfurina/horsepower
+Runtime distribution: GitHub Release archive
 ```
 
-The npm package includes the `pi-package` keyword and Pi manifest for Gallery discovery.
+Horsepower is not published to npm and is not installed through Pi's package manager or Package Gallery. The repository may retain a private `package.json` for Node dependencies, builds, tests, and CLI metadata; it must contain `"private": true`.
 
-### 17.2 Symlink installation model
+### 17.2 GitHub Release format
 
-Horsepower uses one durable package payload and soft links it into Pi's package discovery path. It never copies extension, skill, standard, persona, prompt, or workflow files into Pi resource directories.
+Every stable release contains:
 
-Global layout:
+```text
+horsepower-v<version>.tar.gz
+horsepower-v<version>.tar.gz.sha256
+```
+
+The archive has one top-level directory:
+
+```text
+horsepower/
+  bin/horsepower
+  dist/
+  pi/
+    extensions/horsepower/
+    skills/horsepower/
+  resources/
+  package.json
+  release-manifest.json
+```
+
+`release-manifest.json` declares the Horsepower version, configuration schema version, minimum Node and Pi versions, required resource entry points, and digests for security-critical unpacked files. The external `.sha256` asset authenticates the complete archive without creating a self-referential manifest digest. The release tag, archive filename, external checksum, manifest version, internal file digests, and unpacked layout must agree before the release is eligible for activation.
+
+Release version directories are immutable after successful installation.
+
+### 17.3 Stable symlink model
+
+Horsepower keeps one copy of each retained GitHub Release and exposes the active release through a stable `current` symlink:
 
 ```text
 ~/.pi/agent/horsepower/
-  install/
-    versions/
-      0.1.0/
-        package/                  # one unpacked, immutable package payload
-    current -> versions/0.1.0/package
+  versions/
+    v0.1.0/                     # verified, immutable release
+  current -> versions/v0.1.0
   model-slots.json
   settings.json
-  standards/                     # user overrides only
-  workflows/                     # user overrides only
-  personas/                      # user overrides only
+  standards/                   # user overrides only
+  workflows/                   # user overrides only
+  personas/                    # user overrides only
   memory/
+  state/
 ```
 
-Pi registers the stable local package link:
-
-```bash
-pi install ~/.pi/agent/horsepower/install/current
-```
-
-The package manifest under `current` exposes Horsepower's extension and packaged resources. No links or copies are created under `~/.pi/agent/extensions/`, `skills/`, or `prompts/`.
-
-A version payload is immutable after installation. Update stages a new version directory, verifies it, creates a temporary symlink, and atomically renames that link to `current`. If verification or link switching fails, `current` continues pointing at the prior version.
-
-Horsepower does not silently fall back to copying when symlink creation is unavailable. It reports the exact platform or permission requirement. On Windows, setup uses a directory symbolic link or junction only when its semantics pass doctor checks; otherwise setup fails with guidance rather than changing installation strategy.
-
-Development setup may point `current` directly at a local checkout:
-
-```bash
-horsepower setup --source /absolute/path/to/horsepower
-```
-
-This creates a soft link and does not duplicate the checkout.
-
-### 17.3 One-command setup
-
-```bash
-npx @losfurina/horsepower setup
-```
-
-Setup:
-
-1. Detect Node and Pi.
-2. Verify compatible versions and symlink capability.
-3. Download and unpack exactly one immutable Horsepower package payload into a staged version directory without running lifecycle scripts.
-4. Verify package integrity, manifest, version, and private-data release gates.
-5. Atomically create or switch `install/current` to the verified payload.
-6. Register the stable local package link with `pi install <current-link>` unless already registered.
-7. Create Horsepower configuration and override directories; do not populate override directories with package defaults.
-8. Discover available Pi models without reading or printing API keys.
-9. Prompt for required slots and optional slots.
-10. Validate selected model IDs and thinking levels where possible.
-11. Initialize settings, schema versions, workflow state, and memory files.
-12. Detect conflicting tools or commands and report them without removing packages.
-13. Run `horsepower doctor`.
-14. Ask the user to run `/reload`.
-
-Local setup:
-
-```bash
-npx @losfurina/horsepower setup --local
-```
-
-Project layout:
+Pi and the user's command path receive stable links through `current`:
 
 ```text
-.pi/horsepower/
-  install/
-    versions/<version>/package/
-    current -> versions/<version>/package
-  model-slots.json
-  settings.json
-  standards/
-  workflows/
-  personas/
-  memory/
+~/.pi/agent/extensions/horsepower
+  -> ~/.pi/agent/horsepower/current/pi/extensions/horsepower
+
+~/.pi/agent/skills/horsepower
+  -> ~/.pi/agent/horsepower/current/pi/skills/horsepower
+
+~/.local/bin/horsepower
+  -> ~/.pi/agent/horsepower/current/bin/horsepower
 ```
 
-It registers the stable link with:
+No Horsepower resource is copied into Pi resource directories. Standards, personas, workflows, schemas, and other bundled resources remain under the active release and are resolved through `current`; their corresponding Horsepower directories contain user overrides only.
+
+Activation creates a temporary `current.next` symlink and atomically renames it over `current`. Pi and CLI links are created once and remain unchanged across updates and rollbacks. Horsepower never calls `pi install`, `pi update`, or edits Pi package settings.
+
+The installer refuses to replace an existing Pi or CLI path unless it is already a verified Horsepower-owned symlink. A regular file, directory, or unrelated symlink is reported as a conflict.
+
+Horsepower does not silently fall back to copying when symlink creation is unavailable. The initial release supports Linux and macOS. Windows is explicitly unsupported until the same link, atomic activation, process, and uninstall semantics can be guaranteed without junction-specific degradation.
+
+### 17.4 One-command installation and setup
+
+Primary installation:
 
 ```bash
-pi install .pi/horsepower/install/current -l
+curl -fsSL \
+  https://raw.githubusercontent.com/LosFurina/horsepower/main/install.sh \
+  | bash
 ```
 
-Project installation metadata and links are machine-local by default and should be ignored by Git unless the project explicitly chooses a portable repository-relative source link.
+Documented inspect-before-execution alternative:
 
-### 17.4 Coexistence
+```bash
+curl -fsSLo /tmp/horsepower-install.sh \
+  https://raw.githubusercontent.com/LosFurina/horsepower/main/install.sh
+less /tmp/horsepower-install.sh
+bash /tmp/horsepower-install.sh
+```
+
+The repository-owned POSIX shell bootstrap:
+
+1. Detects Linux or macOS and checks Node, Pi, `curl`, `tar`, hashing support, and symlink capability.
+2. Resolves the latest stable GitHub Release unless `--version` is supplied.
+3. Downloads the release archive and its checksum asset into a temporary directory.
+4. Verifies SHA-256 before extraction.
+5. Rejects absolute archive paths, path traversal, unexpected top-level entries, and unsafe archived links.
+6. Extracts into a staged directory under `~/.pi/agent/horsepower/versions/`.
+7. Verifies `release-manifest.json`, version agreement, required entry points, executable CLI, and release gates.
+8. Runs pre-activation doctor checks against the staged release.
+9. Atomically creates or switches `current`.
+10. Creates the stable Pi extension, Pi skill, and `~/.local/bin/horsepower` symlinks without overwriting conflicts.
+11. Creates configuration and override directories without copying bundled defaults.
+12. When a controlling terminal is available, opens `/dev/tty` and runs interactive `horsepower setup` through it. This is required because `curl | bash` consumes the script's standard input even in an interactive shell.
+13. When no controlling terminal is available, or with `--no-setup`, skips model configuration and prints the exact follow-up command.
+14. Warns when `~/.local/bin` is not in `PATH` but never modifies shell startup files.
+15. Runs post-install doctor and asks the user to run `/reload` in Pi. If post-install verification fails, it restores any prior `current` target and pre-existing Horsepower-owned links. On a fresh installation it removes newly created links and leaves the staged release inactive for diagnosis.
+
+Supported installer options:
+
+```text
+--version v0.1.0
+--no-setup
+--yes
+--install-root <absolute-path>
+```
+
+`--install-root` is an advanced/testing option. Pi and CLI link locations remain explicit and independently validated; changing the payload root does not permit arbitrary link destinations.
+
+The installer never uses `sudo`, executes release lifecycle scripts, modifies shell startup files, changes project trust, or prints secrets.
+
+The first release supports only global program installation. Projects may use `.pi/horsepower/` for model slots, settings, standards, workflows, personas, memory, and state overrides, but do not receive another program payload or another set of Pi resource links.
+
+### 17.5 Coexistence
 
 Horsepower follows conflict strategy C: it coexists with `pi-team` and existing subagent packages.
 
@@ -746,7 +771,7 @@ Horsepower follows conflict strategy C: it coexists with `pi-team` and existing 
 - Doctor warns that multiple orchestration packages increase model tool-selection burden.
 - The generic `subagent` compatibility alias is disabled by default.
 
-### 17.5 Slot commands
+### 17.6 Slot commands
 
 ```bash
 horsepower slots
@@ -779,7 +804,7 @@ horsepower slot remove vision
 
 Required slots cannot be removed without a replacement.
 
-### 17.6 Standards and personas
+### 17.7 Standards and personas
 
 ```bash
 horsepower standards list
@@ -790,9 +815,9 @@ horsepower persona list
 horsepower persona set startup
 ```
 
-Overrides never mutate package defaults.
+Overrides never mutate bundled defaults.
 
-### 17.7 Doctor
+### 17.8 Doctor
 
 ```bash
 horsepower doctor
@@ -801,7 +826,7 @@ horsepower doctor
 Doctor checks:
 
 - Pi executable and version
-- package payload integrity, stable `current` symlink, and Pi local-package registration
+- active GitHub Release integrity, stable `current` symlink, and all three installed resource/CLI links
 - configuration schemas
 - required slots
 - model registry presence
@@ -812,44 +837,58 @@ Doctor checks:
 - runtime tool exclusion
 - conflicting command/tool registrations
 - leaked absolute development paths or private defaults
-- package/config schema migration requirements
+- release/config schema migration requirements
 
 Doctor never emits API keys.
 
-### 17.8 Update
+### 17.9 Update and rollback
 
 ```bash
 horsepower update
+horsepower update --version v0.2.0
+horsepower rollback
 ```
 
-Update:
+Update uses only GitHub Releases:
 
 1. Backs up user configuration.
-2. Resolves and downloads the target npm release into a new staged version directory without lifecycle scripts.
-3. Verifies package integrity and runs pre-switch doctor checks against the staged payload.
-4. Migrates configuration schemas transactionally while preserving a rollback copy.
-5. Atomically switches `install/current` to the new immutable payload.
-6. Leaves user and project overrides unchanged unless a migration explicitly transforms them.
-7. Runs post-switch doctor.
-8. Rolls the symlink and migrated configuration back if post-switch verification fails.
-9. Retains the immediately previous payload for rollback and prunes older payloads according to an explicit retention setting.
-10. Prints migration and reload instructions.
+2. Resolves the target stable release and downloads its archive and checksum into a temporary directory.
+3. Applies the same checksum, archive-safety, manifest, entry-point, and preflight checks as initial installation.
+4. Extracts the release into a new immutable version directory.
+5. Migrates configuration schemas transactionally while preserving a rollback copy.
+6. Atomically switches `current` to the new release; the Pi and CLI links remain unchanged.
+7. Runs post-activation doctor.
+8. If verification fails, atomically switches `current` back and restores the configuration backup.
+9. Retains the active and immediately previous verified releases by default and safely prunes older managed releases.
+10. Prints migration and `/reload` instructions.
 
-Pi sees the same stable local package source before and after update; Horsepower does not use `pi update` to replace resource files.
+`horsepower rollback` activates the immediately previous verified release. It performs schema downgrade compatibility checks first. If the current configuration cannot be safely consumed by the older release, rollback refuses to activate it and prints recovery guidance rather than forcing a downgrade.
 
-### 17.9 Uninstall
+A GitHub API rate-limit or network failure leaves the current release untouched. Supplying `--version` permits direct resolution of a known release but never bypasses checksum or manifest verification.
+
+### 17.10 Uninstall
 
 ```bash
 horsepower uninstall
 ```
 
-Removes the stable local package registration and Horsepower-owned symlinks and managed version payloads, but preserves user configuration, overrides, and memory. It never follows a symlink while deleting; deletion is limited to verified Horsepower-owned link entries and managed version directories.
+Uninstall removes only verified Horsepower-owned entries:
+
+```text
+~/.pi/agent/extensions/horsepower
+~/.pi/agent/skills/horsepower
+~/.local/bin/horsepower
+~/.pi/agent/horsepower/current
+~/.pi/agent/horsepower/versions/
+```
+
+It preserves model slots, settings, user overrides, memory, and workflow state. Deletion uses `lstat` semantics and never follows symlinks. If an expected link has become a regular file, directory, or unrelated link, uninstall refuses to delete it and reports the path for manual review.
 
 ```bash
 horsepower uninstall --purge
 ```
 
-Also removes Horsepower-owned configuration after explicit confirmation. Non-interactive purge requires `--yes`.
+Purge also removes Horsepower-owned configuration, overrides, memory, and state after explicit confirmation. Non-interactive purge requires `--yes`.
 
 ## 18. CLI implementation and safety
 
@@ -857,8 +896,9 @@ The CLI is Node-based and distributed as built JavaScript under `dist/`. The Pi 
 
 The CLI must:
 
-- install resources by soft link only; never copy package resources into Pi resource or override directories
-- validate link targets remain inside a verified Horsepower package payload or an explicitly supplied development checkout
+- install resources by soft link only; never copy bundled resources into Pi resource or override directories
+- validate link targets remain inside a verified GitHub Release payload
+- verify release checksums, archive paths, manifest identity, and entry points before activation
 - switch `current` atomically and preserve rollback targets
 - never follow symlinks during uninstall or purge deletion
 - edit JSON transactionally using temp file, fsync where practical, and atomic rename
@@ -867,7 +907,7 @@ The CLI must:
 - never print keys, auth headers, or secret values
 - never modify `models.json` providers
 - never enable project trust automatically
-- never silently uninstall another package
+- never invoke Pi package installation/update or silently uninstall another package
 - never overwrite user standards/personas/workflows
 - provide deterministic non-interactive flags for CI
 
@@ -902,7 +942,9 @@ horsepower/
     reference/
     superpowers/specs/
   scripts/
-  package.json
+  install.sh
+  package.json                 # private: true; build metadata only
+  release-manifest.json
   tsconfig.json
   vitest.config.ts
   README.md
@@ -976,14 +1018,23 @@ README must state these limitations plainly.
 - usage/cost event projection
 - post-workflow conversation without changing terminal run state
 
-### 21.4 CLI tests
+### 21.4 Installer and CLI tests
 
-- clean global symlink setup
-- local symlink setup
-- development source link setup
-- existing installation and idempotent link registration
+- clean global installation from a mock GitHub Release
+- repeated installation and idempotent Horsepower-owned link handling
+- explicit version installation
+- stable extension, skill, and CLI symlink creation
+- conflicting regular files, directories, and unrelated symlinks are never overwritten
 - unavailable symlink permission fails without copying
-- atomic update link switch and rollback
+- checksum mismatch and corrupt manifest rejection
+- release tag, archive name, checksum, and manifest version disagreement
+- absolute paths, path traversal, unexpected roots, and unsafe archived links
+- atomic activation and failed-update rollback
+- `/dev/tty` interactive setup after piped bootstrap execution
+- no-controlling-terminal and `--no-setup` behavior
+- warning when `~/.local/bin` is absent from `PATH`
+- retention of active and previous verified releases
+- schema-compatible rollback and incompatible downgrade refusal
 - uninstall never follows malicious or unexpected links
 - coexistence with `pi-team` and generic subagent packages
 - interactive and non-interactive slot configuration
@@ -991,25 +1042,26 @@ README must state these limitations plainly.
 - uninstall and purge
 - no-secret output snapshots
 - paths containing spaces
-- npm/Pi command failure handling
+- GitHub API, download, hashing, and Pi executable failure handling
 
 ### 21.5 Release gates
 
 - formatting and typecheck
 - all automated tests
-- package tarball inspection
+- GitHub Release archive and checksum inspection
+- `release-manifest.json` validation
 - no private model/provider/path scan
-- clean temporary Pi agent directory install
-- `pi -e` smoke test
-- stable local-package symlink registration smoke test
-- setup/doctor/update/uninstall acceptance
-- Linux and macOS CI; Windows where Pi process semantics permit
+- clean temporary HOME and Pi agent directory installation through `install.sh`
+- `pi -e` extension-loading smoke test through direct resource symlinks
+- setup/doctor/update/rollback/uninstall acceptance
+- Linux and macOS CI
+- explicit unsupported-platform failure on Windows
 
 ## 22. Version plan
 
 ### `0.1.0-alpha.1`
 
-- package skeleton
+- private Node project and GitHub Release skeleton
 - model slots
 - CLI setup/configure/set/slots/doctor
 - persistent RPC runtime
@@ -1040,7 +1092,7 @@ README must state these limitations plainly.
 - debate/fanout proposals
 - model-based synthesis via explicit dispatch
 - proactive probes
-- CLI update and migrations
+- CLI GitHub Release update, rollback, and migrations
 
 ### `0.1.0`
 
@@ -1048,8 +1100,8 @@ README must state these limitations plainly.
 - clean-machine acceptance
 - English and Chinese documentation
 - public GitHub repository
-- npm package
-- Pi Gallery metadata
+- repository-owned `install.sh`
+- verified GitHub Release archive and checksum workflow
 
 ## 23. Licensing and acknowledgements
 
@@ -1063,7 +1115,7 @@ AgentFlow resources incorporated from `LosFurina/agentflow-codex` are owned by t
 
 Horsepower is ready for `0.1.0` when:
 
-- A user can install and initialize with one command using a stable soft-linked local package and no copied Pi resources.
+- A user can install and initialize with the documented GitHub `curl` command using a verified Release and no copied Pi resources.
 - A user can map three required slots and optionally add speed, context, or custom slots.
 - The captain must explicitly select a slot and worker for every dispatch.
 - Two or more explicitly named workers can run concurrently without implicit expansion.
@@ -1073,5 +1125,5 @@ Horsepower is ready for `0.1.0` when:
 - AgentFlow phases, standards, gates, personas, archive, and guard work without creating workers automatically.
 - TUI and machine-readable events reflect the same runtime state.
 - Horsepower coexists with `pi-team` without tool or command collision.
-- Public package contents contain no private agents, model mappings, credentials, or machine paths.
+- Public repository and Release contents contain no private agents, model mappings, credentials, or machine paths.
 - Fresh-install, update, and uninstall acceptance tests pass.
