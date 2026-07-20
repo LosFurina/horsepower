@@ -548,7 +548,7 @@ Precedence:
 project override > global override > package default
 ```
 
-Defaults stay in the npm package and update with package versions. Setup does not copy all defaults into user configuration. This prevents updates from overwriting user changes.
+Defaults stay in the installed package and update with package versions. Setup never copies package resources into Pi's `extensions/`, `skills/`, `prompts/`, or Horsepower override directories. Pi loads them through the installed package symlink. This prevents resource duplication and updates from overwriting user changes.
 
 ### 13.3 Resolver
 
@@ -644,7 +644,48 @@ Pi package source: npm:@losfurina/horsepower
 
 The npm package includes the `pi-package` keyword and Pi manifest for Gallery discovery.
 
-### 17.2 One-command setup
+### 17.2 Symlink installation model
+
+Horsepower uses one durable package payload and soft links it into Pi's package discovery path. It never copies extension, skill, standard, persona, prompt, or workflow files into Pi resource directories.
+
+Global layout:
+
+```text
+~/.pi/agent/horsepower/
+  install/
+    versions/
+      0.1.0/
+        package/                  # one unpacked, immutable package payload
+    current -> versions/0.1.0/package
+  model-slots.json
+  settings.json
+  standards/                     # user overrides only
+  workflows/                     # user overrides only
+  personas/                      # user overrides only
+  memory/
+```
+
+Pi registers the stable local package link:
+
+```bash
+pi install ~/.pi/agent/horsepower/install/current
+```
+
+The package manifest under `current` exposes Horsepower's extension and packaged resources. No links or copies are created under `~/.pi/agent/extensions/`, `skills/`, or `prompts/`.
+
+A version payload is immutable after installation. Update stages a new version directory, verifies it, creates a temporary symlink, and atomically renames that link to `current`. If verification or link switching fails, `current` continues pointing at the prior version.
+
+Horsepower does not silently fall back to copying when symlink creation is unavailable. It reports the exact platform or permission requirement. On Windows, setup uses a directory symbolic link or junction only when its semantics pass doctor checks; otherwise setup fails with guidance rather than changing installation strategy.
+
+Development setup may point `current` directly at a local checkout:
+
+```bash
+horsepower setup --source /absolute/path/to/horsepower
+```
+
+This creates a soft link and does not duplicate the checkout.
+
+### 17.3 One-command setup
 
 ```bash
 npx @losfurina/horsepower setup
@@ -653,16 +694,19 @@ npx @losfurina/horsepower setup
 Setup:
 
 1. Detect Node and Pi.
-2. Verify compatible versions.
-3. Run `pi install npm:@losfurina/horsepower` unless already installed.
-4. Create the Horsepower configuration directory.
-5. Discover available Pi models without reading or printing API keys.
-6. Prompt for required slots and optional slots.
-7. Validate selected model IDs and thinking levels where possible.
-8. Initialize settings, schema versions, optional overrides, workflow state, and memory files.
-9. Detect conflicting tools or commands and report them without removing packages.
-10. Run `horsepower doctor`.
-11. Ask the user to run `/reload`.
+2. Verify compatible versions and symlink capability.
+3. Download and unpack exactly one immutable Horsepower package payload into a staged version directory without running lifecycle scripts.
+4. Verify package integrity, manifest, version, and private-data release gates.
+5. Atomically create or switch `install/current` to the verified payload.
+6. Register the stable local package link with `pi install <current-link>` unless already registered.
+7. Create Horsepower configuration and override directories; do not populate override directories with package defaults.
+8. Discover available Pi models without reading or printing API keys.
+9. Prompt for required slots and optional slots.
+10. Validate selected model IDs and thinking levels where possible.
+11. Initialize settings, schema versions, workflow state, and memory files.
+12. Detect conflicting tools or commands and report them without removing packages.
+13. Run `horsepower doctor`.
+14. Ask the user to run `/reload`.
 
 Local setup:
 
@@ -670,9 +714,30 @@ Local setup:
 npx @losfurina/horsepower setup --local
 ```
 
-This uses `pi install npm:@losfurina/horsepower -l` and `.pi/horsepower/`.
+Project layout:
 
-### 17.3 Coexistence
+```text
+.pi/horsepower/
+  install/
+    versions/<version>/package/
+    current -> versions/<version>/package
+  model-slots.json
+  settings.json
+  standards/
+  workflows/
+  personas/
+  memory/
+```
+
+It registers the stable link with:
+
+```bash
+pi install .pi/horsepower/install/current -l
+```
+
+Project installation metadata and links are machine-local by default and should be ignored by Git unless the project explicitly chooses a portable repository-relative source link.
+
+### 17.4 Coexistence
 
 Horsepower follows conflict strategy C: it coexists with `pi-team` and existing subagent packages.
 
@@ -681,7 +746,7 @@ Horsepower follows conflict strategy C: it coexists with `pi-team` and existing 
 - Doctor warns that multiple orchestration packages increase model tool-selection burden.
 - The generic `subagent` compatibility alias is disabled by default.
 
-### 17.4 Slot commands
+### 17.5 Slot commands
 
 ```bash
 horsepower slots
@@ -714,7 +779,7 @@ horsepower slot remove vision
 
 Required slots cannot be removed without a replacement.
 
-### 17.5 Standards and personas
+### 17.6 Standards and personas
 
 ```bash
 horsepower standards list
@@ -727,7 +792,7 @@ horsepower persona set startup
 
 Overrides never mutate package defaults.
 
-### 17.6 Doctor
+### 17.7 Doctor
 
 ```bash
 horsepower doctor
@@ -736,7 +801,7 @@ horsepower doctor
 Doctor checks:
 
 - Pi executable and version
-- package installation
+- package payload integrity, stable `current` symlink, and Pi local-package registration
 - configuration schemas
 - required slots
 - model registry presence
@@ -751,7 +816,7 @@ Doctor checks:
 
 Doctor never emits API keys.
 
-### 17.7 Update
+### 17.8 Update
 
 ```bash
 horsepower update
@@ -760,20 +825,25 @@ horsepower update
 Update:
 
 1. Backs up user configuration.
-2. Runs `pi update npm:@losfurina/horsepower`.
-3. Migrates configuration schemas transactionally.
-4. Leaves user and project overrides unchanged unless a migration explicitly transforms them.
-5. Updates package defaults naturally through npm.
-6. Runs doctor.
-7. Prints migration and reload instructions.
+2. Resolves and downloads the target npm release into a new staged version directory without lifecycle scripts.
+3. Verifies package integrity and runs pre-switch doctor checks against the staged payload.
+4. Migrates configuration schemas transactionally while preserving a rollback copy.
+5. Atomically switches `install/current` to the new immutable payload.
+6. Leaves user and project overrides unchanged unless a migration explicitly transforms them.
+7. Runs post-switch doctor.
+8. Rolls the symlink and migrated configuration back if post-switch verification fails.
+9. Retains the immediately previous payload for rollback and prunes older payloads according to an explicit retention setting.
+10. Prints migration and reload instructions.
 
-### 17.8 Uninstall
+Pi sees the same stable local package source before and after update; Horsepower does not use `pi update` to replace resource files.
+
+### 17.9 Uninstall
 
 ```bash
 horsepower uninstall
 ```
 
-Removes the Pi package but preserves user configuration and memory.
+Removes the stable local package registration and Horsepower-owned symlinks and managed version payloads, but preserves user configuration, overrides, and memory. It never follows a symlink while deleting; deletion is limited to verified Horsepower-owned link entries and managed version directories.
 
 ```bash
 horsepower uninstall --purge
@@ -787,6 +857,10 @@ The CLI is Node-based and distributed as built JavaScript under `dist/`. The Pi 
 
 The CLI must:
 
+- install resources by soft link only; never copy package resources into Pi resource or override directories
+- validate link targets remain inside a verified Horsepower package payload or an explicitly supplied development checkout
+- switch `current` atomically and preserve rollback targets
+- never follow symlinks during uninstall or purge deletion
 - edit JSON transactionally using temp file, fsync where practical, and atomic rename
 - preserve unknown settings fields
 - create backups before migrations
@@ -904,9 +978,13 @@ README must state these limitations plainly.
 
 ### 21.4 CLI tests
 
-- clean global setup
-- local setup
-- existing installation
+- clean global symlink setup
+- local symlink setup
+- development source link setup
+- existing installation and idempotent link registration
+- unavailable symlink permission fails without copying
+- atomic update link switch and rollback
+- uninstall never follows malicious or unexpected links
 - coexistence with `pi-team` and generic subagent packages
 - interactive and non-interactive slot configuration
 - update migration and rollback
@@ -923,7 +1001,7 @@ README must state these limitations plainly.
 - no private model/provider/path scan
 - clean temporary Pi agent directory install
 - `pi -e` smoke test
-- `pi install` smoke test
+- stable local-package symlink registration smoke test
 - setup/doctor/update/uninstall acceptance
 - Linux and macOS CI; Windows where Pi process semantics permit
 
@@ -985,7 +1063,7 @@ AgentFlow resources incorporated from `LosFurina/agentflow-codex` are owned by t
 
 Horsepower is ready for `0.1.0` when:
 
-- A user can install and initialize with one command.
+- A user can install and initialize with one command using a stable soft-linked local package and no copied Pi resources.
 - A user can map three required slots and optionally add speed, context, or custom slots.
 - The captain must explicitly select a slot and worker for every dispatch.
 - Two or more explicitly named workers can run concurrently without implicit expansion.
