@@ -5,7 +5,7 @@
 
 ## 2. Model and Agent Configuration
 
-- [ ] 2.1 Implement capability-slot schema, required slots, custom IDs, project-over-global precedence, built-in fallbacks, cycle detection, model/thinking bindings through `max`, and deterministic revision hashing; verify all resolution and validation cases.
+- [x] 2.1 Implement capability-slot schema, required slots, custom IDs, project-over-global precedence, built-in fallbacks, cycle detection, model/thinking bindings through `max`, and deterministic revision hashing; verify all resolution and validation cases.
 - [ ] 2.2 Implement deterministic bundled/global/project agent discovery with model-neutral frontmatter, short bundled roles, precedence, safe tool allowlists, and rejection of concrete model bindings; verify neutrality and private-data scans.
 
 ## 3. Worker Runtime
