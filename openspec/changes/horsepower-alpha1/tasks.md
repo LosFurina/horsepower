@@ -11,7 +11,7 @@
 ## 3. Worker Runtime
 
 - [x] 3.1 Implement safe Pi argv construction and LF JSONL RPC transport with UTF-8 chunk framing, request correlation, bounded stderr, delegation-tool exclusion, `shell: false`, and close/error rejection; verify fragmented and out-of-order protocol cases.
-- [ ] 3.2 Implement the byte-bounded cursor event stream and persistent worker manager covering create, initial send, send, wait, follow-up, steer, semantic abort, status, read, list, destroy, destroy-all, eight-worker limit, prompt cleanup, retries, crashes, timeouts, and forced shutdown; verify all lifecycle cases with fake RPC children.
+- [x] 3.2 Implement the byte-bounded cursor event stream and persistent worker manager covering create, initial send, send, wait, follow-up, steer, semantic abort, status, read, list, destroy, destroy-all, eight-worker limit, prompt cleanup, retries, crashes, timeouts, and forced shutdown; verify all lifecycle cases with fake RPC children.
 - [ ] 3.3 Implement explicit one-shot `single`, `parallel`, and `chain` execution with required slots, eight-task input limit, four-child concurrency, prior-output substitution, abort escalation, usage capture, and 50 KiB display truncation; verify no implicit expansion or nested delegation.
 
 ## 4. OpenSpec Boundary and Pi Extension
