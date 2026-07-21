@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, readlink, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { readJsonObject, writeJsonObject, type JsonObject } from "../config/json-store.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
 import { parseWebhookSettings, redactCredentials } from "../config/webhook.js";
@@ -85,6 +85,32 @@ function installTopology(home: string) {
     { path: join(home, ".local", "bin", "horsepower"), target: join(root, "current", "bin", "horsepower") },
   ] };
 }
+async function verifyNoSymlinkPath(root: string, candidate: string, finalType: "directory" | "file"): Promise<void> {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = resolve(candidate);
+  const pathFromRoot = relative(resolvedRoot, resolvedCandidate);
+  if (pathFromRoot === "" || pathFromRoot.startsWith(`..${sep}`) || pathFromRoot === ".." || isAbsolute(pathFromRoot)) {
+    throw new Error(`Unsafe managed path: ${resolvedCandidate}`);
+  }
+  let current = resolvedRoot;
+  const components = pathFromRoot.split(sep);
+  for (let index = 0; index < components.length; index += 1) {
+    current = join(current, components[index]!);
+    const info = await lstat(current);
+    if (info.isSymbolicLink()) throw new Error(`Refusing symbolic link in managed path: ${current}`);
+    const final = index === components.length - 1;
+    if ((!final || finalType === "directory") && !info.isDirectory()) throw new Error(`Expected managed directory: ${current}`);
+    if (final && finalType === "file" && !info.isFile()) throw new Error(`Expected managed regular file: ${current}`);
+  }
+}
+
+async function readManagedManifest(release: string): Promise<JsonObject> {
+  const manifestPath = join(release, "release-manifest.json");
+  await verifyNoSymlinkPath(dirname(release), release, "directory");
+  await verifyNoSymlinkPath(release, manifestPath, "file");
+  return readJsonObject(manifestPath);
+}
+
 async function managedRootState(root: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
   try { const info = await lstat(root); return info.isDirectory() && !info.isSymbolicLink() ? { status: "owned" } : { status: "conflict", message: `Refusing unowned Horsepower root: ${root}` }; }
   catch (cause) { if (absent(cause)) return { status: "absent" }; throw cause; }
@@ -108,11 +134,10 @@ async function currentState(root: string, current: string): Promise<{ status: "a
       return { status: "conflict", message: `Refusing unmanaged current target: ${current}` };
     }
     const versionsInfo = await lstat(versions);
-    const releaseInfo = await lstat(resolved);
-    if (!versionsInfo.isDirectory() || versionsInfo.isSymbolicLink() || !releaseInfo.isDirectory() || releaseInfo.isSymbolicLink()) {
+    if (!versionsInfo.isDirectory() || versionsInfo.isSymbolicLink()) {
       return { status: "conflict", message: `Refusing unmanaged current target: ${current}` };
     }
-    const manifest = await readJsonObject(join(resolved, "release-manifest.json"));
+    const manifest = await readManagedManifest(resolved);
     if (manifest.version !== name.slice(1)) return { status: "conflict", message: `Refusing current target with mismatched manifest: ${current}` };
     return { status: "owned" };
   } catch (cause) {
@@ -120,7 +145,7 @@ async function currentState(root: string, current: string): Promise<{ status: "a
       try { await lstat(current); } catch (currentCause) { if (absent(currentCause)) return { status: "absent" }; }
       return { status: "conflict", message: `Refusing dangling current target: ${current}` };
     }
-    if (cause instanceof Error && cause.message.startsWith("Malformed JSON")) {
+    if (cause instanceof Error && (cause.message.startsWith("Malformed JSON") || cause.message.includes("managed") || cause.message.includes("symbolic link"))) {
       return { status: "conflict", message: `Refusing current target with invalid manifest: ${current}` };
     }
     throw cause;
@@ -133,7 +158,7 @@ async function versionsState(versions: string): Promise<{ status: "absent" | "ow
     for (const name of await readdir(versions)) {
       const release = join(versions, name); const info = await lstat(release);
       if (!name.startsWith("v") || !releaseVersion.test(name.slice(1)) || !info.isDirectory() || info.isSymbolicLink()) return { status: "conflict", message: `Refusing unmanaged version: ${release}` };
-      try { const manifest = await readJsonObject(join(release, "release-manifest.json")); if (`v${String(manifest.version)}` !== name) throw new Error(); }
+      try { const manifest = await readManagedManifest(release); if (`v${String(manifest.version)}` !== name) throw new Error(); }
       catch { return { status: "conflict", message: `Refusing version without matching manifest: ${release}` }; }
     }
     return { status: "owned" };
@@ -209,16 +234,24 @@ export function createCli(options: CliOptions) {
       if (parsed.switches.has("change") && parsed.switches.has("no-change")) throw new UsageError("Choose --change or --no-change");
       if (parsed.switches.has("dispatch") && parsed.switches.has("no-dispatch")) throw new UsageError("Choose --dispatch or --no-dispatch");
       const url = parsed.values.get("url"), mode = parsed.values.get("auth"); if (!url || !mode) throw new UsageError("webhook configure requires --url and --auth");
-      try { const parsedUrl = new URL(url); if (parsedUrl.protocol !== "https:" && parsedUrl.hostname !== "localhost" && parsedUrl.hostname !== "127.0.0.1") throw new Error(); } catch { throw new UsageError("Webhook URL must be HTTPS (localhost is allowed for testing)"); }
-      let auth: WebhookAuth; if (mode === "hmac") { const secret = parsed.values.get("secret"); if (!secret) throw new UsageError("HMAC authentication requires --secret"); auth = { mode, secret }; }
-      else if (mode === "bearer") { const token = parsed.values.get("token"); if (!token) throw new UsageError("Bearer authentication requires --token"); auth = { mode, token }; }
-      else if (mode === "none") auth = { mode }; else throw new UsageError(`Invalid webhook auth mode: ${mode}`);
+      try {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.username || parsedUrl.password) throw new UsageError("Webhook URL must not contain credentials");
+        if (parsedUrl.protocol !== "https:" && parsedUrl.hostname !== "localhost" && parsedUrl.hostname !== "127.0.0.1") throw new Error();
+      } catch (cause) {
+        if (cause instanceof UsageError) throw cause;
+        throw new UsageError("Webhook URL must be HTTPS (localhost is allowed for testing)");
+      }
+      const secret = parsed.values.get("secret"), token = parsed.values.get("token");
+      let auth: WebhookAuth; if (mode === "hmac") { if (!secret) throw new UsageError("HMAC authentication requires --secret"); if (token) throw new UsageError("HMAC authentication does not accept --token"); auth = { mode, secret }; }
+      else if (mode === "bearer") { if (!token) throw new UsageError("Bearer authentication requires --token"); if (secret) throw new UsageError("Bearer authentication does not accept --secret"); auth = { mode, token }; }
+      else if (mode === "none") { if (secret || token) throw new UsageError("None authentication does not accept --secret or --token"); auth = { mode }; } else throw new UsageError(`Invalid webhook auth mode: ${mode}`);
       const current = await optionalObject(paths.global.settings); const previous = object(current.webhook);
       const next = { ...current, webhook: { ...previous, enabled: true, url, notifications: { change: parsed.switches.has("no-change") ? false : parsed.switches.has("change") ? true : object(previous.notifications).change ?? true, dispatch: parsed.switches.has("dispatch") ? true : parsed.switches.has("no-dispatch") ? false : object(previous.notifications).dispatch ?? false }, auth } };
       await writeJsonObject(paths.global.settings, next); return { data: redactSettings(next), message: "Webhook configured" };
     }
     if (action === "test") {
-      only(parsed, [], []); const settings = await optionalObject(paths.global.settings); const parsedSettings = parseWebhookSettings(settings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");
+      only(parsed, [], []); const globalSettings = await optionalObject(paths.global.settings); const projectSettings = await optionalObject(paths.project.settings); const parsedSettings = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");
       const notifier = createWebhookNotifier({ config: parsedSettings.config, ...(options.fetch ? { fetch: options.fetch } : {}), retryDelaysMs: [0] });
       const result = await notifier.notify({ eventId: randomUUID(), timestamp: (options.now ?? (() => new Date()))().toISOString(), scope: "change", runId: "cli-webhook-test", status: "completed", summary: "webhook test", evidenceRefs: [] }); notifier.abandon();
       if (!result.delivered) throw new Error(result.error ?? "Webhook delivery failed"); return { data: result, message: "Webhook delivered" };
@@ -242,9 +275,10 @@ export function createCli(options: CliOptions) {
   async function doctor(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []); const checks: Array<Record<string, unknown>> = [];
     try { const data = await slotsData(); checks.push({ id: "configuration", status: "ok", message: `Slots revision ${data.revision}` }); } catch (cause) { checks.push({ id: "configuration", status: "error", message: (cause as Error).message, action: "Run horsepower setup" }); }
-    const settings = await optionalObject(paths.global.settings);
+    const globalSettings = await optionalObject(paths.global.settings);
+    const projectSettings = await optionalObject(paths.project.settings);
     try {
-      const configured = parseWebhookSettings(settings.webhook);
+      const configured = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook);
       checks.push(configured ? { id: "notification", status: "ok", message: `Webhook enabled (${configured.config.auth.mode})` } : { id: "notification", status: "skipped", message: "Webhook disabled" });
     } catch (cause) {
       checks.push({ id: "notification", status: "error", message: (cause as Error).message, action: "Run horsepower webhook configure or webhook disable" });
@@ -255,9 +289,11 @@ export function createCli(options: CliOptions) {
   async function preflight(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["version"], []); const staged = parsed.positionals[0], expected = parsed.values.get("version"); if (!staged || parsed.positionals.length !== 1 || !expected) throw new UsageError("preflight requires STAGED_ROOT --version VERSION");
     if (options.platform !== "linux" && options.platform !== "darwin") throw new Error(`Unsupported platform: ${options.platform}`);
-    const root = resolve(staged); const stagedInfo = await lstat(root).catch(() => undefined); if (!stagedInfo?.isDirectory() || stagedInfo.isSymbolicLink()) throw new Error(`Invalid staged release root: ${root}`); let manifest: JsonObject; try { manifest = await readJsonObject(join(root, "release-manifest.json")); } catch (cause) { throw new Error(`Invalid staged release: ${(cause as Error).message}`); }
+    if (!releaseVersion.test(expected)) throw new UsageError(`Invalid release version: ${expected}`);
+    const root = resolve(staged); const stagedInfo = await lstat(root).catch(() => undefined); if (!stagedInfo?.isDirectory() || stagedInfo.isSymbolicLink()) throw new Error(`Invalid staged release root: ${root}`); let manifest: JsonObject; try { manifest = await readManagedManifest(root); } catch (cause) { throw new Error(`Invalid staged release: ${(cause as Error).message}`); }
+    if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid staged manifest version");
     if (manifest.version !== expected) throw new Error(`Staged manifest version mismatch: expected ${expected}`); const entries = object(manifest.entryPoints);
-    for (const [name, expectedPath] of Object.entries({ cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" })) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); const info = await lstat(join(root, candidate)).catch(() => undefined); if (!info?.isFile() || info.isSymbolicLink()) throw new Error(`Missing staged ${name}: ${candidate}`); }
+    for (const [name, expectedPath] of Object.entries({ cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" })) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); try { await verifyNoSymlinkPath(root, join(root, candidate), "file"); } catch { throw new Error(`Missing staged ${name}: ${candidate}`); } }
     const managedRoot = await managedRootState(topology.root); if (managedRoot.status === "conflict") throw new Error(managedRoot.message ?? "Installation ownership conflict");
     const current = await currentState(topology.root, topology.current); const links = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); const conflict = [current, ...links].find((state) => state.status === "conflict"); if (conflict) throw new Error(conflict.message ?? "Installation ownership conflict");
     return { data: { eligible: true, root, version: expected }, message: "Staged release eligible" };
@@ -274,10 +310,13 @@ export function createCli(options: CliOptions) {
   return { async run(argv: readonly string[]): Promise<CliResult> {
     let machine = argv.includes("--json");
     try {
-      const command = argv[0]; if (!command || command.startsWith("--")) throw new UsageError("A command is required"); const parsed = flags(argv.slice(1)); machine = parsed.switches.has("json"); let result: CommandResult;
+      const jsonCount = argv.filter((argument) => argument === "--json").length;
+      if (jsonCount > 1) throw new UsageError("Duplicate option: --json");
+      const normalizedArgv = argv.filter((argument) => argument !== "--json");
+      const command = normalizedArgv[0]; if (!command || command.startsWith("--")) throw new UsageError("A command is required"); const parsed = flags([...normalizedArgv.slice(1), ...(machine ? ["--json"] : [])]); machine = parsed.switches.has("json"); let result: CommandResult;
       if (command === "setup") result = await setup(parsed); else if (command === "configure") result = await configure(parsed); else if (command === "slots") { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); result = { data: await slotsData() }; }
       else if (command === "set") result = await setSlot(parsed); else if (command === "unset") result = await unsetSlot(parsed); else if (command === "webhook") result = await webhook(parsed); else if (command === "doctor") result = await doctor(parsed); else if (command === "preflight") result = await preflight(parsed); else if (command === "uninstall") result = await uninstall(parsed); else if (command === "purge") result = await purge(parsed); else throw new UsageError(`Unknown command: ${command}`);
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1); return machine ? { exitCode, stdout: json({ data: result.data, ok }), stderr: "" } : { exitCode, stdout: `${result.message ?? (ok ? "OK" : "FAILED")}\n`, stderr: "" };
-    } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const message = cause instanceof Error ? cause.message : "Unknown error"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code: usage ? "USAGE" : "FAILED", message }, ok: false }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}\n` }; }
+    } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const message = String(redactCredentials(rawMessage)); return machine ? { exitCode, stdout: "", stderr: json({ error: { code: usage ? "USAGE" : "FAILED", message }, ok: false }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}\n` }; }
   } };
 }

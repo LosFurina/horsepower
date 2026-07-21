@@ -56,8 +56,18 @@ test("strictly parses commands and emits deterministic JSON with stable exit cod
   expect((await run(setupArgs)).stdout).toBe((await run(setupArgs)).stdout);
   expect((await run(["slots", "--bogus"]))).toMatchObject({ exitCode: 2 });
   expect((await run(["slots", "--json", "--json"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["--json", "slots"]))).toMatchObject({ exitCode: 0, stderr: "" });
+  expect((await run(["webhook", "--json", "configure", "--url", "https://example.test", "--auth", "none"]))).toMatchObject({ exitCode: 0, stderr: "" });
   expect((await run(["webhook", "configure", "--url", "https://example.test", "--auth", "none", "--change", "--no-change", "--json"]))).toMatchObject({ exitCode: 2 });
   expect((await run(["webhook", "configure", "--url", "https://example.test", "--auth", "none", "--dispatch", "--no-dispatch", "--json"]))).toMatchObject({ exitCode: 2 });
+  for (const incompatible of [
+    ["--auth", "none", "--secret", "secret-byte"],
+    ["--auth", "none", "--token", "token-byte"],
+    ["--auth", "hmac", "--secret", "secret-byte", "--token", "token-byte"],
+    ["--auth", "bearer", "--token", "token-byte", "--secret", "secret-byte"],
+  ]) {
+    expect((await run(["webhook", "configure", "--url", "https://example.test", ...incompatible, "--json"]))).toMatchObject({ exitCode: 2 });
+  }
 });
 
 test("setup initializes missing private files and later writes preserve unknown fields", async () => {
@@ -167,6 +177,68 @@ test("webhook diagnostics recursively redact malformed and future credential fie
   expect(notification).toMatchObject({ status: "error", action: expect.stringContaining("webhook configure") });
 });
 
+test("webhook diagnostics redact every primitive in malformed authentication structures and URL userinfo", async () => {
+  const { homeDir, run } = await harness();
+  await run(setupArgs);
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const secrets = ["array-secret", "object-secret", "bad-mode-secret", "url-user", "url-password"];
+  await writeFile(settingsPath, JSON.stringify({
+    webhook: {
+      enabled: true,
+      url: `https://${secrets[3]}:${secrets[4]}@example.test/hook`,
+      authentication: {
+        mode: secrets[2],
+        unknown: [secrets[0], { future: secrets[1] }],
+      },
+    },
+  }));
+  for (const args of [["configure", "--json"], ["doctor", "--json"], ["webhook", "test", "--json"]]) {
+    const output = await run(args);
+    for (const secret of secrets) expect(output.stdout + output.stderr).not.toContain(secret);
+  }
+
+  const attempted = await run(["webhook", "configure", "--url", "https://url-user:url-password@example.test/hook", "--auth", "none", "--json"]);
+  expect(attempted).toMatchObject({ exitCode: 2 });
+  expect(attempted.stderr).not.toContain("url-user");
+  expect(attempted.stderr).not.toContain("url-password");
+});
+
+test("doctor and webhook test use effective project-over-global webhook settings", async () => {
+  const requests: Array<{ url: string; authorization: string | null }> = [];
+  const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    requests.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization") });
+    return new Response(null, { status: 204 });
+  });
+  const { homeDir, cwd, run } = await harness({ fetch });
+  await run(setupArgs);
+  const globalPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const projectPath = join(cwd, ".pi/horsepower/settings.json");
+  await mkdir(dirname(projectPath), { recursive: true });
+  await writeFile(globalPath, JSON.stringify({ webhook: { enabled: true, url: "https://global.test/hook", auth: { mode: "bearer", token: "global-token" }, future: { safe: true } } }));
+  await writeFile(projectPath, JSON.stringify({ webhook: { url: "https://project.test/hook", auth: { mode: "bearer", token: "project-token" }, unknown: ["safe-label"] } }));
+
+  expect((await run(["webhook", "test", "--json"])).exitCode).toBe(0);
+  expect(requests).toEqual([{ url: "https://project.test/hook", authorization: "Bearer project-token" }]);
+
+  await writeFile(projectPath, JSON.stringify({ webhook: { enabled: false, unknown: { keep: true } } }));
+  const disabledChecks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
+  expect(disabledChecks.find((check: { id: string }) => check.id === "notification")).toMatchObject({ status: "skipped" });
+
+  for (const auth of [
+    { mode: "hmac", secret: ["malformed-project-secret"] },
+    { mode: "none", secret: "incompatible-project-secret" },
+    { mode: "hmac", secret: "valid-secret", token: "incompatible-project-token" },
+  ]) {
+    await writeFile(projectPath, JSON.stringify({ webhook: { enabled: true, auth } }));
+    const invalid = await run(["doctor", "--json"]);
+    expect(invalid.exitCode).toBe(1);
+    expect(invalid.stdout + invalid.stderr).not.toContain("malformed-project-secret");
+    expect(invalid.stdout + invalid.stderr).not.toContain("incompatible-project-secret");
+    expect(invalid.stdout + invalid.stderr).not.toContain("incompatible-project-token");
+    expect(JSON.parse(invalid.stdout).data.checks.find((check: { id: string }) => check.id === "notification")).toMatchObject({ status: "error" });
+  }
+});
+
 test("webhook test sends HMAC and Bearer authentication headers", async () => {
   const requests: RequestInit[] = [];
   const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => { requests.push(init ?? {}); return new Response(null, { status: 204 }); });
@@ -256,6 +328,34 @@ test("staged-release preflight validates manifest, version, layout, and current/
   expect(await run(["preflight", staged, "--version", "0.1.0-alpha.1", "--json"])).toMatchObject({ exitCode: 1 });
 });
 
+test("preflight rejects symlinked manifests, intermediate directories, and invalid semver", async () => {
+  for (const hostile of ["manifest", "intermediate", "expected-version", "manifest-version"] as const) {
+    const { root, run } = await harness();
+    const staged = join(root, `staged-${hostile}`);
+    for (const path of ["bin/horsepower", "pi/extensions/horsepower/index.js", "pi/skills/horsepower/SKILL.md"]) {
+      await mkdir(dirname(join(staged, path)), { recursive: true });
+      await writeFile(join(staged, path), "ok");
+    }
+    const manifest = { version: hostile === "manifest-version" ? "01.0.0" : "0.1.0", entryPoints: { cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" } };
+    if (hostile === "manifest") {
+      const external = join(root, "external-manifest.json");
+      await writeFile(external, JSON.stringify(manifest));
+      await symlink(external, join(staged, "release-manifest.json"));
+    } else {
+      await writeFile(join(staged, "release-manifest.json"), JSON.stringify(manifest));
+    }
+    if (hostile === "intermediate") {
+      const externalBin = join(root, "external-bin");
+      await mkdir(externalBin);
+      await writeFile(join(externalBin, "horsepower"), "external");
+      await rm(join(staged, "bin"), { recursive: true });
+      await symlink(externalBin, join(staged, "bin"));
+    }
+    const expected = hostile === "expected-version" ? "01.0.0" : hostile === "manifest-version" ? "0.1.0" : String(manifest.version);
+    expect(await run(["preflight", staged, "--version", expected, "--json"]), hostile).toMatchObject({ exitCode: hostile === "expected-version" ? 2 : 1 });
+  }
+});
+
 test("safe uninstall removes only owned topology while preserving user data", async () => {
   const { homeDir, cwd, run } = await harness();
   const hp = join(homeDir, ".pi/agent/horsepower");
@@ -290,6 +390,23 @@ test("uninstall refuses regular, unrelated, and hostile symlink targets without 
   expect(await readFile(extension, "utf8")).toBe("foreign");
   expect(await readFile(join(outside, "keep"), "utf8")).toBe("safe");
   expect(await readlink(join(hp, "current"))).toBe(outside);
+});
+
+test("current ownership and uninstall reject an external symlinked manifest", async () => {
+  const { homeDir, root, run } = await harness();
+  const hp = join(homeDir, ".pi/agent/horsepower");
+  const release = join(hp, "versions/v0.1.0");
+  await mkdir(release, { recursive: true });
+  const externalManifest = join(root, "external-release-manifest.json");
+  await writeFile(externalManifest, JSON.stringify({ version: "0.1.0" }));
+  await symlink(externalManifest, join(release, "release-manifest.json"));
+  await symlink("versions/v0.1.0", join(hp, "current"));
+
+  const doctor = await run(["doctor", "--json"]);
+  expect(JSON.parse(doctor.stdout).data.checks.find((check: { id: string }) => check.id === "installation")).toMatchObject({ status: "error" });
+  expect((await run(["uninstall", "--json"])).exitCode).toBe(1);
+  expect(await readFile(externalManifest, "utf8")).toContain("0.1.0");
+  expect(await readlink(join(release, "release-manifest.json"))).toBe(externalManifest);
 });
 
 test("uninstall removes only a verified direct current release target", async () => {

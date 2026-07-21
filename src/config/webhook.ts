@@ -14,15 +14,31 @@ function settingObject(value: unknown, label: string): JsonObject {
   return value;
 }
 
+function hasUrlUserinfo(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.username.length > 0 || parsed.password.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function redactCredentials(value: unknown, key = "", insideAuth = false): unknown {
-  if (credentialKey.test(key) && key.toLowerCase() !== "auth") return SECRET;
-  if (Array.isArray(value)) return value.map((item) => redactCredentials(item, "", insideAuth));
-  if (!isObject(value)) return value;
-  const authContainer = insideAuth || key.toLowerCase() === "auth" || key.toLowerCase() === "authentication";
-  return Object.fromEntries(Object.entries(value).map(([nestedKey, nested]) => {
-    if (authContainer && nestedKey !== "mode" && (nested === null || typeof nested !== "object")) return [nestedKey, SECRET];
-    return [nestedKey, redactCredentials(nested, nestedKey, authContainer)];
-  }));
+  const normalizedKey = key.toLowerCase();
+  const authContainer = insideAuth || normalizedKey === "auth" || normalizedKey === "authentication";
+  if (credentialKey.test(key) && normalizedKey !== "auth" && normalizedKey !== "authentication") return SECRET;
+  if (Array.isArray(value)) return value.map((item) => redactCredentials(item, "", authContainer));
+  if (!isObject(value)) {
+    if (authContainer) {
+      if (normalizedKey === "mode" && (value === "none" || value === "hmac" || value === "bearer")) return value;
+      return SECRET;
+    }
+    return typeof value === "string" && hasUrlUserinfo(value) ? SECRET : value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([nestedKey, nested]) => [
+    nestedKey,
+    redactCredentials(nested, nestedKey, authContainer),
+  ]));
 }
 
 export interface ParsedWebhook {
@@ -49,16 +65,19 @@ export function parseWebhookSettings(globalValue: unknown, projectValue?: unknow
   }
   let parsedUrl: URL;
   try { parsedUrl = new URL(merged.url); } catch { throw new Error("Invalid Horsepower webhook configuration: url is invalid"); }
+  if (parsedUrl.username || parsedUrl.password) {
+    throw new Error("Invalid Horsepower webhook configuration: url must not contain credentials");
+  }
   if (parsedUrl.protocol !== "https:" && parsedUrl.hostname !== "localhost" && parsedUrl.hostname !== "127.0.0.1") {
     throw new Error("Invalid Horsepower webhook configuration: url must use HTTPS");
   }
   const authValue = merged.auth;
   if (!isObject(authValue)) throw new Error("Invalid Horsepower webhook configuration: auth is required");
   let auth: WebhookAuth;
-  if (authValue.mode === "none") auth = { mode: "none" };
-  else if (authValue.mode === "hmac" && typeof authValue.secret === "string" && authValue.secret.length > 0) auth = { mode: "hmac", secret: authValue.secret };
-  else if (authValue.mode === "bearer" && typeof authValue.token === "string" && authValue.token.length > 0) auth = { mode: "bearer", token: authValue.token };
-  else throw new Error("Invalid Horsepower webhook configuration: auth credentials are missing or invalid");
+  if (authValue.mode === "none" && authValue.secret === undefined && authValue.token === undefined) auth = { mode: "none" };
+  else if (authValue.mode === "hmac" && typeof authValue.secret === "string" && authValue.secret.length > 0 && authValue.token === undefined) auth = { mode: "hmac", secret: authValue.secret };
+  else if (authValue.mode === "bearer" && typeof authValue.token === "string" && authValue.token.length > 0 && authValue.secret === undefined) auth = { mode: "bearer", token: authValue.token };
+  else throw new Error("Invalid Horsepower webhook configuration: auth credentials are missing, invalid, or incompatible");
 
   const notifications = settingObject(merged.notifications, "notifications");
   if (notifications.change !== undefined && typeof notifications.change !== "boolean") {
