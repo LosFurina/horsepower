@@ -223,12 +223,21 @@ function classifyTrackedPath(path: string): "public" | "excluded" {
   throw new Error(`Unclassified tracked repository file: ${path}`);
 }
 
+async function readRegularRepositoryFile(repositoryRoot: string, path: string, label: string): Promise<PublicContent> {
+  const absolute = join(repositoryRoot, path);
+  const info = await lstat(absolute);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${label} must be a regular file: ${path}`);
+  return { path, content: await readFile(absolute) };
+}
+
 async function repositoryPublicContents(repositoryRoot: string, listTrackedFiles: ReleaseBuilderDependencies["listTrackedFiles"]): Promise<PublicContent[]> {
   const tracked = await listTrackedFiles(repositoryRoot);
   const paths = tracked.filter((path) => classifyTrackedPath(path) === "public");
   const built = ["dist/cli/horsepower.js", "dist/extension/index.js"];
-  return Promise.all([...new Set([...paths, ...built])].sort(comparePath)
-    .map(async (path) => ({ path, content: await readFile(join(repositoryRoot, path)) })));
+  return Promise.all([
+    ...paths.map((path) => readRegularRepositoryFile(repositoryRoot, path, "Tracked repository file")),
+    ...built.map((path) => readRegularRepositoryFile(repositoryRoot, path, "Built release input")),
+  ]);
 }
 
 async function buildReleaseWith(dependencies: ReleaseBuilderDependencies, options: BuildReleaseOptions): Promise<ReleaseBuildResult> {
@@ -263,7 +272,8 @@ async function buildReleaseWith(dependencies: ReleaseBuilderDependencies, option
     const staged = await validateStagedRelease(stageRoot, { version: options.version, allowedFiles });
     dependencies.scan(staged);
     const archivePath = join(outputDir, archiveName);
-    await writeFile(archivePath, await createArchive(stageRoot));
+    await writeFile(archivePath, await createArchive(stageRoot), { mode: 0o644 });
+    await chmod(archivePath, 0o644);
     const inspected = await dependencies.inspectArchive(archivePath);
     validateArchiveEntries(inspected.entries, allowedFiles);
     dependencies.scan(inspected.entries);
@@ -272,6 +282,7 @@ async function buildReleaseWith(dependencies: ReleaseBuilderDependencies, option
     const checksum = sha256(archive);
     const checksumPath = `${archivePath}.sha256`;
     await writeFile(checksumPath, `${checksum}  ${archiveName}\n`, { mode: 0o644 });
+    await chmod(checksumPath, 0o644);
     return { archivePath, checksumPath, checksum, manifest };
   } finally {
     await rm(workDir, { recursive: true, force: true });

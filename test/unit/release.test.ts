@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -131,9 +131,11 @@ test("produces byte-identical archives with platform-neutral gzip framing and a 
   expect((await readdir(firstOutput)).sort()).toEqual(["horsepower-v1.2.3-alpha.1.tar.gz", "horsepower-v1.2.3-alpha.1.tar.gz.sha256"]);
 });
 
-test("produces byte-identical validated releases under umask 022 and 077", async () => {
+test("produces byte-identical validated releases with canonical asset modes under umask 022 and 077", async () => {
   const repositoryRoot = await fixtureRepository();
   const outputs: Buffer[] = [];
+  const checksumOutputs: Buffer[] = [];
+  const assetModes: number[][] = [];
   const previousUmask = process.umask();
   try {
     for (const [index, umask] of [0o022, 0o077].entries()) {
@@ -145,12 +147,17 @@ test("produces byte-identical validated releases under umask 022 and 077", async
         runBuild: async () => {},
       });
       outputs.push(await readFile(result.archivePath));
+      checksumOutputs.push(await readFile(result.checksumPath));
+      assetModes.push(await Promise.all([result.archivePath, result.checksumPath]
+        .map(async (path) => (await lstat(path)).mode & 0o777)));
       await expect(inspectReleaseArchive(result.archivePath)).resolves.toMatchObject({ entries: expect.any(Array) });
     }
   } finally {
     process.umask(previousUmask);
   }
   expect(outputs[1]).toEqual(outputs[0]);
+  expect(checksumOutputs[1]).toEqual(checksumOutputs[0]);
+  expect(assetModes).toEqual([[0o644, 0o644], [0o644, 0o644]]);
 });
 
 test("refuses to clear unrelated output content", async () => {
@@ -207,6 +214,22 @@ test("scans tracked source, documentation, tests, and rejects unclassified track
   await execFileAsync("git", ["add", "mystery.private"], { cwd: repositoryRoot });
   await expect(buildRelease({ repositoryRoot, outputDir: join(await temporaryDirectory(), "unknown"), version: "1.2.3-alpha.1", runBuild: async () => {} }))
     .rejects.toThrow("Unclassified tracked repository file: mystery.private");
+});
+
+test("rejects a tracked public symlink before reading its target", async () => {
+  const repositoryRoot = await fixtureRepository();
+  const external = join(await temporaryDirectory(), "external-public.ts");
+  await writeFile(external, "export const semanticSlot = 'craft';\n");
+  await rm(join(repositoryRoot, "src", "public.ts"));
+  await symlink(external, join(repositoryRoot, "src", "public.ts"));
+  await execFileAsync("git", ["add", "src/public.ts"], { cwd: repositoryRoot });
+
+  await expect(buildRelease({
+    repositoryRoot,
+    outputDir: join(await temporaryDirectory(), "tracked-link"),
+    version: "1.2.3-alpha.1",
+    runBuild: async () => {},
+  })).rejects.toThrow("Tracked repository file must be a regular file: src/public.ts");
 });
 
 test("concurrent builds use isolated staging and remain deterministic", async () => {
