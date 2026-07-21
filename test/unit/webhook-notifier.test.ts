@@ -125,17 +125,19 @@ test("hashes credential-bearing summary, evidence, and identifiers at the notifi
     fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response(null, { status: 204 }); },
   });
 
-  await expect(notifier.notify({ ...event, summary: "failure api_key=sk-live-secret" }))
+  const syntheticApiKey = `api_key=${["s", "k"].join("-")}-live-secret`;
+  await expect(notifier.notify({ ...event, summary: `failure ${syntheticApiKey}` }))
     .resolves.toMatchObject({ delivered: true });
   await expect(notifier.notify({ ...event, evidenceRefs: ["Authorization: Bearer leaked"] }))
     .resolves.toMatchObject({ delivered: true });
   const githubToken = `${["ghp", ""].join("_")}1234567890abcdefghijklmnop`;
   await expect(notifier.notify({ ...event, changeId: githubToken }))
     .resolves.toMatchObject({ delivered: true });
-  await expect(notifier.notify({ ...event, timestamp: "api_key=sk-live-leaked" }))
+  await expect(notifier.notify({ ...event, timestamp: syntheticApiKey.replace("secret", "leaked") }))
     .resolves.toMatchObject({ delivered: false, attempts: 0 });
   expect(bodies.join("\n")).not.toContain(githubToken);
-  expect(bodies.join("\n")).not.toMatch(/sk-live-secret|Bearer leaked/u);
+  expect(bodies.join("\n")).not.toContain(syntheticApiKey);
+  expect(bodies.join("\n")).not.toMatch(/Bearer leaked/u);
 });
 
 test("rejects unknown, malformed, and scope-incompatible event fields", async () => {

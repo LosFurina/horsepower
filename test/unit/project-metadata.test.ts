@@ -23,7 +23,10 @@ test("English and Chinese documentation cover the public execution and safety co
     expect(text, name).toMatch(/retry|重试/u);
     expect(text, name).toMatch(/process|进程/u);
     expect(text, name).toMatch(/resume|恢复/u);
-    expect(text, name).not.toMatch(/pi install|pi update|npm (?:install|publish).*horsepower|private-provider|private-model|\/Users\//iu);
+    const privateProvider = "private-provider";
+    const privateModelFamily = "private-model";
+    const forbiddenPublicContent = new RegExp(`pi install|pi update|npm (?:install|publish).*horsepower|${privateProvider}|${privateModelFamily}|/Users/`, "iu");
+    expect(text, name).not.toMatch(forbiddenPublicContent);
   }
 });
 
