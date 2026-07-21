@@ -98,8 +98,18 @@ export function createWebhookNotifier(options: WebhookNotifierOptions) {
     ? supplied
     : defaultRetryDelays;
   const attemptTimeoutMs = Math.min(Math.max(options.attemptTimeoutMs ?? 10_000, 1), 30_000);
+  let abandoned = false;
+  let resolveAbandoned!: () => void;
+  const abandonedSignal = new Promise<void>((resolve) => { resolveAbandoned = resolve; });
+  const activeControllers = new Set<AbortController>();
 
   return {
+    abandon(): void {
+      if (abandoned) return;
+      abandoned = true;
+      resolveAbandoned();
+      for (const controller of activeControllers) controller.abort();
+    },
     async notify(input: TerminalWebhookEvent): Promise<WebhookDeliveryResult> {
       const authenticationValue = options.config.auth.mode === "hmac"
         ? options.config.auth.secret
@@ -124,10 +134,13 @@ export function createWebhookNotifier(options: WebhookNotifierOptions) {
 
       let attempts = 0;
       for (const delay of retryDelays) {
-        if (delay > 0) await sleepImplementation(delay);
+        if (abandoned) return { delivered: false, attempts, error: "Webhook delivery abandoned" };
+        if (delay > 0) await Promise.race([sleepImplementation(delay), abandonedSignal]);
+        if (abandoned) return { delivered: false, attempts, error: "Webhook delivery abandoned" };
         attempts += 1;
         try {
           const controller = new AbortController();
+          activeControllers.add(controller);
           const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
           try {
             const response = await fetchImplementation(options.config.url, {
@@ -139,6 +152,7 @@ export function createWebhookNotifier(options: WebhookNotifierOptions) {
             if (response.ok) return { delivered: true, attempts };
           } finally {
             clearTimeout(timeout);
+            activeControllers.delete(controller);
           }
         } catch {
           // The fixed result below deliberately omits receiver errors and credentials.

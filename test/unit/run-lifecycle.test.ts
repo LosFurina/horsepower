@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import type { TerminalWebhookEvent, WebhookDeliveryResult } from "../../src/lifecycle/webhook-notifier.js";
 
 function setup(options: { change?: boolean; dispatch?: boolean } = {}) {
@@ -161,4 +161,25 @@ test("dispatch notification is opt-in and idle is never terminal", async () => {
   const second = enabled.lifecycle.beginDispatch({ changeId: "horsepower-alpha1", summary: "test" });
   await enabled.lifecycle.reportDispatchTerminal({ runId: second.runId, status: "failed", summary: "failed" });
   expect(enabled.notifications[0]).toMatchObject({ scope: "dispatch", status: "failed" });
+});
+
+test("shutdown stops notification retries and waits for pending deliveries", async () => {
+  let finish!: () => void;
+  const pending = new Promise<WebhookDeliveryResult>((resolve) => {
+    finish = () => resolve({ delivered: false, attempts: 1, error: "abandoned" });
+  });
+  const stopNotifications = vi.fn(() => finish());
+  const { createRunLifecycle } = await import("../../src/lifecycle/run-lifecycle.js");
+  const lifecycle = createRunLifecycle({
+    notifications: { dispatch: true },
+    notify: async () => pending,
+    stopNotifications,
+  });
+  const run = lifecycle.beginDispatch({ changeId: "change-a" });
+  await lifecycle.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: "failed" });
+
+  await lifecycle.shutdown();
+
+  expect(stopNotifications).toHaveBeenCalledTimes(1);
+  await expect(lifecycle.waitForDelivery(run.runId)).resolves.toMatchObject({ delivered: false });
 });

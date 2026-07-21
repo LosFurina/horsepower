@@ -25,6 +25,7 @@ export interface RunRecord {
 export interface RunLifecycleOptions {
   notifications?: { change?: boolean; dispatch?: boolean };
   notify?: (event: TerminalWebhookEvent) => Promise<WebhookDeliveryResult>;
+  stopNotifications?: () => void;
   now?: () => Date;
   makeId?: (prefix: string) => string;
 }
@@ -157,6 +158,13 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
       const delivery = deliveries.get(runId);
       if (!delivery) throw new Error(`Run has no webhook delivery: ${runId}`);
       return delivery;
+    },
+    async shutdown(): Promise<void> {
+      options.stopNotifications?.();
+      await Promise.allSettled(deliveries.values());
+    },
+    abandon(): void {
+      options.stopNotifications?.();
     },
     workerIdle(runId: string): false {
       requireRun(runId, "dispatch");

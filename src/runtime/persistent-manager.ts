@@ -290,6 +290,12 @@ export class PersistentWorkerManager {
     return this.#completedResult(workerId, await message.promise);
   }
 
+  messageStatus(workerId: string, messageId: string): MessageStatus {
+    const message = this.#require(workerId).messages.get(messageId);
+    if (!message) throw new Error(`Unknown messageId: ${messageId}`);
+    return message.status;
+  }
+
   async abort(workerId: string): Promise<{ workerId: string; aborted: true }> {
     const worker = this.#require(workerId);
     const activeId = worker.summary.activeMessageId;
@@ -361,6 +367,24 @@ export class PersistentWorkerManager {
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failures.length > 0) {
       throw new AggregateError(failures.map((failure) => failure.reason), "Failed to destroy all workers");
+    }
+  }
+
+  abandonAll(): void {
+    const error = new Error("Persistent worker abandoned during synchronous host exit");
+    for (const [workerId, worker] of this.#workers) {
+      worker.destroyRequested = true;
+      worker.summary.status = "destroyed";
+      for (const message of worker.messages.values()) {
+        if (["accepted", "queued", "running"].includes(message.status)) {
+          message.status = "failed";
+          message.error = error.message;
+          message.reject(error);
+        }
+      }
+      worker.connection.kill("SIGKILL");
+      void worker.connection.cleanup().catch(() => undefined);
+      this.#workers.delete(workerId);
     }
   }
 

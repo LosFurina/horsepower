@@ -518,3 +518,25 @@ test("rejects busy delivery and does not complete while the provider will retry"
     text: "attempt-two",
   });
 });
+
+test("reports message terminal status for dispatch lifecycle correlation", async () => {
+  const { managerPromise } = setup();
+  const manager = await managerPromise;
+  const { workerId } = await manager.create(createInput);
+  const sent = await manager.send({ workerId, message: "status", wait: false });
+
+  expect(manager.messageStatus(workerId, sent.messageId)).toBe("completed");
+});
+
+test("synchronous abandonment kills workers and removes them without claiming graceful destruction", async () => {
+  const { managerPromise, workers } = setup();
+  const manager = await managerPromise;
+  await manager.create(createInput);
+
+  manager.abandonAll();
+
+  expect(workers[0]!.signals).toEqual(["SIGKILL"]);
+  expect(manager.list()).toEqual([]);
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(workers[0]!.cleaned).toBe(true);
+});

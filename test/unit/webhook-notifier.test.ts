@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 const event = {
   eventId: "evt-1",
@@ -186,4 +186,28 @@ test("delivery exhaustion does not throw or mutate the terminal event", async ()
     error: "Webhook delivery failed",
   });
   expect(event).toEqual(original);
+});
+
+test("shutdown abandons in-process retries without persisting recovery", async () => {
+  let releaseSleep!: () => void;
+  const sleeping = new Promise<void>((resolve) => { releaseSleep = resolve; });
+  const fetch = vi.fn(async () => new Response("down", { status: 503 }));
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    fetch: fetch as typeof globalThis.fetch,
+    retryDelaysMs: [0, 10],
+    sleep: async () => sleeping,
+  });
+  const delivery = notifier.notify(event);
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+  notifier.abandon();
+
+  await expect(Promise.race([
+    delivery,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("abandon timed out")), 20)),
+  ])).resolves.toEqual({ delivered: false, attempts: 1, error: "Webhook delivery abandoned" });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  releaseSleep();
 });
