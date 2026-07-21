@@ -14,7 +14,8 @@
     "release": "npm run build && node scripts/release.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm test && npm run build"
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "check": "npm run typecheck && npm test && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.80.10",

@@ -1,0 +1,62 @@
+name: Tagged release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        output-locale: [en, zh-CN]
+    runs-on: ${{ matrix.os }}
+    env:
+      HORSEPOWER_E2E_LOCALE: ${{ matrix.output-locale }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  publish-release:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - name: Verify tag and build deterministic assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          test "$VERSION" = "$PACKAGE_VERSION"
+          npm run build
+          node scripts/release.mjs "$VERSION"
+          test -f "release/horsepower-v${VERSION}.tar.gz"
+          test -f "release/horsepower-v${VERSION}.tar.gz.sha256"
+          (cd release && sha256sum -c "horsepower-v${VERSION}.tar.gz.sha256")
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+      - name: Create GitHub Release with archive and checksum only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "release/horsepower-v${VERSION}.tar.gz" \
+            "release/horsepower-v${VERSION}.tar.gz.sha256" \
+            --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

@@ -211,7 +211,7 @@ async function stageRelease(repositoryRoot: string, stageRoot: string, version: 
 const trackedPublicRoots = [".github/", "docs/", "openspec/", "resources/", "scripts/", "src/", "test/", "tests/"] as const;
 const trackedPublicFiles = new Set([
   ".gitignore", "LICENSE", "LICENSE.md", "README", "README.md", "README.zh-CN.md",
-  "package.json", "package-lock.json", "npm-shrinkwrap.json", "tsconfig.json", "vitest.config.ts",
+  "package.json", "package-lock.json", "npm-shrinkwrap.json", "tsconfig.json", "vitest.config.ts", "vitest.e2e.config.ts",
   "install.sh",
 ]);
 const excludedTrackedRoots = [".pi/prompts/", ".pi/skills/"] as const;
