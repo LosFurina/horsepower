@@ -4,6 +4,7 @@ import { build } from "esbuild";
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/cli", { recursive: true });
 await mkdir("dist/extension", { recursive: true });
+await mkdir("dist/release", { recursive: true });
 
 await build({
   entryPoints: ["src/cli/main.ts"],
@@ -28,6 +29,15 @@ await build({
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-tui",
   ],
+});
+
+await build({
+  entryPoints: ["src/release/index.ts"],
+  outfile: "dist/release/release-builder.mjs",
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
 });
 
 await chmod("dist/cli/horsepower.js", 0o755);
