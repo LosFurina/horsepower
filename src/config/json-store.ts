@@ -87,6 +87,15 @@ export async function writeJsonObjects(entries: readonly JsonWrite[]): Promise<v
   }
   for (const entry of entries) rejectUndefined(entry.value);
   await ensurePrivateDirectory(directory);
+  for (const entry of entries) {
+    try {
+      const existing = await lstat(entry.path);
+      if (existing.isSymbolicLink()) throw new Error(`Configuration file must not be a symbolic link: ${entry.path}`);
+      if (!existing.isFile()) throw new Error(`Configuration path is not a regular file: ${entry.path}`);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    }
+  }
 
   const staged: Array<{ entry: JsonWrite; temporaryPath: string; backupPath: string; hadOriginal: boolean }> = [];
   try {

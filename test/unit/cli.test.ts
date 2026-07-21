@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, expect, test, vi } from "vitest";
+
+const execFileAsync = promisify(execFile);
 
 const temporaryDirectories: string[] = [];
 async function temp(): Promise<string> {
@@ -1010,6 +1015,194 @@ test("interactive purge requires an explicit yes and a negative answer changes n
   expect(await accepted.run(["purge", "--json"])).toMatchObject({ exitCode: 0 });
   expect(confirmYes).toHaveBeenCalledOnce();
   await expect(lstat(join(accepted.homeDir, ".pi/agent/horsepower"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("config reads reject global and project ancestor and file symlinks", async () => {
+  const validSlots = '{"slots":{"judgment":{"model":"provider/judge","thinking":"high"},"craft":{"model":"provider/craft","thinking":"medium"},"utility":{"model":"provider/util","thinking":"low"}}}\n';
+  for (const [scope, component] of [
+    ["global", ".pi"],
+    ["global", ".pi/agent"],
+    ["global", ".pi/agent/horsepower"],
+    ["global", ".pi/agent/horsepower/model-slots.json"],
+    ["project", ".pi"],
+    ["project", ".pi/horsepower"],
+    ["project", ".pi/horsepower/model-slots.json"],
+  ] as const) {
+    const { homeDir, cwd, root, run } = await harness();
+    const trustedRoot = scope === "global" ? homeDir : cwd;
+    const external = join(root, `external-read-${scope}-${component.replaceAll("/", "-")}`);
+    const link = join(trustedRoot, component);
+    const finalFile = component.endsWith(".json");
+    await mkdir(dirname(link), { recursive: true });
+    if (finalFile) await writeFile(external, validSlots);
+    else {
+      await mkdir(external, { recursive: true });
+      const nested = scope === "global"
+        ? component === ".pi" ? "agent/horsepower" : component === ".pi/agent" ? "horsepower" : ""
+        : component === ".pi" ? "horsepower" : "";
+      await mkdir(join(external, nested), { recursive: true });
+      await writeFile(join(external, nested, "model-slots.json"), validSlots);
+    }
+    await symlink(external, link);
+    if (scope === "project") {
+      const globalSlots = join(homeDir, ".pi/agent/horsepower/model-slots.json");
+      await mkdir(dirname(globalSlots), { recursive: true });
+      await writeFile(globalSlots, validSlots);
+    }
+
+    const result = await run(["slots", "--json"]);
+    expect(result, `${scope}:${component}`).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(await readlink(link), `${scope}:${component}`).toBe(external);
+    if (finalFile) expect(await readFile(external, "utf8"), `${scope}:${component}`).toBe(validSlots);
+  }
+});
+
+test("config writes reject global and project ancestor and file symlinks without changing targets", async () => {
+  const validSlots = '{"slots":{"judgment":{"model":"provider/judge","thinking":"high"},"craft":{"model":"provider/craft","thinking":"medium"},"utility":{"model":"provider/util","thinking":"low"}},"keep":"external"}\n';
+  for (const [scope, component] of [
+    ["global", ".pi"],
+    ["global", ".pi/agent"],
+    ["global", ".pi/agent/horsepower"],
+    ["global", ".pi/agent/horsepower/model-slots.json"],
+    ["project", ".pi"],
+    ["project", ".pi/horsepower"],
+    ["project", ".pi/horsepower/model-slots.json"],
+  ] as const) {
+    const { homeDir, cwd, root, run } = await harness();
+    const trustedRoot = scope === "global" ? homeDir : cwd;
+    const external = join(root, `external-write-${scope}-${component.replaceAll("/", "-")}`);
+    const link = join(trustedRoot, component);
+    const finalFile = component.endsWith(".json");
+    await mkdir(dirname(link), { recursive: true });
+    if (finalFile) await writeFile(external, validSlots);
+    else {
+      await mkdir(external, { recursive: true });
+      const nested = scope === "global"
+        ? component === ".pi" ? "agent/horsepower" : component === ".pi/agent" ? "horsepower" : ""
+        : component === ".pi" ? "horsepower" : "";
+      await mkdir(join(external, nested), { recursive: true });
+      await writeFile(join(external, nested, "model-slots.json"), validSlots);
+    }
+    await symlink(external, link);
+    if (scope === "project") {
+      const globalSlots = join(homeDir, ".pi/agent/horsepower/model-slots.json");
+      await mkdir(dirname(globalSlots), { recursive: true });
+      await writeFile(globalSlots, validSlots);
+    }
+    const targetFile = finalFile ? external : join(external,
+      scope === "global" ? component === ".pi" ? "agent/horsepower/model-slots.json" : component === ".pi/agent" ? "horsepower/model-slots.json" : "model-slots.json"
+        : component === ".pi" ? "horsepower/model-slots.json" : "model-slots.json");
+    const before = await readFile(targetFile);
+    const argv = scope === "global"
+      ? ["set", "vision", "--fallback", "utility", "--json"]
+      : ["set", "vision", "--fallback", "utility", "--scope", "project", "--json"];
+
+    const result = await run(argv);
+    expect(result, `${scope}:${component}`).toMatchObject({ exitCode: 2, stdout: "" });
+    expect(await readFile(targetFile), `${scope}:${component}`).toEqual(before);
+    expect(await readlink(link), `${scope}:${component}`).toBe(external);
+  }
+});
+
+test("config commands reject final global and project settings symlinks", async () => {
+  for (const scope of ["global", "project"] as const) {
+    const { homeDir, cwd, root, run } = await harness();
+    await run(setupArgs);
+    const settings = scope === "global" ? join(homeDir, ".pi/agent/horsepower/settings.json") : join(cwd, ".pi/horsepower/settings.json");
+    const external = join(root, `external-${scope}-settings.json`);
+    const bytes = Buffer.from('{"webhook":{"enabled":false},"keep":"external"}\n');
+    await mkdir(dirname(settings), { recursive: true });
+    await writeFile(external, bytes);
+    await rm(settings, { force: true });
+    await symlink(external, settings);
+
+    const result = scope === "global"
+      ? await run(["webhook", "disable", "--json"])
+      : await run(setupArgs);
+    expect(result, scope).toMatchObject({ exitCode: scope === "global" ? 1 : 2, stdout: "" });
+    expect(await readFile(external), scope).toEqual(bytes);
+    expect(await readlink(settings), scope).toBe(external);
+  }
+});
+
+test("purge refuses foreign regular global and project roots", async () => {
+  for (const scope of ["global", "project"] as const) {
+    const { homeDir, cwd, run } = await harness();
+    const root = scope === "global" ? join(homeDir, ".pi/agent/horsepower") : join(cwd, ".pi/horsepower");
+    await mkdir(dirname(root), { recursive: true });
+    await writeFile(root, `foreign-${scope}`);
+
+    expect(await run(["purge", "--yes", "--json"]), scope).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(await readFile(root, "utf8"), scope).toBe(`foreign-${scope}`);
+  }
+});
+
+test("purge refuses FIFO and socket Horsepower roots without replacing them", async () => {
+  for (const kind of ["fifo", "socket"] as const) {
+    const { homeDir, run } = await harness();
+    const root = join(homeDir, ".pi/agent/horsepower");
+    await mkdir(dirname(root), { recursive: true });
+    let close: () => Promise<void> = async () => undefined;
+    if (kind === "fifo") await execFileAsync("mkfifo", [root]);
+    else {
+      const server = createServer();
+      await new Promise<void>((resolve, reject) => server.listen(root, resolve).once("error", reject));
+      close = async () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+    try {
+      expect(await run(["purge", "--yes", "--json"]), kind).toMatchObject({ exitCode: 1, stdout: "" });
+      const info = await lstat(root);
+      expect(kind === "fifo" ? info.isFIFO() : info.isSocket(), kind).toBe(true);
+    } finally {
+      await close();
+    }
+  }
+});
+
+test("purge refuses directories with objects outside the Horsepower user-data topology", async () => {
+  for (const scope of ["global", "project"] as const) {
+    const { homeDir, cwd, run } = await harness();
+    const root = scope === "global" ? join(homeDir, ".pi/agent/horsepower") : join(cwd, ".pi/horsepower");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "foreign.txt"), `foreign-${scope}`);
+
+    expect(await run(["purge", "--yes", "--json"]), scope).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(await readFile(join(root, "foreign.txt"), "utf8"), scope).toBe(`foreign-${scope}`);
+  }
+});
+
+test("doctor blocks model-registry validation when slot validation fails", async () => {
+  const { run } = await harness();
+  const checks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
+  expect(checks.find((check: { id: string }) => check.id === "configuration")).toMatchObject({ status: "error" });
+  expect(checks.find((check: { id: string }) => check.id === "model-registry")).toMatchObject({
+    status: "skipped",
+    message: expect.stringContaining("valid slot configuration"),
+    action: "Run horsepower setup",
+  });
+});
+
+test("unsupported platforms reject mutating and install-management commands but allow diagnostics", async () => {
+  const { root, run } = await harness({ platform: "win32" });
+  const staged = join(root, "staged");
+  await writeRelease(staged, "0.1.0");
+  for (const argv of [
+    setupArgs,
+    ["configure", "--craft", "provider/craft", "--craft-thinking", "medium", "--json"],
+    ["set", "vision", "--fallback", "utility", "--json"],
+    ["unset", "vision", "--json"],
+    ["webhook", "disable", "--json"],
+    ["preflight", staged, "--version", "0.1.0", "--json"],
+    ["uninstall", "--json"],
+    ["purge", "--yes", "--json"],
+  ]) {
+    const result = await run(argv);
+    expect(result, argv[0]).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(result.stderr, argv[0]).toContain("Unsupported platform: win32");
+  }
+  expect(await run(["slots", "--json"])).toMatchObject({ exitCode: 1 });
+  expect(await run(["configure", "--json"])).toMatchObject({ exitCode: 0 });
+  expect(await run(["doctor", "--json"])).toMatchObject({ stderr: "" });
 });
 
 test("CLI never mutates Pi model/provider configuration or API keys", async () => {

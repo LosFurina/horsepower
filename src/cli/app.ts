@@ -88,10 +88,36 @@ function scopePath(scope: string | undefined, paths: ReturnType<typeof resolveHo
   if (scope === "project") return paths.project.modelSlots;
   throw new UsageError(`Invalid scope: ${scope}`);
 }
-async function configurations(paths: ReturnType<typeof resolveHorsepowerPaths>): Promise<{ global: SlotConfiguration; project: SlotConfiguration }> {
-  return { global: await optionalObject(paths.global.modelSlots), project: await optionalObject(paths.project.modelSlots) };
+async function verifyConfigurationPath(trustedRoot: string, candidate: string): Promise<void> {
+  const root = resolve(trustedRoot);
+  const target = resolve(candidate);
+  const pathFromRoot = relative(root, target);
+  if (pathFromRoot === "" || pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) throw new Error(`Unsafe configuration path: ${target}`);
+  let rootInfo;
+  try { rootInfo = await lstat(root); } catch (cause) { if (absent(cause)) return; throw cause; }
+  if (rootInfo.isSymbolicLink()) throw new Error(`Configuration trust root must not be a symbolic link: ${root}`);
+  if (!rootInfo.isDirectory()) throw new Error(`Configuration trust root is not a directory: ${root}`);
+  let current = root;
+  const components = pathFromRoot.split(sep);
+  for (let index = 0; index < components.length; index += 1) {
+    current = join(current, components[index]!);
+    let info;
+    try { info = await lstat(current); } catch (cause) { if (absent(cause)) return; throw cause; }
+    if (info.isSymbolicLink()) throw new Error(`Configuration path must not contain a symbolic link: ${current}`);
+    const final = index === components.length - 1;
+    if (!final && !info.isDirectory()) throw new Error(`Configuration path component is not a directory: ${current}`);
+    if (final && !info.isFile()) throw new Error(`Configuration path is not a regular file: ${current}`);
+  }
 }
-async function existingConfiguration(path: string): Promise<JsonObject> {
+async function trustedOptionalObject(trustedRoot: string, path: string): Promise<JsonObject> {
+  await verifyConfigurationPath(trustedRoot, path);
+  return optionalObject(path);
+}
+async function configurations(paths: ReturnType<typeof resolveHorsepowerPaths>, homeDir: string, cwd: string): Promise<{ global: SlotConfiguration; project: SlotConfiguration }> {
+  return { global: await trustedOptionalObject(homeDir, paths.global.modelSlots), project: await trustedOptionalObject(cwd, paths.project.modelSlots) };
+}
+async function existingConfiguration(trustedRoot: string, path: string): Promise<JsonObject> {
+  await verifyConfigurationPath(trustedRoot, path);
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink()) throw new Error(`Configuration file must not be a symbolic link: ${path}`);
@@ -222,6 +248,18 @@ async function managedRootState(root: string): Promise<{ status: "absent" | "own
   try { const info = await lstat(root); return info.isDirectory() && !info.isSymbolicLink() ? { status: "owned" } : { status: "conflict", message: `Refusing unowned Horsepower root: ${root}` }; }
   catch (cause) { if (absent(cause)) return { status: "absent" }; throw cause; }
 }
+async function purgeRootState(root: string, topology: Readonly<Record<string, "file" | "directory">>): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
+  const state = await managedRootState(root);
+  if (state.status !== "owned") return state;
+  for (const name of await readdir(root)) {
+    const expected = topology[name];
+    const path = join(root, name);
+    if (!expected) return { status: "conflict", message: `Refusing unexpected object in Horsepower user-data root: ${path}` };
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || (expected === "file" ? !info.isFile() : !info.isDirectory())) return { status: "conflict", message: `Refusing unexpected Horsepower user-data object: ${path}` };
+  }
+  return { status: "owned" };
+}
 async function linkState(path: string, expected: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
   try {
     const info = await lstat(path); if (!info.isSymbolicLink()) return { status: "conflict", message: `Refusing non-symlink: ${path}` };
@@ -283,7 +321,10 @@ export function createCli(options: CliOptions) {
     return { effective: registry.effective, resolved, revision: registry.revision };
   }
   async function slotsData() {
-    return registryData(await configurations(paths));
+    return registryData(await configurations(paths, options.homeDir, options.cwd));
+  }
+  function requireSupportedPlatform(): void {
+    if (options.platform !== "linux" && options.platform !== "darwin") throw new Error(`Unsupported platform: ${options.platform}`);
   }
   async function setup(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"], []);
@@ -296,10 +337,10 @@ export function createCli(options: CliOptions) {
     }
     try {
       const [globalSlots, projectSlots, settings, projectSettings] = await Promise.all([
-        existingConfiguration(paths.global.modelSlots),
-        existingConfiguration(paths.project.modelSlots),
-        existingConfiguration(paths.global.settings),
-        existingConfiguration(paths.project.settings),
+        existingConfiguration(options.homeDir, paths.global.modelSlots),
+        existingConfiguration(options.cwd, paths.project.modelSlots),
+        existingConfiguration(options.homeDir, paths.global.settings),
+        existingConfiguration(options.cwd, paths.project.settings),
       ]);
       const nextGlobal = { ...globalSlots, slots: { ...object(globalSlots.slots), ...slots } };
       const data = registryData({ global: nextGlobal as SlotConfiguration, project: projectSlots });
@@ -321,7 +362,7 @@ export function createCli(options: CliOptions) {
     const scope = parsed.values.get("scope");
     const path = scopePath(scope, paths);
     try {
-      const config = await configurations(paths);
+      const config = await configurations(paths, options.homeDir, options.cwd);
       const next = withSlot(scope === "project" ? config.project as JsonObject : config.global as JsonObject, id, binding);
       const prospective = scope === "project" ? { global: config.global, project: next } : { global: next, project: config.project };
       const data = registryData(prospective);
@@ -335,7 +376,7 @@ export function createCli(options: CliOptions) {
     const scope = parsed.values.get("scope");
     const path = scopePath(scope, paths);
     try {
-      const config = await configurations(paths);
+      const config = await configurations(paths, options.homeDir, options.cwd);
       const next = withSlot(scope === "project" ? config.project as JsonObject : config.global as JsonObject, id, undefined);
       const prospective = scope === "project" ? { global: config.global, project: next } : { global: next, project: config.project };
       const data = registryData(prospective);
@@ -346,15 +387,15 @@ export function createCli(options: CliOptions) {
   async function configure(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     const values = ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"];
     only(parsed, values, []); if (parsed.positionals.length) throw new UsageError("configure accepts no positional arguments");
-    if (parsed.values.size === 0) return { data: redactSettings(await optionalObject(paths.global.settings)) };
-    const current = await optionalObject(paths.global.modelSlots); const slots = { ...object(current.slots) } as Record<string, unknown>;
+    if (parsed.values.size === 0) return { data: redactSettings(await trustedOptionalObject(options.homeDir, paths.global.settings)) };
+    const current = await trustedOptionalObject(options.homeDir, paths.global.modelSlots); const slots = { ...object(current.slots) } as Record<string, unknown>;
     for (const id of ["judgment", "craft", "utility"] as const) {
       const model = parsed.values.get(id), thinking = parsed.values.get(`${id}-thinking`);
       if ((model && !thinking) || (!model && thinking)) throw new UsageError(`configure requires --${id} and --${id}-thinking together`);
       if (model && thinking) slots[id] = { model, thinking };
     }
     try {
-      const project = await optionalObject(paths.project.modelSlots);
+      const project = await trustedOptionalObject(options.cwd, paths.project.modelSlots);
       const next = { ...current, slots };
       const data = registryData({ global: next as SlotConfiguration, project });
       await writeConfigs([{ path: paths.global.modelSlots, value: next }]);
@@ -365,7 +406,7 @@ export function createCli(options: CliOptions) {
     const action = parsed.positionals[0]; if (!action || parsed.positionals.length !== 1) throw new UsageError("webhook requires configure, skip, disable, or test");
     if (action === "disable" || action === "skip") {
       only(parsed, [], []);
-      const current = await optionalObject(paths.global.settings);
+      const current = await trustedOptionalObject(options.homeDir, paths.global.settings);
       const preserved = withoutCredentials(object(current.webhook));
       delete preserved.url;
       const next = { ...current, webhook: { ...preserved, enabled: false } };
@@ -383,7 +424,7 @@ export function createCli(options: CliOptions) {
       let auth: WebhookAuth; if (mode === "hmac") { if (!secret) throw new UsageError("HMAC authentication requires --secret"); if (token) throw new UsageError("HMAC authentication does not accept --token"); auth = { mode, secret }; }
       else if (mode === "bearer") { if (!token) throw new UsageError("Bearer authentication requires --token"); if (secret) throw new UsageError("Bearer authentication does not accept --secret"); auth = { mode, token }; }
       else if (mode === "none") { if (secret || token) throw new UsageError("None authentication does not accept --secret or --token"); auth = { mode }; } else throw new UsageError("Invalid webhook auth mode");
-      const current = await optionalObject(paths.global.settings); const projectSettings = await optionalObject(paths.project.settings);
+      const current = await trustedOptionalObject(options.homeDir, paths.global.settings); const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings);
       try {
         validateWebhookSettingsShape(current.webhook);
         validateWebhookSettingsShape(projectSettings.webhook, "project ");
@@ -406,7 +447,7 @@ export function createCli(options: CliOptions) {
       return { data: redactSettings(next), message: "Webhook configured" };
     }
     if (action === "test") {
-      only(parsed, [], []); const globalSettings = await optionalObject(paths.global.settings); const projectSettings = await optionalObject(paths.project.settings); const parsedSettings = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");
+      only(parsed, [], []); const globalSettings = await trustedOptionalObject(options.homeDir, paths.global.settings); const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings); const parsedSettings = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");
       const notifier = createWebhookNotifier({ config: parsedSettings.config, ...(options.fetch ? { fetch: options.fetch } : {}), retryDelaysMs: [0] });
       const result = await notifier.notify({ eventId: randomUUID(), timestamp: (options.now ?? (() => new Date()))().toISOString(), scope: "change", runId: "cli-webhook-test", status: "completed", summary: "webhook test", evidenceRefs: [] }); notifier.abandon();
       if (!result.delivered) throw new Error(result.error ?? "Webhook delivery failed"); return { data: result, message: "Webhook delivered" };
@@ -437,8 +478,8 @@ export function createCli(options: CliOptions) {
       return { id: "installation", status: "error", message: "Unable to inspect the managed installation topology", action: "Inspect destination permissions, then install or repair Horsepower from an official release" };
     }
   }
-  async function doctorSettings(path: string): Promise<{ value?: JsonObject; error?: string }> {
-    try { return { value: await optionalObject(path) }; }
+  async function doctorSettings(trustedRoot: string, path: string): Promise<{ value?: JsonObject; error?: string }> {
+    try { return { value: await trustedOptionalObject(trustedRoot, path) }; }
     catch (cause) {
       const message = cause instanceof Error && (cause.message.startsWith("Malformed JSON in ") || cause.message.startsWith("Expected a JSON object in "))
         ? cause.message
@@ -448,9 +489,10 @@ export function createCli(options: CliOptions) {
   }
   async function doctor(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []); const checks: Array<Record<string, unknown>> = [];
-    try { const data = await slotsData(); checks.push({ id: "configuration", status: "ok", message: `Slots revision ${data.revision}` }); } catch (cause) { checks.push({ id: "configuration", status: "error", message: (cause as Error).message, action: "Run horsepower setup" }); }
-    const globalSettings = await doctorSettings(paths.global.settings);
-    const projectSettings = await doctorSettings(paths.project.settings);
+    let configurationValid = false;
+    try { const data = await slotsData(); configurationValid = true; checks.push({ id: "configuration", status: "ok", message: `Slots revision ${data.revision}` }); } catch (cause) { checks.push({ id: "configuration", status: "error", message: (cause as Error).message, action: "Run horsepower setup" }); }
+    const globalSettings = await doctorSettings(options.homeDir, paths.global.settings);
+    const projectSettings = await doctorSettings(options.cwd, paths.project.settings);
     const settingsErrors = [globalSettings.error, projectSettings.error].filter((message): message is string => message !== undefined);
     if (settingsErrors.length > 0) {
       const invalidPaths = [globalSettings.error ? paths.global.settings : undefined, projectSettings.error ? paths.project.settings : undefined].filter((path): path is string => path !== undefined);
@@ -463,12 +505,14 @@ export function createCli(options: CliOptions) {
         checks.push({ id: "notification", status: "error", message: (cause as Error).message, action: "Run horsepower webhook configure or webhook disable" });
       }
     }
-    checks.push(await openspecCheck()); checks.push(options.models ? { id: "model-registry", status: "ok", message: "Slot models validated" } : { id: "model-registry", status: "skipped", message: "Pi model registry unavailable; validation skipped" }); checks.push(await installationCheck());
+    checks.push(await openspecCheck()); checks.push(!configurationValid
+      ? { id: "model-registry", status: "skipped", message: "Model registry validation requires valid slot configuration", action: "Run horsepower setup" }
+      : options.models ? { id: "model-registry", status: "ok", message: "Slot models validated" } : { id: "model-registry", status: "skipped", message: "Pi model registry unavailable; validation skipped" }); checks.push(await installationCheck());
     return { data: { checks }, ok: !checks.some((check) => check.status === "error"), exitCode: checks.some((check) => check.status === "error") ? 1 : 0 };
   }
   async function preflight(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["version"], []); const staged = parsed.positionals[0], expected = parsed.values.get("version"); if (!staged || parsed.positionals.length !== 1 || !expected) throw new UsageError("preflight requires STAGED_ROOT --version VERSION");
-    if (options.platform !== "linux" && options.platform !== "darwin") throw new Error(`Unsupported platform: ${options.platform}`);
+    requireSupportedPlatform();
     if (!releaseVersion.test(expected)) throw new UsageError(`Invalid release version: ${expected}`);
     const root = resolve(staged); const stagedInfo = await lstat(root).catch(() => undefined); if (!stagedInfo?.isDirectory() || stagedInfo.isSymbolicLink()) throw new Error(`Invalid staged release root: ${root}`); let manifest: JsonObject; try { manifest = await readManagedManifest(root); } catch (cause) { throw new Error(`Invalid staged release: ${(cause as Error).message}`); }
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid staged manifest version");
@@ -486,7 +530,7 @@ export function createCli(options: CliOptions) {
   }
   async function purge(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); const confirmed = await options.confirm("Permanently remove Horsepower user data? Type yes to continue: "); if (confirmed === undefined) throw new UsageError("Purge requires --yes when no controlling terminal is available"); if (!confirmed) return { data: { purged: false }, message: "Purge canceled; no data changed" }; }
-    await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const codePaths = [topology.current, topology.versions, ...topology.links.map((link) => link.path)]; for (const path of codePaths) await requireAbsent(path, `Run horsepower uninstall before purge; installed code or link remains: ${path}`); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
+    await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const codePaths = [topology.current, topology.versions, ...topology.links.map((link) => link.path)]; for (const path of codePaths) await requireAbsent(path, `Run horsepower uninstall before purge; installed code or link remains: ${path}`); const root = await purgeRootState(topology.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory", standards: "directory", workflows: "directory", personas: "directory", memory: "directory", state: "directory" }); const projectRoot = await purgeRootState(paths.project.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory" }); for (const state of [root, projectRoot]) if (state.status === "conflict") throw new Error(state.message); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
   }
 
   return { async run(argv: readonly string[]): Promise<CliResult> {
@@ -496,6 +540,8 @@ export function createCli(options: CliOptions) {
       if (jsonCount > 1) throw new UsageError("Duplicate option: --json");
       const normalizedArgv = argv.filter((argument) => argument !== "--json");
       const command = normalizedArgv[0]; if (!command || command.startsWith("--")) throw new UsageError("A command is required"); const parsed = flags([...normalizedArgv.slice(1), ...(machine ? ["--json"] : [])]); machine = parsed.switches.has("json"); let result: CommandResult;
+      const mutatesOrManagesInstallation = command === "setup" || command === "set" || command === "unset" || command === "webhook" || command === "preflight" || command === "uninstall" || command === "purge" || (command === "configure" && parsed.values.size > 0);
+      if (mutatesOrManagesInstallation) requireSupportedPlatform();
       if (command === "setup") result = await setup(parsed); else if (command === "configure") result = await configure(parsed); else if (command === "slots") { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); result = { data: await slotsData() }; }
       else if (command === "set") result = await setSlot(parsed); else if (command === "unset") result = await unsetSlot(parsed); else if (command === "webhook") result = await webhook(parsed); else if (command === "doctor") result = await doctor(parsed); else if (command === "preflight") result = await preflight(parsed); else if (command === "uninstall") result = await uninstall(parsed); else if (command === "purge") result = await purge(parsed); else throw new UsageError(`Unknown command: ${command}`);
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1); return machine ? { exitCode, stdout: json({ data: result.data, ok }), stderr: "" } : { exitCode, stdout: `${result.message ?? (ok ? "OK" : "FAILED")}\n`, stderr: "" };
