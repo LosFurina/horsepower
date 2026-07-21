@@ -84,3 +84,40 @@ Workers SHALL survive Pi `new`, `resume`, and `fork` by using a process-global s
 #### Scenario: Pi reloads
 - **WHEN** the extension receives reload shutdown
 - **THEN** it destroys all workers and removes the process-global singleton
+
+### Requirement: Persistent managed handoff continuity
+A persistent worker created with `handoffMode: managed` SHALL use a private handoff workspace for its initial brief and substantive message reports. Follow-up delivery SHALL reuse the associated managed workspace, while `steer` SHALL remain a control operation that creates no handoff artifact.
+
+#### Scenario: Managed persistent send
+- **WHEN** the Captain sends substantive work to a managed persistent worker
+- **THEN** Horsepower records the message/run association and requires a validated report artifact for successful completion
+
+#### Scenario: Managed follow-up
+- **WHEN** the Captain delivers a follow-up to an existing managed dispatch
+- **THEN** Horsepower reuses that dispatch's handoff workspace and records the new message evidence without creating an unrelated workspace
+
+#### Scenario: Worker is destroyed
+- **WHEN** a managed persistent worker is destroyed
+- **THEN** its retained handoff artifacts remain available until explicit handoff cleanup or purge
+
+### Requirement: Private retained handoff storage
+Horsepower SHALL store managed handoffs beneath a mode-`0700` Horsepower state directory partitioned by opaque project identity and run ID. Handoff files SHALL be mode `0600`, transactionally written, regular files with relative manifest paths, and protected from traversal, symlink, hardlink, and cross-project access.
+
+#### Scenario: Handoff path escapes
+- **WHEN** a requested brief, report, attachment, or manifest path is absolute, traverses upward, crosses project/run ownership, or encounters a link
+- **THEN** Horsepower rejects it without reading, writing, or deleting the external target
+
+#### Scenario: Handoff exceeds bounds
+- **WHEN** a brief or report exceeds 1 MiB, an attachment exceeds 10 MiB, more than sixteen attachments are present, or run artifacts exceed 20 MiB total
+- **THEN** Horsepower rejects the artifact without silently truncating the managed file
+
+### Requirement: Handoff retention is not conversation recovery
+Managed handoffs SHALL be retained across Pi process exits by default and SHALL support explicit list, inspect, per-run clean, and terminal-run clean operations. Retention SHALL NOT restore worker conversations, automatically resume execution, or replace OpenSpec facts.
+
+#### Scenario: Pi process exits
+- **WHEN** the host Pi process exits after a managed dispatch
+- **THEN** the handoff remains inspectable while the worker conversation is not resumable
+
+#### Scenario: Handoff is explicitly cleaned
+- **WHEN** the user cleans a verified handoff run or terminal handoffs
+- **THEN** Horsepower removes only owned artifacts using no-follow semantics and leaves OpenSpec artifacts unchanged

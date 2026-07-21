@@ -15,6 +15,8 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 - Add setup, slot configuration, doctor, safe uninstall, release scanning, CI, and real Pi smoke coverage.
 - Add a Captain-controlled verification gate: the Captain explicitly chooses change-specific E2E verification, and completion requires passing evidence or an explicit reasoned E2E waiver with alternative evidence.
 - Add optional terminal-state webhook notification at change and dispatch scope, with change notifications enabled by default, dispatch notifications opt-in, HMAC/Bearer/none authentication, redacted payloads, and non-blocking in-process retries.
+- Add an explicit managed text-handoff mode for substantial delegated work, with private brief/report artifacts, bounded attachments, opaque references, retained execution evidence, and no competing OpenSpec facts.
+- Add CLI `enable` and `disable` operations that atomically manage only the Pi extension and skill links while preserving the CLI link, installed releases, configuration, state, memory, and handoffs.
 
 ## Capabilities
 
@@ -34,6 +36,7 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 ## Impact
 
 - Creates the Horsepower TypeScript source, tests, bundled resources, Pi extension, CLI, installer, release scripts, documentation, and GitHub workflows.
+- Adds private retained handoff artifacts under Horsepower state; these artifacts support Captain-worker communication but never restore a worker conversation or replace official OpenSpec records.
 - Adds process-lifetime run coordination and webhook delivery state; this runtime evidence does not replace OpenSpec verification or task facts and is not resumed across Pi processes.
 - Requires Node.js 22.19 or newer, Pi 0.80.10-compatible extension/RPC interfaces, and Fission-AI/OpenSpec 1.6.0 or newer.
 - Installs Horsepower globally under `~/.pi/agent/horsepower`, links Pi resources under `~/.pi/agent/extensions` and `~/.pi/agent/skills`, and links the CLI under `~/.local/bin`.

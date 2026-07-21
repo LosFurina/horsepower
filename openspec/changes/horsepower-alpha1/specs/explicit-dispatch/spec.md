@@ -61,3 +61,36 @@ Dispatch-level webhook notification SHALL be disabled by default and MAY be enab
 #### Scenario: Dispatch notification enabled
 - **WHEN** a dispatch reaches terminal status and dispatch notification is enabled
 - **THEN** Horsepower sends one logical terminal notification through bounded in-process delivery attempts
+
+### Requirement: Explicit handoff mode
+Every work-producing dispatch SHALL explicitly declare `handoffMode` as `managed` or `inline`. Horsepower SHALL NOT infer a mode from prompt length, role, action text, or keywords. `parallel` and `chain` SHALL require `managed` mode.
+
+#### Scenario: Mode omitted
+- **WHEN** a one-shot task, persistent creation, or substantive persistent send omits required `handoffMode`
+- **THEN** Horsepower rejects the request before creating a process, worker, run artifact, or implicit handoff
+
+#### Scenario: Parallel requests inline mode
+- **WHEN** the Captain requests `parallel` or `chain` with `handoffMode: inline`
+- **THEN** Horsepower rejects the request without dispatching any child
+
+### Requirement: Managed brief and report contract
+A managed dispatch SHALL use a private Horsepower handoff workspace containing a Captain-produced brief, a worker-produced report, a relative-path manifest, and optional bounded attachments. Successful managed completion SHALL require a validated report artifact.
+
+#### Scenario: Managed dispatch completes
+- **WHEN** a managed worker produces a valid report within its assigned workspace
+- **THEN** Horsepower validates its regular-file path, mode, UTF-8 content, size, SHA-256, media type, and producer metadata before marking the dispatch completed
+
+#### Scenario: Managed report is missing
+- **WHEN** execution otherwise succeeds without a valid managed report
+- **THEN** Horsepower does not report successful managed completion
+
+#### Scenario: Managed dispatch fails or is canceled
+- **WHEN** a managed dispatch fails or receives semantic cancellation before producing a report
+- **THEN** Horsepower records the truthful terminal state and explicit report absence without fabricating an artifact
+
+### Requirement: Bounded opaque handoff references
+Managed handoff tool output and webhook evidence SHALL expose only bounded summaries and opaque artifact references. It SHALL NOT expose absolute handoff paths, full report content, prompts, model output, or credentials.
+
+#### Scenario: Captain receives managed result
+- **WHEN** a managed report is validated
+- **THEN** the tool result returns its artifact ID, SHA-256, byte count, media type, and bounded summary without returning the managed filesystem path

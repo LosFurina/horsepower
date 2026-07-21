@@ -20,6 +20,8 @@ The first release targets Node.js 22.19+, Pi 0.80.10-compatible extension/RPC in
 - Keep public resources model-neutral and free of private configuration.
 - Require the Captain to choose change-specific E2E verification before reporting completion, while allowing an explicit reasoned waiver with alternative evidence.
 - Notify optional webhooks only when an explicit dispatch or Captain-reported change reaches a terminal state.
+- Use explicit managed text handoffs for substantial delegated work so long briefs, reports, diffs, research, and test evidence do not have to travel through bounded model-facing RPC content.
+- Let users disable and re-enable Horsepower's Pi integration without deleting the CLI, installed release, configuration, state, memory, or handoffs.
 
 **Non-Goals:**
 
@@ -28,6 +30,7 @@ The first release targets Node.js 22.19+, Pi 0.80.10-compatible extension/RPC in
 - Providing another planning document format or project change database.
 - Automatic team creation, fanout, worker expansion, or recursive workers.
 - Persisting live model conversations across host process restarts.
+- Treating retained handoff artifacts as resumable conversations, task state, verification facts, or an alternative to OpenSpec.
 - Providing an OS sandbox, container, credential isolation, or worktree isolation.
 - Publishing Horsepower to npm or installing it through Pi's package manager.
 - Supporting Windows in the initial release.
@@ -121,6 +124,7 @@ The implementation is divided by stable interfaces:
 - `run-lifecycle`: owns process-lifetime dispatch/change terminal transitions and requires explicit Captain change termination.
 - `webhook-notifier`: emits redacted terminal notifications with optional HMAC/Bearer/none authentication and bounded in-process retry.
 - `orchestration`: validates explicit dispatch and delegates to runtimes.
+- `handoffs`: creates and validates private brief/report/attachment artifacts, opaque references, retention metadata, and explicit cleanup without owning task or change facts.
 - `global-runtime`: process-level ownership and cleanup.
 - `extension`: thin Pi registration and context adapter.
 - `cli`: setup, slot configuration, doctor, and uninstall.
@@ -156,6 +160,8 @@ Installation layout:
 
 The installer atomically switches `current`, refuses unrelated path conflicts, never copies resources, never uses `sudo`, and never edits shell startup files. It requires an already installed supported OpenSpec CLI but does not require the current directory to be initialized during global Horsepower installation.
 
+`horsepower disable` removes only verified Horsepower-owned extension and skill links after preflighting both targets; it retains the CLI link, `current`, immutable versions, configuration, memory, state, and handoffs. `horsepower enable` verifies the active release and atomically restores only those two Pi links, rolling back links created by that invocation on failure. Both operations are idempotent and refuse regular files, directories, unrelated links, or untrusted parent paths. They do not communicate with a running Pi process: the current extension and workers remain active until `/reload` or Pi restart.
+
 ### 10. Product namespaces and coexistence
 
 The extension registers `horsepower_subagent` and Horsepower-specific commands. It does not register `/team`, `team_*`, or generic `subagent`, and it never removes another extension. OpenSpec-generated `.pi/skills` and `.pi/prompts` remain untouched.
@@ -172,9 +178,21 @@ Alternative rejected: inferring terminal state from Pi turn end. A turn ending c
 
 Alternative rejected: static or automatically guessed E2E commands. Only the Captain has enough change-specific context to select meaningful E2E coverage.
 
-### 12. Incremental delivery
+### 12. Managed text handoff artifacts
 
-Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, OpenSpec execution gating, Captain-controlled E2E completion, run lifecycle and optional webhook notification, CLI setup/doctor/uninstall, release construction, curl installation, tests, and CI.
+Every work-producing dispatch explicitly declares `handoffMode` as `managed` or `inline`; Horsepower never infers mode from prompt length, role, or keywords. `parallel` and `chain` require `managed`. `single`, persistent `create`, and substantive `send` require an explicit selection; `followUp` reuses the associated managed workspace, while `steer` and observation/cleanup actions do not create a handoff.
+
+Managed artifacts live beneath `~/.pi/agent/horsepower/state/handoffs/<opaque-project-id>/<run-id>/`. Horsepower writes a private `brief.md`, accepts a worker-produced `report.md`, and optionally records at most sixteen attachments. Directories use mode `0700`, files use `0600`, same-directory atomic replacement, no symlink or traversal, and SHA-256/size/media-type/producer metadata in a relative-path manifest. Brief and report are each limited to 1 MiB, attachments to 10 MiB each, and a run to 20 MiB total. A successful managed dispatch requires a valid report; failed or canceled dispatches record truthful report absence.
+
+Tool output contains only a bounded summary and opaque artifact references, never managed absolute paths or full report content. Handoffs are retained across Pi restarts by default and may be listed, inspected, or explicitly cleaned through the CLI. Worker destroy, Pi exit, disable, and uninstall preserve them; purge removes them. Retention does not resume worker conversations, automatically advance work, or create proposal, task, verification, or archive facts. Webhooks carry only opaque evidence references.
+
+Alternative rejected: automatically classifying long work. Hidden heuristics conflict with explicit Captain control.
+
+Alternative rejected: forcing files for every status/control message. Inline communication remains appropriate for short work and control operations.
+
+### 13. Incremental delivery
+
+Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, OpenSpec execution gating, Captain-controlled E2E completion, run lifecycle and optional webhook notification, managed text handoffs, CLI setup/doctor/enable/disable/uninstall, release construction, curl installation, tests, and CI.
 
 Later changes may add richer execution governance—coder routing, tester/reviewer orchestration, Coder Guard, standards, personas, and TUI—but those features must continue to leave all planning and historical facts with OpenSpec.
 

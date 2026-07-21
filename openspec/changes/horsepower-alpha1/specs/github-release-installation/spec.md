@@ -33,6 +33,36 @@ Horsepower SHALL keep immutable release directories, atomically point `current` 
 - **WHEN** post-install doctor fails
 - **THEN** the installer restores the prior `current` target and removes only links created by that run
 
+### Requirement: Reversible Pi integration links
+The CLI SHALL support idempotent `enable` and `disable` operations for the Horsepower Pi extension and skill links. These operations SHALL preserve the CLI link, `current`, immutable versions, configuration, memory, state, handoffs, and project overrides.
+
+#### Scenario: User disables Horsepower
+- **WHEN** both Pi integration links are verified Horsepower-owned or absent
+- **THEN** `horsepower disable` atomically removes only the owned extension and skill links and reports that `/reload` or Pi restart is required
+
+#### Scenario: User enables Horsepower
+- **WHEN** `current`, its manifest, compatibility, entry points, digests, target parents, and link destinations are valid
+- **THEN** `horsepower enable` atomically creates the extension and skill links through `current` without changing the CLI link
+
+#### Scenario: Enable or disable sees a conflict
+- **WHEN** either target is a regular file, directory, unrelated link, or beneath an untrusted linked parent
+- **THEN** the operation refuses all changes and leaves both targets untouched
+
+#### Scenario: Link mutation partially fails
+- **WHEN** enable or disable changes one owned link and a later link operation fails
+- **THEN** Horsepower restores the link state that existed before that invocation
+
+#### Scenario: Existing Pi process remains active
+- **WHEN** the user disables Horsepower while a Pi process already has the extension loaded
+- **THEN** Horsepower does not use IPC or a daemon to stop workers and documents that the change takes effect after `/reload` or restart
+
+### Requirement: Pi integration status diagnostics
+Doctor SHALL distinguish `enabled`, `disabled`, `partially_enabled`, and `conflict` from verified extension and skill link state without treating an intentionally absent Pi link as an installation failure.
+
+#### Scenario: Both Pi links are absent
+- **WHEN** the CLI link and active release remain valid but extension and skill links are absent
+- **THEN** doctor reports `disabled` and recommends `horsepower enable`
+
 ### Requirement: Installer safety and platform support
 The bootstrap SHALL support Linux and macOS, reject Windows, use no `sudo`, run no release lifecycle scripts, modify no shell startup files, and use `/dev/tty` for interactive setup after piped execution.
 
@@ -41,7 +71,7 @@ The bootstrap SHALL support Linux and macOS, reject Windows, use no `sudo`, run 
 - **THEN** it installs without interactive configuration and prints an exact follow-up command
 
 ### Requirement: Safe uninstall
-Normal uninstall SHALL remove only verified Horsepower-owned links, `current`, and managed versions using `lstat` semantics while preserving configuration, overrides, memory, and state. Purge SHALL require explicit confirmation and `--yes` when non-interactive.
+Normal uninstall SHALL remove only verified Horsepower-owned links, `current`, and managed versions using `lstat` semantics while preserving configuration, overrides, memory, state, and handoffs. Purge SHALL require explicit confirmation and `--yes` when non-interactive and SHALL remove retained handoffs only after managed code and links are absent.
 
 #### Scenario: Normal uninstall
 - **WHEN** the user runs `horsepower uninstall`
