@@ -23,6 +23,7 @@ export interface OrchestrationOptions {
   validateModel(slot: ResolvedSlot): void;
   getAgent(name: string): AgentDefinition | Omit<AgentDefinition, "source" | "scope">;
   createWorker(input: CreateWorkerInput): Promise<{ workerId: string }>;
+  beginChange?: (input: { changeId: string }) => { runId: string };
   beginDispatch(input: { changeId: string; summary: string }): { runId: string };
   oneShot?: OneShotExecutor;
   sendWorker?: (input: Record<string, unknown>) => Promise<unknown>;
@@ -80,6 +81,8 @@ function preflight(action: string, input: Record<string, unknown>): void {
     if (!Array.isArray(input.tasks) || input.tasks.length === 0) throw new Error("$.tasks: required");
   } else if (action === "send" || action === "steer") {
     for (const field of ["changeId", "cwd", "workerId", "message"]) required(input, field);
+  } else if (action === "begin_change") {
+    for (const field of ["changeId", "cwd"]) required(input, field);
   } else if (action === "report_terminal") {
     for (const field of ["changeId", "cwd", "runId", "status", "summary"]) required(input, field);
   } else if (["status", "read", "abort", "destroy"].includes(action)) {
@@ -182,6 +185,10 @@ export function createOrchestration(options: OrchestrationOptions) {
         rawInput.force === true,
       );
       if (action === "doctor") return dependency(options.doctor, "doctor")();
+
+      if (action === "begin_change") {
+        return dependency(options.beginChange, "beginChange")({ changeId: changeId! });
+      }
 
       if (action === "report_terminal") {
         const report = dependency(options.reportChangeTerminal, "reportChangeTerminal");

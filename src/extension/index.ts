@@ -1,11 +1,14 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { resolveHorsepowerPaths } from "../config/paths.js";
+import type { WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { horsepowerSubagentSchema } from "../orchestration/schema.js";
 import { acquireGlobalRuntime, type RuntimeLease } from "../runtime/global-runtime.js";
-import type { HorsepowerRuntime, HorsepowerRuntimeContext } from "./runtime.js";
+import type { CreateHorsepowerRuntimeOptions, HorsepowerRuntime, HorsepowerRuntimeContext } from "./runtime.js";
 import { createHorsepowerRuntime } from "./runtime.js";
 
 interface ExtensionRuntime {
@@ -19,12 +22,49 @@ interface ExtensionLease {
 }
 
 export interface HorsepowerExtensionDependencies {
-  acquireRuntime(): ExtensionLease;
+  acquireRuntime(ctx?: ExtensionContext): ExtensionLease;
+}
+
+const MAX_CONTENT_BYTES = 50 * 1024;
+const MAX_CONTENT_LINES = 2_000;
+const OMISSION_NOTICE = "[Horsepower output omitted: exceeded 50 KiB or 2,000 lines]";
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let result = "";
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > maxBytes) break;
+    result += character;
+    bytes += size;
+  }
+  return result;
+}
+
+function boundedContent(value: string): string {
+  let lineBreaks = 0;
+  let lineBoundary = value.length;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 10) continue;
+    lineBreaks += 1;
+    if (lineBreaks === MAX_CONTENT_LINES - 1) {
+      lineBoundary = index;
+      break;
+    }
+  }
+  const lineTruncated = lineBoundary < value.length;
+  const byteTruncated = Buffer.byteLength(value, "utf8") > MAX_CONTENT_BYTES;
+  if (!lineTruncated && !byteTruncated) return value;
+
+  const prefix = lineTruncated ? value.slice(0, lineBoundary) : value;
+  const suffix = `\n${OMISSION_NOTICE}`;
+  return utf8Prefix(prefix, MAX_CONTENT_BYTES - Buffer.byteLength(suffix, "utf8")) + suffix;
 }
 
 function textResult(result: unknown) {
+  const serialized = JSON.stringify(result, undefined, 2) ?? String(result);
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(result, undefined, 2) }],
+    content: [{ type: "text" as const, text: boundedContent(serialized) }],
     details: result,
   };
 }
@@ -37,8 +77,13 @@ export function registerHorsepowerExtension(
   pi: ExtensionAPI,
   dependencies: HorsepowerExtensionDependencies,
 ): void {
-  const lease = dependencies.acquireRuntime();
+  let lease: ExtensionLease | undefined;
   let cleanup: Promise<void> | undefined;
+  const runtime = (ctx: ExtensionContext) => (lease ??= dependencies.acquireRuntime(ctx)).value;
+
+  pi.on("session_start", (_event, ctx) => {
+    lease ??= dependencies.acquireRuntime(ctx);
+  });
 
   pi.registerTool({
     name: "horsepower_subagent",
@@ -47,41 +92,86 @@ export function registerHorsepowerExtension(
     parameters: horsepowerSubagentSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const input = { ...(params as Record<string, unknown>), cwd: ctx.cwd };
-      return textResult(await lease.value.execute(input, runtimeContext(ctx)));
+      return textResult(await runtime(ctx).execute(input, runtimeContext(ctx)));
     },
   });
 
   pi.registerCommand("horsepower-workers", {
     description: "List process-lifetime Horsepower workers",
     handler: async (_args, ctx) => {
-      const result = await lease.value.execute({ action: "list", cwd: ctx.cwd }, runtimeContext(ctx));
+      const result = await runtime(ctx).execute({ action: "list", cwd: ctx.cwd }, runtimeContext(ctx));
       ctx.ui.notify(JSON.stringify(result), "info");
     },
   });
   pi.registerCommand("horsepower-doctor", {
     description: "Show safe Horsepower diagnostics",
     handler: async (_args, ctx) => {
-      const result = await lease.value.execute({ action: "doctor", cwd: ctx.cwd }, runtimeContext(ctx));
+      const result = await runtime(ctx).execute({ action: "doctor", cwd: ctx.cwd }, runtimeContext(ctx));
       ctx.ui.notify(JSON.stringify(result), "info");
     },
   });
 
   pi.on("session_shutdown", async (event) => {
-    if (event.reason === "reload" || event.reason === "quit") {
+    if ((event.reason === "reload" || event.reason === "quit") && lease) {
       cleanup ??= lease.cleanup();
       await cleanup;
     }
   });
 }
 
-function defaultLease(): RuntimeLease<HorsepowerRuntime> {
+function readSettings(path: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    return value !== null && !Array.isArray(value) && typeof value === "object"
+      ? value as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function webhookOptions(homeDir: string, projectDir: string): CreateHorsepowerRuntimeOptions["webhook"] {
+  const paths = resolveHorsepowerPaths({ homeDir, projectDir });
+  const global = readSettings(paths.global.settings).webhook;
+  const project = readSettings(paths.project.settings).webhook;
+  const merged = {
+    ...(global !== null && !Array.isArray(global) && typeof global === "object" ? global : {}),
+    ...(project !== null && !Array.isArray(project) && typeof project === "object" ? project : {}),
+  } as Record<string, unknown>;
+  if (typeof merged.url !== "string" || !merged.url) return undefined;
+  const auth = merged.auth;
+  if (auth === null || Array.isArray(auth) || typeof auth !== "object") return undefined;
+  const rawAuth = auth as Record<string, unknown>;
+  const validAuth = rawAuth.mode === "none" ||
+    (rawAuth.mode === "hmac" && typeof rawAuth.secret === "string" && rawAuth.secret.length > 0) ||
+    (rawAuth.mode === "bearer" && typeof rawAuth.token === "string" && rawAuth.token.length > 0);
+  if (!validAuth) return undefined;
+  const notifications = merged.notifications;
+  const rawNotifications = notifications !== null && !Array.isArray(notifications) && typeof notifications === "object"
+    ? notifications as Record<string, unknown>
+    : {};
+  return {
+    config: { url: merged.url, auth: rawAuth as WebhookNotifierOptions["config"]["auth"] },
+    notifications: {
+      ...(typeof rawNotifications.change === "boolean" ? { change: rawNotifications.change } : {}),
+      ...(typeof rawNotifications.dispatch === "boolean" ? { dispatch: rawNotifications.dispatch } : {}),
+    },
+  };
+}
+
+function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
+  const homeDir = homedir();
   const bundledAgentsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "resources", "agents");
   return acquireGlobalRuntime({
-    create: () => createHorsepowerRuntime({
-      homeDir: homedir(),
-      bundledAgentsDir,
-      readText: (path) => readFile(path, "utf8"),
-    }),
+    create: () => {
+      const webhook = ctx ? webhookOptions(homeDir, ctx.cwd) : undefined;
+      return createHorsepowerRuntime({
+        homeDir,
+        bundledAgentsDir,
+        readText: (path) => readFile(path, "utf8"),
+        ...(webhook ? { webhook } : {}),
+      });
+    },
   });
 }
 

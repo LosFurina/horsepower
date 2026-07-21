@@ -30,6 +30,7 @@ export const horsepowerActionSchemas = {
   abort: strict({ action: Type.Literal("abort"), ...Base, workerId: Type.String({ minLength: 1 }) }),
   destroy: strict({ action: Type.Literal("destroy"), ...Base, workerId: Type.String({ minLength: 1 }), force: Type.Optional(Type.Boolean()) }),
   doctor: strict({ action: Type.Literal("doctor"), ...Base }),
+  begin_change: strict({ action: Type.Literal("begin_change"), ...Change }),
   report_terminal: strict({ action: Type.Literal("report_terminal"), ...Change, runId: Type.String({ minLength: 1 }), status: Type.Union([Type.Literal("completed"), Type.Literal("blocked_needs_human"), Type.Literal("failed"), Type.Literal("canceled")]), summary: Type.String({ minLength: 1, maxLength: 500 }), e2e: Type.Optional(Type.Array(Evidence, { minItems: 1, maxItems: 8 })), e2eWaiver: Type.Optional(Waiver), evidenceRefs: Type.Optional(Type.Array(Type.String({ maxLength: 2_048 }), { maxItems: 20 })) }),
 } as const;
 

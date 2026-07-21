@@ -1,5 +1,5 @@
 export type SafeAction = "status" | "list" | "read" | "abort" | "destroy" | "doctor";
-export type AdvancingAction = "single" | "parallel" | "chain" | "create" | "send" | "steer";
+export type AdvancingAction = "single" | "parallel" | "chain" | "create" | "send" | "steer" | "begin_change" | "report_terminal";
 export type HorsepowerAction = SafeAction | AdvancingAction;
 
 export interface OpenSpecCommandResult {

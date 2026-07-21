@@ -80,6 +80,57 @@ test("signal backstop cleans the live generation then re-delivers the signal", a
   expect(terminate).toHaveBeenCalledWith("SIGTERM");
 });
 
+test("exit during deferred signal cleanup abandons the still-owned generation", async () => {
+  const { acquireGlobalRuntime } = await import("../../src/runtime/global-runtime.js");
+  const host: Record<PropertyKey, unknown> = {};
+  const handlers = new Map<string, () => void>();
+  const events = {
+    on: vi.fn((event: string, handler: () => void) => { handlers.set(event, handler); }),
+    off: vi.fn((event: string, handler: () => void) => {
+      if (handlers.get(event) === handler) handlers.delete(event);
+    }),
+  };
+  const stopped = deferred();
+  const value = { shutdown: vi.fn(() => stopped.promise), abandon: vi.fn() };
+  acquireGlobalRuntime({ host, create: () => value, events, terminate: vi.fn() });
+
+  handlers.get("SIGTERM")!();
+  expect(handlers.has("exit")).toBe(true);
+  const exit = handlers.get("exit")!;
+  exit();
+  exit();
+
+  expect(value.abandon).toHaveBeenCalledTimes(1);
+  stopped.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("exit during stale deferred cleanup does not abandon a replacement", async () => {
+  const { acquireGlobalRuntime, replaceGlobalRuntimeForTest } = await import("../../src/runtime/global-runtime.js");
+  const host: Record<PropertyKey, unknown> = {};
+  const handlers = new Map<string, () => void>();
+  const events = {
+    on: vi.fn((event: string, handler: () => void) => { handlers.set(event, handler); }),
+    off: vi.fn((event: string, handler: () => void) => {
+      if (handlers.get(event) === handler) handlers.delete(event);
+    }),
+  };
+  const stopped = deferred();
+  const oldValue = { shutdown: vi.fn(() => stopped.promise), abandon: vi.fn() };
+  acquireGlobalRuntime({ host, create: () => oldValue, events, terminate: vi.fn() });
+
+  handlers.get("SIGTERM")!();
+  const exit = handlers.get("exit")!;
+  const replacement = { shutdown: vi.fn(async () => undefined), abandon: vi.fn() };
+  replaceGlobalRuntimeForTest(host, replacement);
+  exit();
+
+  expect(oldValue.abandon).not.toHaveBeenCalled();
+  expect(replacement.abandon).not.toHaveBeenCalled();
+  stopped.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
 test("synchronous exit backstop abandons only its live generation", async () => {
   const { acquireGlobalRuntime, RUNTIME_SYMBOL } = await import("../../src/runtime/global-runtime.js");
   const host: Record<PropertyKey, unknown> = {};

@@ -3,6 +3,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, type AgentDefinition } from "../agents/catalog.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
 import { createRunLifecycle } from "../lifecycle/run-lifecycle.js";
+import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary } from "../openspec/boundary.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
 import { createOrchestration } from "../orchestration/facade.js";
@@ -24,6 +25,9 @@ export interface CreateHorsepowerRuntimeOptions {
   readText?: (path: string) => Promise<string>;
   runOpenSpec?: ReturnType<typeof createOpenSpecCliRunner>;
   manager?: PersistentWorkerManager;
+  webhook?: WebhookNotifierOptions & {
+    notifications?: { change?: boolean; dispatch?: boolean };
+  };
 }
 
 async function optionalJson(path: string, readText: (path: string) => Promise<string>): Promise<Record<string, unknown>> {
@@ -57,7 +61,11 @@ export class HorsepowerRuntime {
   constructor(options: CreateHorsepowerRuntimeOptions) {
     this.#options = options;
     this.#manager = options.manager ?? new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter() });
-    this.#lifecycle = createRunLifecycle({});
+    const notifier = options.webhook ? createWebhookNotifier(options.webhook) : undefined;
+    this.#lifecycle = createRunLifecycle({
+      ...(options.webhook?.notifications ? { notifications: options.webhook.notifications } : {}),
+      ...(notifier ? { notify: (event) => notifier.notify(event), stopNotifications: () => notifier.abandon() } : {}),
+    });
     const readText = options.readText ?? ((path: string) => readFile(path, "utf8"));
     this.#boundary = createOpenSpecBoundary({ run: options.runOpenSpec ?? createOpenSpecCliRunner(), readText });
   }
@@ -68,6 +76,7 @@ export class HorsepowerRuntime {
     const paths = resolveHorsepowerPaths({ homeDir: this.#options.homeDir, projectDir: cwd });
     const readText = this.#options.readText ?? ((path: string) => readFile(path, "utf8"));
     const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor"]);
+    const lifecycleOnly = new Set(["begin_change", "report_terminal"]);
     if (!safe.has(String(raw.action))) {
       if (!context.captain) throw new Error(`Captain capability is required for ${String(raw.action)}`);
       await this.#boundary.authorize({
@@ -78,7 +87,7 @@ export class HorsepowerRuntime {
     }
     let slots: ReturnType<typeof createSlotRegistry> | undefined;
     let catalog: Map<string, AgentDefinition> | undefined;
-    if (!safe.has(String(raw.action))) {
+    if (!safe.has(String(raw.action)) && !lifecycleOnly.has(String(raw.action))) {
       const [globalSlots, projectSlots, agents] = await Promise.all([
         optionalJson(paths.global.modelSlots, readText),
         optionalJson(paths.project.modelSlots, readText),
@@ -109,6 +118,7 @@ export class HorsepowerRuntime {
         return agent;
       },
       createWorker: (worker) => this.#manager.create(worker),
+      beginChange: (change) => this.#lifecycle.beginChange(change),
       beginDispatch: (dispatch) => this.#lifecycle.beginDispatch(dispatch),
       oneShot,
       sendWorker: (send) => this.#manager.send(send as never),

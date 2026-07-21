@@ -39,9 +39,14 @@ function current<T extends GlobalRuntimeValue>(host: Record<PropertyKey, unknown
   return host[RUNTIME_SYMBOL] as RuntimeRecord<T> | undefined;
 }
 
-function removeHandlers(record: RuntimeRecord<GlobalRuntimeValue>, events: ProcessEvents): void {
+function removeHandlers(
+  record: RuntimeRecord<GlobalRuntimeValue>,
+  events: ProcessEvents,
+  includeExit = true,
+): void {
   if (!record.handlers) return;
   for (const [event, handler] of Object.entries(record.handlers)) {
+    if (!includeExit && event === "exit") continue;
     events.off(event as "exit" | NodeJS.Signals, handler);
   }
 }
@@ -59,7 +64,7 @@ export function acquireGlobalRuntime<T extends GlobalRuntimeValue>(
       abandoned: false,
     };
     host[RUNTIME_SYMBOL] = record;
-    const abandon = () => abandonGeneration(host, record!, events);
+    const abandon = () => abandonGeneration(host, record!, events, true);
     const terminate = options.terminate ?? ((signal: NodeJS.Signals) => process.kill(process.pid, signal));
     const signal = (name: NodeJS.Signals) => () => {
       void cleanupGeneration(host, record!, events).catch(() => undefined).finally(() => terminate(name));
@@ -91,8 +96,12 @@ async function cleanupGeneration<T extends GlobalRuntimeValue>(
   if (current(host) !== record || record.abandoned) return;
   if (record.cleanup) return record.cleanup;
   delete host[RUNTIME_SYMBOL];
-  removeHandlers(record, events);
-  record.cleanup = record.value.shutdown();
+  // Signals are no longer useful once graceful cleanup begins, but exit must
+  // remain as a synchronous backstop until shutdown settles.
+  removeHandlers(record, events, false);
+  record.cleanup = record.value.shutdown().finally(() => {
+    removeHandlers(record!, events);
+  });
   return record.cleanup;
 }
 
@@ -100,10 +109,13 @@ function abandonGeneration<T extends GlobalRuntimeValue>(
   host: Record<PropertyKey, unknown>,
   record: RuntimeRecord<T>,
   events: ProcessEvents,
+  duringExit = false,
 ): void {
-  if (current(host) !== record || record.abandoned || record.cleanup) return;
+  const owner = current(host);
+  const ownsPendingCleanup = duringExit && owner === undefined && record.cleanup !== undefined;
+  if ((owner !== record && !ownsPendingCleanup) || record.abandoned || (record.cleanup && !duringExit)) return;
   record.abandoned = true;
-  delete host[RUNTIME_SYMBOL];
+  if (owner === record) delete host[RUNTIME_SYMBOL];
   removeHandlers(record, events);
   record.value.abandon();
 }

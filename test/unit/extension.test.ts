@@ -77,6 +77,55 @@ test("safe commands remain usable while advancing actions retain runtime OpenSpe
   }, undefined, undefined, ctx)).rejects.toThrow("OpenSpec project is not healthy");
 });
 
+test("acquires lazily and two extension instances reuse the process-global runtime", async () => {
+  const firstPi = fakePi();
+  const secondPi = fakePi();
+  const host = {};
+  const events = { on: vi.fn(), off: vi.fn() };
+  const runtime = { execute: vi.fn(async () => []), shutdown: vi.fn(async () => undefined), abandon: vi.fn() };
+  const create = vi.fn(() => runtime);
+  const { acquireGlobalRuntime } = await import("../../src/runtime/global-runtime.js");
+  const acquireRuntime = vi.fn(() => acquireGlobalRuntime({ host, events, create }));
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+
+  registerHorsepowerExtension(firstPi as never, { acquireRuntime });
+  registerHorsepowerExtension(secondPi as never, { acquireRuntime });
+  expect(acquireRuntime).not.toHaveBeenCalled();
+
+  const sessionStart = firstPi.handlers.get("session_start")![0]!;
+  await sessionStart({ reason: "startup" }, context());
+  const secondTool = secondPi.tools[0] as { execute(...args: unknown[]): Promise<unknown> };
+  await secondTool.execute("call", { action: "list", cwd: "/wrong" }, undefined, undefined, context());
+
+  expect(acquireRuntime).toHaveBeenCalledTimes(2);
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(runtime.execute).toHaveBeenCalledTimes(1);
+});
+
+test("bounds LLM-facing tool content by UTF-8 bytes and lines while retaining details", async () => {
+  const pi = fakePi();
+  const byteResult = { output: `${"🙂".repeat(16_000)}tail` };
+  const lineResult = Array.from({ length: 2_100 }, (_, index) => ({ index, value: "x" }));
+  const results = [byteResult, lineResult];
+  const execute = vi.fn(async () => results.shift());
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, {
+    acquireRuntime: () => ({ value: { execute }, cleanup: vi.fn(), abandon: vi.fn() }),
+  });
+  const tool = pi.tools[0] as { execute(...args: unknown[]): Promise<{ content: Array<{ text: string }>; details: unknown }> };
+
+  const bytes = await tool.execute("bytes", { action: "list", cwd: "/wrong" }, undefined, undefined, context());
+  expect(Buffer.byteLength(bytes.content[0]!.text, "utf8")).toBeLessThanOrEqual(50 * 1024);
+  expect(bytes.content[0]!.text).toContain("omitted");
+  expect(bytes.content[0]!.text).not.toContain("�");
+  expect(bytes.details).toEqual(byteResult);
+
+  const lines = await tool.execute("lines", { action: "list", cwd: "/wrong" }, undefined, undefined, context());
+  expect(lines.content[0]!.text.split("\n")).toHaveLength(2_000);
+  expect(lines.content[0]!.text).toContain("omitted");
+  expect(lines.details).toEqual(lineResult);
+});
+
 test("new resume and fork preserve runtime while reload and quit cleanup idempotently", async () => {
   const pi = fakePi();
   const cleanup = vi.fn(async () => undefined);
@@ -84,7 +133,9 @@ test("new resume and fork preserve runtime while reload and quit cleanup idempot
   registerHorsepowerExtension(pi as never, {
     acquireRuntime: () => ({ value: { execute: vi.fn() }, cleanup, abandon: vi.fn() }),
   });
+  const start = pi.handlers.get("session_start")![0]!;
   const shutdown = pi.handlers.get("session_shutdown")![0]!;
+  await start({ reason: "startup" }, context());
 
   for (const reason of ["new", "resume", "fork"]) await shutdown({ reason }, context());
   expect(cleanup).not.toHaveBeenCalled();
