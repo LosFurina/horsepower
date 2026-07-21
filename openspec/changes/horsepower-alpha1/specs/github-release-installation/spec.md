@@ -88,6 +88,36 @@ Public repository and release contents SHALL contain no private agents, provider
 - **WHEN** release scanning finds a forbidden secret or private path pattern
 - **THEN** release construction fails before publication
 
+### Requirement: Localized human-facing output configuration
+Horsepower SHALL support exactly `en` and `zh-CN` output locales in Alpha 1. Project `outputLocale` SHALL override global `outputLocale`, missing configuration SHALL resolve to `en`, and unsupported values SHALL be rejected before configuration is changed.
+
+#### Scenario: Project overrides global locale
+- **WHEN** global configuration selects `zh-CN` and project configuration selects `en`
+- **THEN** human-facing conclusions for that project use English while machine fields remain unchanged
+
+#### Scenario: No locale is configured
+- **WHEN** neither project nor global settings define `outputLocale`
+- **THEN** Horsepower uses `en` and reports the effective locale in structured output
+
+#### Scenario: Unsupported locale is configured
+- **WHEN** setup or configure receives a locale other than `en` or `zh-CN`
+- **THEN** Horsepower rejects the update transactionally with a stable untranslated error code and a localized human-readable explanation
+
+### Requirement: Localized installation and diagnostics
+Interactive installation SHALL begin with a bilingual language choice when no locale is already configured and SHALL use the selected locale for the rest of the session. Non-interactive installation SHALL accept `--locale en|zh-CN`. CLI output, errors, doctor findings/remediation, enable/disable conclusions, and webhook human-readable summaries SHALL use the effective locale, while JSON keys, enums, IDs, paths, commands, digests, artifact references, error codes, and raw evidence remain untranslated.
+
+#### Scenario: User selects Chinese during installation
+- **WHEN** the interactive user selects 简体中文
+- **THEN** remaining installer prompts and completion guidance use Chinese and global settings persist `outputLocale: "zh-CN"`
+
+#### Scenario: Installer has no terminal or locale flag
+- **WHEN** no prior locale exists, `/dev/tty` is unavailable, and `--locale` is omitted
+- **THEN** installation uses English and prints the exact command for configuring `zh-CN` later
+
+#### Scenario: Chinese webhook is emitted
+- **WHEN** a terminal event resolves `outputLocale` to `zh-CN`
+- **THEN** its human-readable `summary` is Chinese while event type, status, identifiers, and evidence references remain stable
+
 ### Requirement: Optional webhook setup
 Interactive installation SHALL offer optional webhook configuration and SHALL allow the user to skip it. Configuration SHALL support change notifications enabled by default, dispatch notifications disabled by default, and authentication modes `hmac`, `bearer`, and `none` with HMAC recommended.
 

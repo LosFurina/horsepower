@@ -22,6 +22,7 @@ The first release targets Node.js 22.19+, Pi 0.80.10-compatible extension/RPC in
 - Notify optional webhooks only when an explicit dispatch or Captain-reported change reaches a terminal state.
 - Use explicit managed text handoffs for substantial delegated work so long briefs, reports, diffs, research, and test evidence do not have to travel through bounded model-facing RPC content.
 - Let users disable and re-enable Horsepower's Pi integration without deleting the CLI, installed release, configuration, state, memory, or handoffs.
+- Render all Horsepower-owned human-facing conclusions in configured `en` or `zh-CN` while keeping machine contracts stable and internal Agent collaboration language unconstrained.
 
 **Non-Goals:**
 
@@ -202,7 +203,21 @@ Alternative rejected: a product-wide fixed number of review rounds. Appropriate 
 
 Alternative rejected: automatically dispatching a fixer or reviewer from a verdict. Automatic continuation transfers orchestration authority away from the Captain and permits unbounded review loops.
 
-### 14. Incremental delivery
+### 14. Localized human-facing conclusions
+
+Horsepower supports exactly `en` and `zh-CN` in Alpha 1. Global `outputLocale` lives in `~/.pi/agent/horsepower/settings.json`; optional project `outputLocale` lives in `.pi/horsepower/settings.json` and overrides the global value. Missing settings resolve to `en`. Unknown locale values are rejected transactionally rather than guessed or silently downgraded.
+
+A centralized exhaustive message catalog renders Horsepower-owned human-facing CLI text, errors, doctor findings and remediation, installer interaction and completion messages, `horsepower_subagent` status/summary/conclusion text, dispatch/change/E2E-waiver/review-campaign conclusions, and webhook `summary`. Machine fields remain stable and untranslated: JSON keys, action/status/enum/error codes, commands, paths, filenames, slot and agent IDs, run/change/campaign IDs, digests, artifact references, and raw command evidence. Structured outputs include the effective `outputLocale` so the Captain and receivers do not infer it.
+
+Worker briefs, reports, reviewer/fixer discussion, raw model output, and internal evidence are not translated or language-constrained. The public Horsepower skill instructs the Captain to present principal user-facing conclusions in the effective locale even when internal Agent material is English. Horsepower never asks a model to translate opaque evidence or machine identifiers.
+
+Before locale is configured, interactive installation begins with one bilingual language choice and immediately uses that selection for the rest of the session. Non-interactive installation accepts `--locale en|zh-CN`; with no existing setting or explicit flag it uses `en` and prints a locale-appropriate follow-up configuration command. Catalog completeness is verified at build/test time; a missing translation is an implementation error, not a runtime fallback.
+
+Alternative rejected: localizing only CLI text. Pi tool conclusions, doctor output, webhooks, and installation are also human-visible and must remain coherent.
+
+Alternative rejected: translating all worker communication. Internal English collaboration is efficient and must not destabilize machine evidence or force translation into the execution path.
+
+### 15. Incremental delivery
 
 Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, OpenSpec execution gating, Captain-controlled E2E completion, run lifecycle and optional webhook notification, managed text handoffs, CLI setup/doctor/enable/disable/uninstall, release construction, curl installation, tests, and CI.
 

@@ -120,3 +120,14 @@ The Captain SHALL classify campaign findings by root cause against the declared 
 #### Scenario: Reviewer expands acceptance scope
 - **WHEN** a reviewer proposes a requirement outside the campaign's declared OpenSpec-grounded acceptance scope
 - **THEN** Horsepower records it as out-of-scope evidence and does not authorize another dispatch from that proposal
+
+### Requirement: Localized Captain-facing conclusions
+Horsepower SHALL render its human-facing tool status, summary, and conclusion text in the effective `outputLocale`, which SHALL be `en` or `zh-CN`. Structured machine fields and internal worker artifacts SHALL remain stable and untranslated.
+
+#### Scenario: Chinese output is effective
+- **WHEN** project or global configuration resolves `outputLocale` to `zh-CN`
+- **THEN** `horsepower_subagent` returns Chinese human-readable conclusions plus stable action, status, ID, digest, evidence, and artifact-reference fields and explicitly reports `outputLocale: "zh-CN"`
+
+#### Scenario: Internal report is English
+- **WHEN** a worker produces an English brief, report, reviewer result, or raw evidence under Chinese output configuration
+- **THEN** Horsepower preserves that artifact unchanged while the Captain-facing principal conclusion remains Chinese
