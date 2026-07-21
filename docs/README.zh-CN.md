@@ -33,7 +33,9 @@ bootstrap 下载 `horsepower-v<version>.tar.gz` 及 SHA-256 asset，验证精确
 
 每次 worker 创建或 one-shot dispatch 都必须明确提供 `modelSlot`。必需 slot 为 `judgment`、`craft`、`utility`；内置 fallback 为 `speed -> utility`、`context -> judgment`，也支持自定义 slot。role 不绑定 provider/model。
 
-运行 `horsepower setup --interactive`，为全部必需 slot 选择当前 Pi 可见的标识符。Horsepower 使用权威的当前元数据或受限 live probe 验证每个精确 thinking 值；不会从 Pi 的粗粒度 reasoning 标记推断所有 level。认证、配额、超时、传输、响应格式错误和未知故障属于**无法确认**，不是支持证据；权威 accepted-values 明确排除时才是**不支持**。setup 会先验证全部 binding，再进行一次原子写入；取消或失败会保留原文件。
+用户负责在运行 Horsepower 前正确配置每个 Pi provider、model 和模型专属 `thinkingLevelMap`。Horsepower 只消费 Pi 暴露的 model catalog；不会发现模型完整的 thinking-level 集合、决定 provider-specific wire value，也不会修改或修复 `~/.pi/agent/models.json`。其中，本地映射中的 `null` 会被视为明确排除。请先查阅 provider 文档并正确配置 Pi。
+
+运行 `horsepower setup --interactive`，为全部必需 slot 选择当前 Pi 可见的标识符。Horsepower 使用 Pi 当前暴露的 model metadata 或受限 live probe 验证每个精确 thinking 值；不会从 Pi 的粗粒度 reasoning 标记推断所有 level。认证、配额、超时、传输、响应格式错误和未知故障属于**无法确认**，不是支持证据；accepted-values 明确排除时才是**不支持**。setup 会先验证全部 slot binding，再进行一次原子写入；取消或失败会保留原文件。setup 只写 Horsepower slot binding，不会修改 Pi 模型配置。
 
 成功证据只存在于当前进程，按精确标识符、thinking 值和 catalog revision 区分，最多复用十分钟。新进程、过期证据或 catalog revision 变化都会重新 probe。实际 worker 明确拒绝后，匹配证据立即失效。Horsepower 保留已配置 binding，绝不会静默降低 thinking、替换标识符或用 fallback 自动重试。请重新运行 `horsepower setup --interactive` 选择其他 binding；若结果无法确认，则在上游临时问题消失后重试。live probe 使用用户配置的上游，可能增加延迟或费用；自动 acceptance test 只使用仓库内确定性的离线 fixture。
 
