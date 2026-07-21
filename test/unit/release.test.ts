@@ -459,6 +459,92 @@ slotPolicy:
   expect(() => scanPublicContent([{ path: "bin/horsepower", content: Buffer.from("return {\n  model: binding.model,\n  provider: resolved.provider,\n};\n") }])).not.toThrow();
 });
 
+test("privacy scanner policy source and tests are themselves scannable", async () => {
+  const paths = ["src/release/index.ts", "test/unit/release.test.ts"];
+  const contents = await Promise.all(paths.map(async (path) => ({ path, content: await readFile(path) })));
+  expect(() => scanPublicContent(contents)).not.toThrow();
+});
+
+test("privacy scanner applies binding and credential checks to scanner policy files", () => {
+  const policyPaths = ["src/release/index.ts", "test/unit/release.test.ts"];
+  const bindingKey = ["mod", "el"].join("");
+  const credentialKey = ["api", "key"].join("_");
+  for (const path of policyPaths) {
+    expect(() => scanPublicContent([{
+      path,
+      content: Buffer.from(`export const injected = { ${bindingKey}: "private-production-v9" };`),
+    }]), `${path} binding`).toThrow(/Forbidden public content \(concrete-model\)/u);
+    expect(() => scanPublicContent([{
+      path,
+      content: Buffer.from(`const ${credentialKey} = "${"z".repeat(28)}";`),
+    }]), `${path} credential`).toThrow(/Forbidden public content \(credential\)/u);
+  }
+});
+
+test("privacy scanner uses bounded placeholder grammar", () => {
+  const modelKey = ["mod", "el"].join("");
+  const safe = [["${", "ENV_VAR}"].join(""), "<token>", "YOUR_API_KEY", "example.invalid", "test-value"];
+  const unsafe = [
+    ["test", "private-production-v9"].join("-"),
+    ["test", "production-secret", "v7"].join("-"),
+    ["example", "staging-credential"].join("-"),
+    ["sample", "production-model"].join("-"),
+    ["fake", "private-model"].join("-"),
+    ["dummy", "staging-model"].join("-"),
+    ["mock", "production-token"].join("-"),
+  ];
+  for (const value of safe) {
+    expect(() => scanPublicContent([{
+      path: "config/example.yaml",
+      content: Buffer.from(`${modelKey}: ${value}\n`),
+    }]), value).not.toThrow();
+  }
+  for (const value of unsafe) {
+    expect(() => scanPublicContent([{
+      path: "config/runtime.yaml",
+      content: Buffer.from(`${modelKey}: ${value}\n`),
+    }]), value).toThrow(/Forbidden public content \(concrete-model\)/u);
+  }
+});
+
+test("privacy scanner rejects home paths in assignment, structured, command, and prose contexts", () => {
+  const macHome = ["", "Users", "alice", "projects", "private"].join("/");
+  const linuxHome = ["", "home", "alice", ".config", "private"].join("/");
+  const samples = [
+    ["shell assignment", `WORKSPACE=${macHome}`],
+    ["env quoted assignment", `CACHE='${linuxHome}'`],
+    ["JSON value", JSON.stringify({ workspace: macHome })],
+    ["YAML value", `workspace: ${linuxHome}`],
+    ["array value", `paths=["${macHome}"]`],
+    ["command argument", `tool --cwd=${linuxHome} run`],
+    ["prose", `The retained workspace is ${macHome}.`],
+    ["colon adjacent", `workspace:${linuxHome}`],
+  ] as const;
+  for (const [label, content] of samples) {
+    expect(() => scanPublicContent([{ path: `docs/${label}.txt`, content: Buffer.from(content) }]), label)
+      .toThrow(/Forbidden public content \(machine-path\)/u);
+  }
+});
+
+test("privacy scanner rejects private artifact filename and segment variants", () => {
+  const forbidden = [
+    "private-agent.md",
+    "nested/private_agent.json",
+    "nested/privateagent.backup",
+    "Nested/PRIVATE-AGENT-v2.md",
+    "state/persona_history.txt",
+    "state/sessionHistory.jsonl",
+    "archive/privateSession-v3.ndjson",
+  ];
+  for (const path of forbidden) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from("otherwise harmless") }]), path)
+      .toThrow(/Forbidden public content \((?:private-agent|session-history)\)/u);
+  }
+  for (const path of ["docs/private-api.md", "src/session.ts", "docs/personality.md", "history-notes.md"]) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from("generic public terminology") }]), path).not.toThrow();
+  }
+});
+
 test("privacy scanner rejects language-agnostic concrete bindings and letter-only labeled credentials", () => {
   const key = (left: string, right = "") => [left, right].join("");
   const forbidden = [
@@ -520,7 +606,7 @@ test("privacy scanner permits semantic names, neutral prose, references, placeho
   const safe = [
     ["src/slots.ts", `interface Binding { ${modelKey}: string; ${providerKey}?: unknown }\nconst typedModelSlot: string = 'craft';\nconst model: Model | undefined = binding.model;\nconst provider: Provider<string> = resolved.provider;\nconst apiKey: Secret = authValue.secret;\nconst secret: Secret = authValue.secret;\nconst modelSlot = 'craft';\nconst ${modelKey} = parsed.values.get(id);\nconst token = parsed.values.get('token');\nheaders.authorization = \`Bearer \${options.config.auth.token}\`;\nconst token: Token = props[i];\nconst credential: Credential = item[field];\nconst secret: Secret = error ?? stack.pop();\nconst password: Password = { source: authValue.secret };\nconst credential: Secret = \`\${scope}-settings-secret\`;\nreturn { ${modelKey}: binding.${modelKey}, ${providerKey}: resolved.${providerKey}, ${modelKey}s: options.${modelKey}s, secret: authValue.secret };\n`],
     ["docs/model-neutral.md", "Models and providers are selected through semantic slots. A model-neutral release has no concrete binding.\n"],
-    ["config/example.env", "API_KEY=your_api_key_here\nTOKEN=<token>\nPASSWORD=changeme\n"],
+    ["config/example.env", `${["API", "KEY"].join("_")}=your_api_key_here\nTOKEN=<token>\nPASSWORD=changeme\n`],
     ["config/example.yaml", `${modelKey}: <model-name>\n${providerKey}: your-provider-here\n${modelKey}s: [provider/model, project/craft, p/m, unknown/model]\n`],
     ["test/runtime-fixture.ts", `const key = ['model', 'Id'].join('');\nconst fixture = { [key]: ['private', 'model'].join('-') };\n`],
   ] as const;

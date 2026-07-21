@@ -531,7 +531,8 @@ function verifyArchiveManifest(entries: readonly ArchiveEntry[], expected: Relea
 }
 
 const forbiddenPathPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
-  { id: "private-agent", pattern: /(?:^|[/\\])(?:personas?|private-agents?|\.pi[/\\]agents?)(?:[/\\]|$)/iu },
+  { id: "private-agent", pattern: /(?:^|[/\\])(?:personas?(?:[-_.][^/\\]+)?|private[-_]?agents?(?:[-_.][^/\\]+)?|privateagents?(?:[-_.][^/\\]+)?|\.pi[/\\]agents?)(?:[/\\]|$)/iu },
+  { id: "session-history", pattern: /(?:^|[/\\])(?:persona[-_]?history|session[-_]?history|private[-_]?(?:session|history)|private(?:session|history))(?:[-_.][^/\\]+)?(?:[/\\]|$)/iu },
   { id: "session-history", pattern: /(?:^|[/\\])(?:sessions?|history|transcripts?)(?:[/\\]|\.(?:jsonl?|ndjson)\b)/iu },
   { id: "competing-plan", pattern: /(?:implementation|generated|external)[-_ ]plan\.md\b/iu },
 ];
@@ -546,21 +547,39 @@ const structuredBindingKeys = new Map<string, string>([
   ["modelname", "concrete-model"],
 ]);
 
+const exactPlaceholders = new Set([
+  "change-me", "changeme", "example.invalid", "none", "null", "placeholder", "redacted", "test-value",
+  "your-api-key", "your-api-key-here", "your_api_key", "your_api_key_here", "your-provider-here",
+  "provider/model", "provider/judge", "provider/util", "provider/strong", "provider/craft", "provider/cheap",
+  "provider/vision", "provider/ta", "provider/za", "provider/missing", "mutated/model", "other/model",
+  "project/craft", "p/m", "unknown/model",
+  "provider", "model", "provider-model", "provider-judge", "provider-util", "provider-strong", "provider-craft",
+  "provider-cheap", "provider-vision", "provider-ta", "provider-za", "provider-missing", "project-craft",
+  "mutated-model", "other-model", "pm", "unknown-model", "token-value",
+  "remove-this-credential", "never-print-this", "stale-credential", "malformed-project-secret",
+  "incompatible-project-secret", "valid-secret", "incompatible-project-token", "stale-project-token",
+  "notification-credential", "auth-credential", "array-credential", "global-credential", "project-secret-token",
+  "project-secret-header",
+]);
+
 function isPlaceholder(value: string): boolean {
   const trimmed = value.trim();
-  if (/^<[^>]+>$/u.test(trimmed)) return true;
-  const normalized = trimmed.toLowerCase().replace(/[^a-z0-9]/gu, "");
-  return normalized.length === 0
-    || /^(?:your|example|sample|placeholder|replace|redacted|dummy|fake|test|change|todo|none|null|neverprint)/u.test(normalized)
-    || /^(?:provider|model|providermodel|providerjudge|providerutil|providerstrong|providercraft|providercheap|providervision|providerta|providerza|providermissing|projectcraft|mutatedmodel|othermodel|pm|unknownmodel|tokenvalue)$/u.test(normalized)
-    || /^(?:remove|stale|malformed|incompatible|requested|notification|auth|array|global|project)[a-z]*(?:credential|secret|token|header)$/u.test(normalized)
-    || /(?:here|changeme|redacted|placeholder)$/u.test(normalized);
+  return trimmed.length === 0
+    || /^<[^<>\r\n]+>$/u.test(trimmed)
+    || /^\$\{[A-Z_][A-Z0-9_]*\}$/u.test(trimmed)
+    || /^YOUR_[A-Z0-9_]+$/u.test(trimmed)
+    || /^[a-z0-9-]+\.invalid$/iu.test(trimmed)
+    || exactPlaceholders.has(trimmed.toLowerCase());
 }
 
 function hasConcreteStructuredValue(value: unknown): boolean {
   if (typeof value === "string") return !isPlaceholder(value);
   if (Array.isArray(value)) return value.some(hasConcreteStructuredValue);
-  if (value !== null && typeof value === "object") return Object.values(value as Record<string, unknown>).some(hasConcreteStructuredValue);
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 1 && entries[0]?.[1] === null && isPlaceholder(`\${${entries[0][0]}}`)) return false;
+    return entries.some(([, nested]) => hasConcreteStructuredValue(nested));
+  }
   return value !== null && value !== undefined;
 }
 
@@ -604,9 +623,10 @@ function isRuntimeReference(value: string): boolean {
     || /^`\s*(?:(?:bearer|basic)\s+)?\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}(?:-(?:settings-)?(?:secret|token|credential|password))?\s*`$/iu.test(value)) return true;
   const coalescing = /^([A-Za-z_$][\w$]*)\s*\?\?\s*(.+)$/u.exec(value);
   if (coalescing && isRuntimeReference(coalescing[2] ?? "")) return true;
-  if (value.startsWith("{")) {
+  if (value.startsWith("{") || value.startsWith("[")) {
     const literals = [...value.matchAll(/(["'])(.*?)\1/gu)].map((match) => match[2] ?? "");
-    return literals.every((literal) => literal.length < 16 || isPlaceholder(literal));
+    return (value.startsWith("{") || literals.length > 0)
+      && literals.every((literal) => literal.length < 16 || isPlaceholder(literal));
   }
   return false;
 }
@@ -647,7 +667,7 @@ function findTextualBinding(text: string): string | undefined {
       if (body.length > 0 && !safePlaceholderArray && !safePlaceholderMap) return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
       continue;
     }
-    const bare = /^([^\s,;}]+)/u.exec(tail)?.[1] ?? "";
+    const bare = /^(\$\{[A-Z_][A-Z0-9_]*\}|[^\s,;}]+)/u.exec(tail)?.[1] ?? "";
     const typeKeyword = /^(?:string|unknown|never|boolean|number|undefined|null)$/u.test(bare);
     if (bare.length > 0 && !typeKeyword && !isRuntimeReference(bare) && !isPlaceholder(bare)) {
       return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
@@ -665,15 +685,15 @@ function hasLabeledCredential(text: string): boolean {
     const expression = quoted ?? template ?? /^([^,;}\r\n]+)/u.exec(tail)?.[1] ?? "";
     const value = expression.trim();
     if (isRuntimeReference(value)) continue;
-    const credential = /^(?:bearer|basic)\s+(.+)$/iu.exec(value)?.[1] ?? value;
-    if (credential.length >= 16 && !isRuntimeReference(credential) && !isPlaceholder(credential)) return true;
+    const candidate = /^(?:bearer|basic)\s+(.+)$/iu.exec(value)?.[1] ?? value;
+    if (candidate.length >= 16 && !isRuntimeReference(candidate) && !isPlaceholder(candidate)) return true;
   }
   return false;
 }
 
 const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: "credential", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
-  { id: "machine-path", pattern: /(?:^|[\s"'`(])(?:\/Users\/[^/\s]+\/|\/home\/[^/\s]+\/|[A-Za-z]:\\Users\\[^\\\s]+\\)/mu },
+  { id: "machine-path", pattern: /(?:\/Users\/[^/\s"'`<>{}\[\]]+\/|\/home\/[^/\s"'`<>{}\[\]]+\/|[A-Za-z]:\\Users\\[^\\\s"'`<>{}\[\]]+\\)/mu },
   { id: "legacy-workflow", pattern: /\b(?:AgentFlow|Superpowers)\b/mu },
 ];
 
@@ -706,13 +726,13 @@ export function scanPublicContent(contents: readonly PublicContent[]): void {
       const binding = findStructuredBinding(structuredDocument(item.path, text));
       if (binding) throw new Error(`Forbidden public content (${binding}) in ${item.path}`);
     }
-    const definesPrivacyPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";
     const textualBinding = findTextualBinding(text);
-    if (textualBinding && !definesPrivacyPolicy) throw new Error(`Forbidden public content (${textualBinding}) in ${item.path}`);
-    if (hasLabeledCredential(text) && !definesPrivacyPolicy) throw new Error(`Forbidden public content (credential) in ${item.path}`);
+    if (textualBinding) throw new Error(`Forbidden public content (${textualBinding}) in ${item.path}`);
+    if (hasLabeledCredential(text)) throw new Error(`Forbidden public content (credential) in ${item.path}`);
     for (const forbidden of forbiddenPatterns) {
+      const isScannerPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";
       const isApprovedPlanningHistory = item.path.startsWith("openspec/");
-      if (forbidden.id === "legacy-workflow" && (definesPrivacyPolicy || isApprovedPlanningHistory)) continue;
+      if (forbidden.id === "legacy-workflow" && (isScannerPolicy || isApprovedPlanningHistory)) continue;
       if (forbidden.pattern.test(text)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);
     }
   }
