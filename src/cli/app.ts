@@ -7,6 +7,7 @@ import { isCredentialKey, parseWebhookSettings, redactCredentials, validateWebho
 import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-notifier.js";
 import { validateOpenSpecInstallation } from "../openspec/boundary.js";
 import { validateReleaseCompatibility } from "../release-manifest.js";
+import { createHandoffStore } from "../handoffs/store.js";
 import { createSlotRegistry, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
@@ -312,6 +313,7 @@ export function createCli(options: CliOptions) {
   const paths = resolveHorsepowerPaths({ homeDir: options.homeDir, projectDir: options.cwd });
   const topology = installTopology(options.homeDir);
   const writeConfigs = options.writeConfigs ?? writeJsonObjects;
+  const handoffs = createHandoffStore({ stateRoot: join(paths.global.root, "state") });
 
   function registryData(config: { global: SlotConfiguration; project: SlotConfiguration }) {
     const registry = createSlotRegistry({ ...config, ...(options.models ? { models: options.models } : {}) });
@@ -559,6 +561,15 @@ export function createCli(options: CliOptions) {
     only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("uninstall accepts no arguments"); await verifyTrustedPath(options.homeDir, topology.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); const versions = await versionsState(topology.versions); const states = await Promise.all(topology.links.map(async (link) => ({ link, state: await linkState(link.path, link.target) }))); const conflicts = [current, versions, ...states.map(({ state }) => state)].filter((state) => state.status === "conflict"); if (conflicts.length) throw new Error(conflicts.map((state) => state.message).join("; "));
     for (const { link, state } of states) if (state.status === "owned") await rm(link.path); if (current.status === "owned") await rm(topology.current); if (versions.status === "owned") await rm(topology.versions, { recursive: true }); return { data: { preserved: [paths.global.modelSlots, paths.global.settings, join(topology.root, "memory"), join(topology.root, "state"), paths.project.root] }, message: "Horsepower code uninstalled; user data preserved" };
   }
+  async function handoff(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
+    only(parsed, [], []);
+    const action = parsed.positionals[0];
+    if (action === "list" && parsed.positionals.length === 1) return { data: await handoffs.list({ projectPath: options.cwd }), message: "Handoffs listed" };
+    if (action === "inspect" && parsed.positionals.length === 2) return { data: await handoffs.inspect({ projectPath: options.cwd, runId: parsed.positionals[1]! }), message: "Handoff inspected" };
+    if (action === "clean" && parsed.positionals.length === 2) return { data: await handoffs.clean({ projectPath: options.cwd, runId: parsed.positionals[1]! }), message: "Handoff cleaned" };
+    if (action === "clean-terminal" && parsed.positionals.length === 1) return { data: await handoffs.cleanTerminal({ projectPath: options.cwd }), message: "Terminal handoffs cleaned" };
+    throw new UsageError("handoff requires list, inspect RUN_ID, clean RUN_ID, or clean-terminal");
+  }
   async function purge(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); const confirmed = await options.confirm("Permanently remove Horsepower user data? Type yes to continue: "); if (confirmed === undefined) throw new UsageError("Purge requires --yes when no controlling terminal is available"); if (!confirmed) return { data: { purged: false }, message: "Purge canceled; no data changed" }; }
     await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const codePaths = [topology.current, topology.versions, ...topology.links.map((link) => link.path)]; for (const path of codePaths) await requireAbsent(path, `Run horsepower uninstall before purge; installed code or link remains: ${path}`); const root = await purgeRootState(topology.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory", standards: "directory", workflows: "directory", personas: "directory", memory: "directory", state: "directory" }); const projectRoot = await purgeRootState(paths.project.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory" }); for (const state of [root, projectRoot]) if (state.status === "conflict") throw new Error(state.message); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
@@ -574,7 +585,7 @@ export function createCli(options: CliOptions) {
       const mutatesOrManagesInstallation = command === "setup" || command === "set" || command === "unset" || command === "webhook" || command === "preflight" || command === "uninstall" || command === "purge" || (command === "configure" && parsed.values.size > 0);
       if (mutatesOrManagesInstallation) requireSupportedPlatform();
       if (command === "setup") result = await setup(parsed); else if (command === "configure") result = await configure(parsed); else if (command === "slots") { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); result = { data: await slotsData() }; }
-      else if (command === "set") result = await setSlot(parsed); else if (command === "unset") result = await unsetSlot(parsed); else if (command === "webhook") result = await webhook(parsed); else if (command === "doctor") result = await doctor(parsed); else if (command === "preflight") result = await preflight(parsed); else if (command === "uninstall") result = await uninstall(parsed); else if (command === "purge") result = await purge(parsed); else throw new UsageError(`Unknown command: ${command}`);
+      else if (command === "set") result = await setSlot(parsed); else if (command === "unset") result = await unsetSlot(parsed); else if (command === "webhook") result = await webhook(parsed); else if (command === "handoff") result = await handoff(parsed); else if (command === "doctor") result = await doctor(parsed); else if (command === "preflight") result = await preflight(parsed); else if (command === "uninstall") result = await uninstall(parsed); else if (command === "purge") result = await purge(parsed); else throw new UsageError(`Unknown command: ${command}`);
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1); return machine ? { exitCode, stdout: json({ data: result.data, ok }), stderr: "" } : { exitCode, stdout: `${result.message ?? (ok ? "OK" : "FAILED")}\n`, stderr: "" };
     } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const message = String(redactCredentials(rawMessage)); return machine ? { exitCode, stdout: "", stderr: json({ error: { code: usage ? "USAGE" : "FAILED", message }, ok: false }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}\n` }; }
   } };

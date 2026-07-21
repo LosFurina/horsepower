@@ -39,7 +39,7 @@ test("advancing actions report official OpenSpec gating before dispatch configur
   });
 
   await expect(runtime.execute({
-    action: "create", changeId: "change-a", cwd: "/stale", name: "w", agent: "coder", modelSlot: "craft",
+    action: "create", handoffMode: "inline", changeId: "change-a", cwd: "/stale", name: "w", agent: "coder", modelSlot: "craft",
   }, { captain: true, cwd: "/active/project", modelRegistry: modelRegistry as never }))
     .rejects.toThrow("Official OpenSpec CLI was not found");
   expect(runOpenSpec).toHaveBeenCalledWith(["--version"], { cwd: "/active/project" });
@@ -84,7 +84,7 @@ test("configured dispatch notification uses injected transport and shutdown aban
   });
 
   await runtime.execute({
-    action: "create", changeId: "change-a", name: "w", agent: "coder", modelSlot: "craft",
+    action: "create", handoffMode: "inline", changeId: "change-a", name: "w", agent: "coder", modelSlot: "craft",
   }, { captain: true, cwd: project, modelRegistry: modelRegistry as never });
   await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
   await vi.waitFor(() => expect(sleep).toHaveBeenCalledTimes(1));
@@ -252,7 +252,7 @@ test("shutdown waits for an admitted one-shot, terminal notification, then destr
   const ctx = { captain: true, cwd: project, modelRegistry: modelRegistry as never };
 
   const execution = runtime.execute({
-    action: "single", changeId: "change-a", name: "task", agent: "coder", modelSlot: "craft", task: "work",
+    action: "single", handoffMode: "inline", changeId: "change-a", name: "task", agent: "coder", modelSlot: "craft", task: "work",
   }, ctx);
   await vi.waitFor(() => expect(oneShot.single).toHaveBeenCalledTimes(1));
   const shutdown = runtime.shutdown();
@@ -388,7 +388,7 @@ test("advancing actions use official OpenSpec checks in the active cwd", async (
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
   const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText });
 
-  await runtime.execute({ action: "create", changeId: "change-a", cwd: "/stale", name: "w", agent: "coder", modelSlot: "craft" }, {
+  await runtime.execute({ action: "create", handoffMode: "inline", changeId: "change-a", cwd: "/stale", name: "w", agent: "coder", modelSlot: "craft" }, {
     captain: true, cwd: project, modelRegistry: modelRegistry as never,
   });
 

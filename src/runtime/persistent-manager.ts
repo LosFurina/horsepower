@@ -16,6 +16,8 @@ export interface WorkerLaunchInput {
   prompt: string;
   tools: readonly string[];
   initialMessage?: string;
+  handoffMode?: "managed" | "inline";
+  handoffRunId?: string;
 }
 
 export interface WorkerConnection {
@@ -41,6 +43,8 @@ export interface WorkerSummary {
   createdAt: number;
   lastActivityAt: number;
   error?: string;
+  handoffMode?: "managed" | "inline";
+  handoffRunId?: string;
 }
 
 interface MessageState {
@@ -157,6 +161,8 @@ export class PersistentWorkerManager {
           queuedMessageIds: [],
           createdAt: now,
           lastActivityAt: now,
+          ...(input.handoffMode ? { handoffMode: input.handoffMode } : {}),
+          ...(input.handoffRunId ? { handoffRunId: input.handoffRunId } : {}),
         },
         connection,
         events: createEventStream({ byteLimit: this.#eventByteLimit }),
@@ -299,6 +305,12 @@ export class PersistentWorkerManager {
     const message = this.#require(workerId).messages.get(messageId);
     if (!message) throw new Error(`Unknown messageId: ${messageId}`);
     return this.#completedResult(workerId, await message.promise);
+  }
+
+  associateHandoff(workerId: string, runId: string): void {
+    const worker = this.#require(workerId);
+    worker.summary.handoffMode = "managed";
+    worker.summary.handoffRunId = runId;
   }
 
   messageStatus(workerId: string, messageId: string): MessageStatus {

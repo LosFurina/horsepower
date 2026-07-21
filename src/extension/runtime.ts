@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, type AgentDefinition } from "../agents/catalog.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
+import { createHandoffStore } from "../handoffs/store.js";
 import { createRunLifecycle } from "../lifecycle/run-lifecycle.js";
 import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary } from "../openspec/boundary.js";
@@ -132,6 +133,7 @@ export class HorsepowerRuntime {
       catalog = new Map(agents.map((agent) => [agent.name, agent]));
     }
     const oneShot = this.#options.oneShot ?? createOneShotExecutor({ run: createPiJsonRunner() });
+    const handoffs = createHandoffStore({ stateRoot: resolve(paths.global.root, "state") });
     const bindNotification = (scope: "change" | "dispatch") => {
       const webhook = this.#options.resolveWebhook?.(cwd);
       if (!webhook) return undefined;
@@ -170,6 +172,7 @@ export class HorsepowerRuntime {
       waitForMessage: (workerId, messageId) => this.#manager.waitForMessage(workerId, messageId),
       messageStatus: (workerId, messageId) => this.#manager.messageStatus(workerId, messageId) as "completed" | "failed" | "canceled",
       statusWorker: (workerId) => this.#manager.status(workerId),
+      associateHandoff: (workerId, runId) => this.#manager.associateHandoff(workerId, runId),
       listWorkers: () => this.#manager.list(),
       readWorker: (workerId, options) => this.#manager.read(workerId, options),
       abortWorker: (workerId) => this.#manager.abort(workerId),
@@ -179,6 +182,9 @@ export class HorsepowerRuntime {
       reportChangeTerminal: (report) => this.#lifecycle.reportChangeTerminal(report),
       identityForRun: (runId) => this.#lifecycle.identity(runId),
       projectId,
+      createHandoff: (input) => handoffs.create(input),
+      validateHandoffReport: (input) => handoffs.validateReport(input),
+      recordHandoffTerminal: (input) => handoffs.recordTerminal(input),
       trackSettlement: (settlement) => { this.#track(settlement); },
     });
     return orchestration.execute({ ...raw, cwd }, { captain: context.captain });

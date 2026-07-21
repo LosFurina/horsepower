@@ -2,6 +2,7 @@ import { Type, type TProperties } from "typebox";
 
 const Base = { cwd: Type.String({ minLength: 1 }) };
 const Change = { ...Base, changeId: Type.String({ minLength: 1 }) };
+const HandoffMode = Type.Union([Type.Literal("managed"), Type.Literal("inline")]);
 const Task = Type.Object({
   name: Type.String({ minLength: 1 }), agent: Type.String({ minLength: 1 }),
   modelSlot: Type.String({ minLength: 1 }), task: Type.String({ minLength: 1 }),
@@ -18,11 +19,11 @@ const Waiver = Type.Object({
 const strict = (properties: TProperties) => Type.Object(properties, { additionalProperties: false });
 
 export const horsepowerActionSchemas = {
-  single: strict({ action: Type.Literal("single"), ...Change, name: Type.String({ minLength: 1 }), agent: Type.String({ minLength: 1 }), modelSlot: Type.String({ minLength: 1 }), task: Type.String({ minLength: 1 }) }),
-  parallel: strict({ action: Type.Literal("parallel"), ...Change, tasks: Type.Array(Task, { minItems: 1, maxItems: 8 }) }),
-  chain: strict({ action: Type.Literal("chain"), ...Change, tasks: Type.Array(Task, { minItems: 1, maxItems: 8 }) }),
-  create: strict({ action: Type.Literal("create"), ...Change, name: Type.String({ minLength: 1 }), agent: Type.String({ minLength: 1 }), modelSlot: Type.String({ minLength: 1 }) }),
-  send: strict({ action: Type.Literal("send"), ...Change, workerId: Type.String({ minLength: 1 }), message: Type.String({ minLength: 1 }), delivery: Type.Optional(Type.Union([Type.Literal("reject"), Type.Literal("followUp")])), wait: Type.Optional(Type.Boolean()), timeoutMs: Type.Optional(Type.Number({ minimum: 1 })) }),
+  single: strict({ action: Type.Literal("single"), ...Change, handoffMode: HandoffMode, name: Type.String({ minLength: 1 }), agent: Type.String({ minLength: 1 }), modelSlot: Type.String({ minLength: 1 }), task: Type.String({ minLength: 1 }) }),
+  parallel: strict({ action: Type.Literal("parallel"), ...Change, handoffMode: HandoffMode, tasks: Type.Array(Task, { minItems: 1, maxItems: 8 }) }),
+  chain: strict({ action: Type.Literal("chain"), ...Change, handoffMode: HandoffMode, tasks: Type.Array(Task, { minItems: 1, maxItems: 8 }) }),
+  create: strict({ action: Type.Literal("create"), ...Change, handoffMode: HandoffMode, name: Type.String({ minLength: 1 }), agent: Type.String({ minLength: 1 }), modelSlot: Type.String({ minLength: 1 }), brief: Type.Optional(Type.String({ minLength: 1 })) }),
+  send: strict({ action: Type.Literal("send"), ...Change, handoffMode: HandoffMode, workerId: Type.String({ minLength: 1 }), message: Type.String({ minLength: 1 }), delivery: Type.Optional(Type.Union([Type.Literal("reject"), Type.Literal("followUp")])), wait: Type.Optional(Type.Boolean()), timeoutMs: Type.Optional(Type.Number({ minimum: 1 })) }),
   steer: strict({ action: Type.Literal("steer"), ...Change, workerId: Type.String({ minLength: 1 }), message: Type.String({ minLength: 1 }), wait: Type.Optional(Type.Boolean()), timeoutMs: Type.Optional(Type.Number({ minimum: 1 })) }),
   status: strict({ action: Type.Literal("status"), ...Base, workerId: Type.String({ minLength: 1 }) }),
   list: strict({ action: Type.Literal("list"), ...Base }),

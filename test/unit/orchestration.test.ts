@@ -15,7 +15,7 @@ test("exports a strict Horsepower TypeBox action schema", async () => {
   expect(JSON.stringify(schema)).toContain("e2eWaiver");
   expect(JSON.stringify(schema)).toContain("modelSlot");
   expect(Check(schema as never, { action: "list", cwd: "/project", task: "wrong" })).toBe(false);
-  expect(Check(schema as never, { action: "create", changeId: "x", cwd: "/project", name: "n", agent: "a" })).toBe(false);
+  expect(Check(schema as never, { action: "create", handoffMode: "inline", changeId: "x", cwd: "/project", name: "n", agent: "a" })).toBe(false);
 });
 
 test("rejects advancing actions without Captain capability before authorization", async () => {
@@ -32,7 +32,7 @@ test("rejects advancing actions without Captain capability before authorization"
   });
 
   await expect(orchestration.execute({
-    action: "create", changeId: "x", cwd: "/project", name: "n", agent: "a", modelSlot: "judgment",
+    action: "create", handoffMode: "inline", changeId: "x", cwd: "/project", name: "n", agent: "a", modelSlot: "judgment",
   }, { captain: false })).rejects.toThrow("Captain capability is required for create");
   expect(authorized).toBe(false);
 });
@@ -79,7 +79,7 @@ test("rejects an unknown resolved model before spawning any work", async () => {
   });
 
   await expect(captain(orchestration, {
-    action: "create", changeId: "x", cwd: "/project", name: "n", agent: "a", modelSlot: "judgment",
+    action: "create", handoffMode: "inline", changeId: "x", cwd: "/project", name: "n", agent: "a", modelSlot: "judgment",
   })).rejects.toThrow("Unknown model: unknown/model");
   expect(workers).toBe(0);
 });
@@ -100,7 +100,7 @@ test("authorizes and executes exactly one explicitly requested persistent creati
   });
 
   await expect(captain(orchestration!, {
-    action: "create",
+    action: "create", handoffMode: "inline",
     changeId: "horsepower-alpha1",
     cwd: "/project",
     name: "reviewer-1",
@@ -126,11 +126,13 @@ test("dispatches exactly the explicit parallel tasks and reports terminal lifecy
       chain: async () => [],
     },
     beginDispatch: () => ({ runId: "run-parallel" }),
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief.md`, reportPath: `/private/${runId}/report.md` }, reference: { runId } }),
+    validateHandoffReport: async ({ runId }) => ({ runId, artifactId: "report" }),
     reportDispatchTerminal: async (report) => { terminal.push(report.status); },
   });
 
   const result = await captain(orchestration, {
-    action: "parallel",
+    action: "parallel", handoffMode: "managed",
     changeId: "horsepower-alpha1",
     cwd: "/project",
     tasks: [
@@ -249,7 +251,7 @@ test("validates persistent settlement dependencies before beginning a dispatch",
   });
 
   await expect(captain(orchestration, {
-    action: "send", changeId: "x", cwd: "/project", workerId: "w", message: "m",
+    action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m",
   })).rejects.toThrow("Orchestration dependency is unavailable: waitForMessage");
   expect(dispatches).toBe(0);
 });
@@ -272,7 +274,7 @@ test("clears the timeout when waited settlement completes first", async () => {
     });
 
     await captain(orchestration, {
-      action: "send", changeId: "x", cwd: "/project", workerId: "w", message: "m",
+      action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m",
       wait: true, timeoutMs: 1_500,
     });
     expect(vi.getTimerCount()).toBe(0);
@@ -300,7 +302,7 @@ test("wait timeout returns without canceling persistent dispatch settlement", as
   });
 
   await expect(captain(orchestration, {
-    action: "send", changeId: "x", cwd: "/project", workerId: "w", message: "m",
+    action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m",
     wait: true, timeoutMs: 2,
   })).resolves.toMatchObject({ runId: "run-send", timedOut: true });
   expect(terminal).toEqual([]);
@@ -326,7 +328,7 @@ test("maps wait-true semantic cancellation to canceled dispatch terminal", async
   });
 
   await expect(captain(orchestration, {
-    action: "send", changeId: "x", cwd: "/project", workerId: "w", message: "m", wait: true,
+    action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m", wait: true,
   })).rejects.toThrow("canceled");
   expect(terminal).toEqual(["canceled"]);
 });
@@ -348,7 +350,7 @@ test("maps semantic persistent cancellation to canceled dispatch terminal", asyn
   });
 
   await captain(orchestration, {
-    action: "send", changeId: "x", cwd: "/project", workerId: "w", message: "m",
+    action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m",
   });
   await new Promise((resolve) => setImmediate(resolve));
   expect(terminal).toEqual(["canceled"]);
@@ -372,11 +374,11 @@ test("settles create and persistent-send dispatch runs without creating extra wo
   });
 
   await captain(orchestration, {
-    action: "create", changeId: "horsepower-alpha1", cwd: "/project",
+    action: "create", handoffMode: "inline", changeId: "horsepower-alpha1", cwd: "/project",
     name: "reviewer-1", agent: "reviewer", modelSlot: "judgment",
   });
   await captain(orchestration, {
-    action: "send", changeId: "horsepower-alpha1", cwd: "/project",
+    action: "send", handoffMode: "inline", changeId: "horsepower-alpha1", cwd: "/project",
     workerId: "worker-1", message: "review", wait: false,
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -401,7 +403,7 @@ test("reports failed create dispatch without spawning replacement work", async (
   });
 
   await expect(captain(orchestration, {
-    action: "create", changeId: "horsepower-alpha1", cwd: "/project",
+    action: "create", handoffMode: "inline", changeId: "horsepower-alpha1", cwd: "/project",
     name: "reviewer-1", agent: "reviewer", modelSlot: "judgment",
   })).rejects.toThrow("startup failed");
   expect(terminal).toEqual(["failed"]);
@@ -420,7 +422,7 @@ test("reports nested missing fields with their full array path", async () => {
   });
 
   await expect(captain(orchestration, {
-    action: "parallel",
+    action: "parallel", handoffMode: "managed",
     changeId: "horsepower-alpha1",
     cwd: "/project",
     tasks: [{ name: "reviewer-1", agent: "reviewer", modelSlot: "judgment" }],
@@ -441,7 +443,7 @@ test("rejects invalid input before authorization or worker creation with a path-
   });
 
   await expect(captain(orchestration, {
-    action: "create",
+    action: "create", handoffMode: "inline",
     changeId: "horsepower-alpha1",
     cwd: "/project",
     name: "reviewer-1",
