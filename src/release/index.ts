@@ -121,10 +121,22 @@ function assertSafeRelativePath(path: string, label: string): void {
   }
 }
 
-async function copyCanonical(source: string, destination: string, executable: boolean): Promise<void> {
+async function canonicalizeDirectoryTree(root: string, directory: string): Promise<void> {
+  const relativeDirectory = relative(root, directory);
+  const directories = [root];
+  if (relativeDirectory.length > 0) {
+    const components = relativeDirectory.split(sep);
+    for (let index = 1; index <= components.length; index += 1) directories.push(join(root, ...components.slice(0, index)));
+  }
+  for (const path of directories) await chmod(path, 0o755);
+}
+
+async function copyCanonical(stageRoot: string, source: string, destination: string, executable: boolean): Promise<void> {
   const info = await lstat(source);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Release source must be a regular file: ${source}`);
-  await mkdir(dirname(destination), { recursive: true, mode: 0o755 });
+  const destinationDirectory = dirname(destination);
+  await mkdir(destinationDirectory, { recursive: true, mode: 0o755 });
+  await canonicalizeDirectoryTree(stageRoot, destinationDirectory);
   await writeFile(destination, await readFile(source), { mode: executable ? 0o755 : 0o644 });
   await chmod(destination, executable ? 0o755 : 0o644);
 }
@@ -171,9 +183,10 @@ async function stageRelease(repositoryRoot: string, stageRoot: string, version: 
 
   await rm(stageRoot, { recursive: true, force: true });
   await mkdir(stageRoot, { recursive: true, mode: 0o755 });
+  await chmod(stageRoot, 0o755);
   for (const copy of copies.sort((left, right) => comparePath(left.target, right.target))) {
     assertSafeRelativePath(copy.target, "Staged path");
-    await copyCanonical(copy.source, join(stageRoot, copy.target), copy.executable === true);
+    await copyCanonical(stageRoot, copy.source, join(stageRoot, copy.target), copy.executable === true);
   }
 
   const publicPackage = {
@@ -183,10 +196,14 @@ async function stageRelease(repositoryRoot: string, stageRoot: string, version: 
     type: packageJson.type,
     engines: packageJson.engines,
   };
-  await writeFile(join(stageRoot, "package.json"), stableJson(publicPackage), { mode: 0o644 });
+  const stagedPackagePath = join(stageRoot, "package.json");
+  await writeFile(stagedPackagePath, stableJson(publicPackage), { mode: 0o644 });
+  await chmod(stagedPackagePath, 0o644);
   const digests = Object.fromEntries(await Promise.all(criticalFiles.map(async (path) => [path, sha256(await readFile(join(stageRoot, path)))])));
   const manifest: ReleaseManifest = { version, compatibility: { ...compatibility }, entryPoints: { ...entryPoints }, digests };
-  await writeFile(join(stageRoot, "release-manifest.json"), stableJson(manifest), { mode: 0o644 });
+  const stagedManifestPath = join(stageRoot, "release-manifest.json");
+  await writeFile(stagedManifestPath, stableJson(manifest), { mode: 0o644 });
+  await chmod(stagedManifestPath, 0o644);
   const allowedFiles = [...copies.map(({ target }) => target), "package.json", "release-manifest.json"].sort();
   return { allowedFiles, manifest };
 }
@@ -225,13 +242,16 @@ async function buildReleaseWith(dependencies: ReleaseBuilderDependencies, option
   try {
     const outputInfo = await lstat(outputDir);
     if (!outputInfo.isDirectory() || outputInfo.isSymbolicLink()) throw new Error(`Release output must be a regular directory: ${outputDir}`);
-    for (const name of await readdir(outputDir)) {
+    const existingOutputNames = (await readdir(outputDir)).sort(comparePath);
+    const existingOutputPaths: string[] = [];
+    for (const name of existingOutputNames) {
       if (!outputNames.has(name)) throw new Error(`Release output contains unexpected entry: ${name}`);
       const path = join(outputDir, name);
       const info = await lstat(path);
       if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Release output contains unsafe entry: ${name}`);
-      await rm(path);
+      existingOutputPaths.push(path);
     }
+    for (const path of existingOutputPaths) await rm(path);
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
     await mkdir(outputDir, { recursive: true, mode: 0o755 });
@@ -638,11 +658,14 @@ function withoutComments(text: string): string {
   });
 }
 
-const typeAnnotation = String.raw`[A-Za-z_$][\w$]*(?:\s*<[^;={}]*>)?(?:\s*\[\s*\])?(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\s*<[^;={}]*>)?(?:\s*\[\s*\])?)*`;
+const qualifiedTypeName = String.raw`(?:import\s*\(\s*["'][^"']+["']\s*\)\s*\.\s*)?[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*`;
+const genericType = String.raw`${qualifiedTypeName}(?:\s*<[^;={}]*>)?(?:\s*\[\s*\])*`;
+const typeTerm = String.raw`(?:\(\s*)?(?:(?:keyof|readonly|typeof)\s+)?${genericType}(?:\s*\))?`;
+const typeAnnotation = String.raw`${typeTerm}(?:\s*(?:\||&)\s*${typeTerm})*`;
 
 function assignmentPattern(keys: string): RegExp {
   const start = String.raw`(?:^|[\n;,{}])\s*(?:(?:[-*]\s+)|(?:export\s+)?(?:const|let|var)\s+|export\s+)?(?:[A-Za-z_$][\w$]*\s*(?:\.\s*|\[\s*))?["']?`;
-  return new RegExp(`${start}(${keys})["']?\\s*\\]?\\s*(?::\\s*${typeAnnotation}\\s*=|[:=])\\s*`, "gimu");
+  return new RegExp(`${start}(${keys})["']?\\s*\\]?\\s*(?:\\??\\s*:\\s*${typeAnnotation}\\s*=|[:=])\\s*`, "gimu");
 }
 
 function findTextualBinding(text: string): string | undefined {
@@ -691,10 +714,18 @@ function hasLabeledCredential(text: string): boolean {
   return false;
 }
 
+const githubFineGrainedPrefix = ["github", "pat"].join("_");
+const githubCredentialPattern = new RegExp(
+  String.raw`(?:\bgh[pousr]_[A-Za-z0-9]{36}\b|(?:^|[^A-Za-z0-9_])${githubFineGrainedPrefix}_[A-Za-z0-9_]{82}(?![A-Za-z0-9_]))`,
+  "mu",
+);
+const legacyWorkflowNames = [["Agent", "Flow"].join(""), ["Super", "powers"].join("")];
+
 const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
-  { id: "credential", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
-  { id: "machine-path", pattern: /(?:\/Users\/[^/\s"'`<>{}\[\]]+\/|\/home\/[^/\s"'`<>{}\[\]]+\/|[A-Za-z]:\\Users\\[^\\\s"'`<>{}\[\]]+\\)/mu },
-  { id: "legacy-workflow", pattern: /\b(?:AgentFlow|Superpowers)\b/mu },
+  { id: "credential", pattern: githubCredentialPattern },
+  { id: "credential", pattern: /\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
+  { id: "machine-path", pattern: /(?:\/Users\/[^/\s"'`<>{}\[\]]+|\/home\/[^/\s"'`<>{}\[\]]+)(?:\/|(?=$|[\s"'`<>{}\[\],.;:)]))|[A-Za-z]:\\Users\\[^\\\s"'`<>{}\[\]]+\\/mu },
+  { id: "legacy-workflow", pattern: new RegExp(String.raw`\b(?:${legacyWorkflowNames.join("|")})\b`, "mu") },
 ];
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -730,9 +761,8 @@ export function scanPublicContent(contents: readonly PublicContent[]): void {
     if (textualBinding) throw new Error(`Forbidden public content (${textualBinding}) in ${item.path}`);
     if (hasLabeledCredential(text)) throw new Error(`Forbidden public content (credential) in ${item.path}`);
     for (const forbidden of forbiddenPatterns) {
-      const isScannerPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";
       const isApprovedPlanningHistory = item.path.startsWith("openspec/");
-      if (forbidden.id === "legacy-workflow" && (isScannerPolicy || isApprovedPlanningHistory)) continue;
+      if (forbidden.id === "legacy-workflow" && isApprovedPlanningHistory) continue;
       if (forbidden.pattern.test(text)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);
     }
   }

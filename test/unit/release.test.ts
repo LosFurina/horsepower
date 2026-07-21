@@ -128,6 +128,28 @@ test("produces byte-identical archives and a verifiable external checksum", asyn
   expect((await readdir(firstOutput)).sort()).toEqual(["horsepower-v1.2.3-alpha.1.tar.gz", "horsepower-v1.2.3-alpha.1.tar.gz.sha256"]);
 });
 
+test("produces byte-identical validated releases under umask 022 and 077", async () => {
+  const repositoryRoot = await fixtureRepository();
+  const outputs: Buffer[] = [];
+  const previousUmask = process.umask();
+  try {
+    for (const [index, umask] of [0o022, 0o077].entries()) {
+      process.umask(umask);
+      const result = await buildRelease({
+        repositoryRoot,
+        outputDir: join(await temporaryDirectory(), `umask-${index}`),
+        version: "1.2.3-alpha.1",
+        runBuild: async () => {},
+      });
+      outputs.push(await readFile(result.archivePath));
+      await expect(inspectReleaseArchive(result.archivePath)).resolves.toMatchObject({ entries: expect.any(Array) });
+    }
+  } finally {
+    process.umask(previousUmask);
+  }
+  expect(outputs[1]).toEqual(outputs[0]);
+});
+
 test("refuses to clear unrelated output content", async () => {
   const repositoryRoot = await fixtureRepository();
   const outputDir = join(await temporaryDirectory(), "assets");
@@ -137,6 +159,19 @@ test("refuses to clear unrelated output content", async () => {
   await expect(buildRelease({ repositoryRoot, outputDir, version: "1.2.3-alpha.1", runBuild: async () => {} }))
     .rejects.toThrow("Release output contains unexpected entry: keep.txt");
   expect(await readFile(join(outputDir, "keep.txt"), "utf8")).toBe("owned by someone else");
+});
+
+test("preflights every existing output entry before deleting any", async () => {
+  const repositoryRoot = await fixtureRepository();
+  const outputDir = join(await temporaryDirectory(), "assets");
+  const archiveName = "horsepower-v1.2.3-alpha.1.tar.gz";
+  await mkdir(outputDir);
+  await writeFile(join(outputDir, archiveName), "existing archive");
+  await mkdir(join(outputDir, `${archiveName}.sha256`));
+
+  await expect(buildRelease({ repositoryRoot, outputDir, version: "1.2.3-alpha.1", runBuild: async () => {} }))
+    .rejects.toThrow(`Release output contains unsafe entry: ${archiveName}.sha256`);
+  expect(await readFile(join(outputDir, archiveName), "utf8")).toBe("existing archive");
 });
 
 test("requires strict SemVer and requested/package version agreement", async () => {
@@ -398,8 +433,8 @@ test("privacy scanner rejects structured bindings, standalone credentials, NUL c
     ["encoded basic secret", `${authorization}: Basic ${Buffer.from("user:long-private-password").toString("base64")}`],
     ["machine path", ["", "Users", "alice", "work", "private"].join("/")],
     ["home path", ["", "home", "alice", ".config", "private"].join("/")],
-    ["legacy reference", "AgentFlow runtime"],
-    ["forbidden workflow", "Superpowers process"],
+    ["legacy reference", `${["Agent", "Flow"].join("")} runtime`],
+    ["forbidden workflow", `${["Super", "powers"].join("")} process`],
   ] as const;
   for (const [label, content] of forbidden) {
     const extension = /provider|model/u.test(label) ? "yaml" : "txt";
@@ -465,10 +500,11 @@ test("privacy scanner policy source and tests are themselves scannable", async (
   expect(() => scanPublicContent(contents)).not.toThrow();
 });
 
-test("privacy scanner applies binding and credential checks to scanner policy files", () => {
+test("privacy scanner applies every policy check to scanner policy files", () => {
   const policyPaths = ["src/release/index.ts", "test/unit/release.test.ts"];
   const bindingKey = ["mod", "el"].join("");
   const credentialKey = ["api", "key"].join("_");
+  const legacyNames = [["Agent", "Flow"].join(""), ["Super", "powers"].join("")];
   for (const path of policyPaths) {
     expect(() => scanPublicContent([{
       path,
@@ -478,6 +514,10 @@ test("privacy scanner applies binding and credential checks to scanner policy fi
       path,
       content: Buffer.from(`const ${credentialKey} = "${"z".repeat(28)}";`),
     }]), `${path} credential`).toThrow(/Forbidden public content \(credential\)/u);
+    for (const legacyName of legacyNames) {
+      expect(() => scanPublicContent([{ path, content: Buffer.from(`injected ${legacyName} reference`) }]), `${path} ${legacyName}`)
+        .toThrow(/Forbidden public content \(legacy-workflow\)/u);
+    }
   }
 });
 
@@ -508,9 +548,13 @@ test("privacy scanner uses bounded placeholder grammar", () => {
 });
 
 test("privacy scanner rejects home paths in assignment, structured, command, and prose contexts", () => {
-  const macHome = ["", "Users", "alice", "projects", "private"].join("/");
-  const linuxHome = ["", "home", "alice", ".config", "private"].join("/");
+  const macRoot = ["", "Users", "alice"].join("/");
+  const linuxRoot = ["", "home", "alice"].join("/");
+  const macHome = `${macRoot}/projects/private`;
+  const linuxHome = `${linuxRoot}/.config/private`;
   const samples = [
+    ["bare macOS home", macRoot],
+    ["bare Linux home", linuxRoot],
     ["shell assignment", `WORKSPACE=${macHome}`],
     ["env quoted assignment", `CACHE='${linuxHome}'`],
     ["JSON value", JSON.stringify({ workspace: macHome })],
@@ -564,17 +608,52 @@ test("privacy scanner rejects language-agnostic concrete bindings and letter-onl
 });
 
 test("privacy scanner rejects typed TypeScript bindings across whitespace and comments", () => {
+  const modelKey = ["mod", "el"].join("");
+  const providerKey = ["provid", "er"].join("");
+  const credentialKey = ["cred", "ential"].join("");
+  const secretKey = ["sec", "ret"].join("");
+  const apiKey = ["api", "Key"].join("");
   const forbidden = [
-    ["typed model", `const model: string = "private-alpha";`],
-    ["generic provider", `const provider: Provider<string> = /* hidden */ "secret-cloud";`],
-    ["union api key", `const apiKey:
+    ["typed model", `const ${modelKey}: string = "private-alpha";`],
+    ["qualified model", `const ${modelKey}: Foo.Bar = "private-qualified";`],
+    ["optional qualified model", `class Config { ${modelKey}?: Foo.Bar = "private-optional"; }`],
+    ["imported model", `const ${modelKey}: import("private-types").Model = "private-imported";`],
+    ["namespaced generic provider", `const ${providerKey}: Namespace.Type<string> = "secret-cloud";`],
+    ["readonly credential", `const ${credentialKey}: ReadonlyArray<Secret> = "${"c".repeat(28)}";`],
+    ["array provider", `const ${providerKey}: Provider[] = "secret-array";`],
+    ["parenthesized model union", `const ${modelKey}: (Foo.Bar | Namespace.Type<string>) = "private-union";`],
+    ["intersection credential", `const ${credentialKey}: Secret & Branded = "${"d".repeat(28)}";`],
+    ["commented multiline qualified provider", `const ${providerKey} /* key */:
+      Namespace /* namespace */ . Type<
+        Imported.Value
+      >
+      = "secret-commented";`],
+    ["generic provider", `const ${providerKey}: Provider<string> = /* hidden */ "secret-cloud";`],
+    ["union api key", `const ${apiKey}:
   string | Secret
   =
   "${"a".repeat(28)}";`],
-    ["typed secret field", `class Config { secret /* gap */ : Secret | string /* gap */ = "${"b".repeat(28)}"; }`],
+    ["typed secret field", `class Config { ${secretKey} /* gap */ : Secret | string /* gap */ = "${"b".repeat(28)}"; }`],
   ] as const;
   for (const [label, content] of forbidden) {
     expect(() => scanPublicContent([{ path: `src/${label}.ts`, content: Buffer.from(content) }]), label).toThrow(/Forbidden public content/u);
+  }
+});
+
+test("privacy scanner detects current GitHub credential shapes without matching near misses", () => {
+  const classic = `${["gh", "p"].join("")}_${"a".repeat(36)}`;
+  const fineGrained = `${["github", "pat"].join("_")}_${"A1_".repeat(27)}Z`;
+  for (const [label, value] of [["classic", classic], ["fine-grained", fineGrained]] as const) {
+    expect(() => scanPublicContent([{ path: `${label}.txt`, content: Buffer.from(value) }]), label)
+      .toThrow(/Forbidden public content \(credential\)/u);
+  }
+  const nearMisses = [
+    `${["gh", "p"].join("")}_${"a".repeat(35)}`,
+    `${["github", "pat"].join("_")}_${"A1_".repeat(27)}`,
+    `${["github", "pat"].join("_")}_${"A1_".repeat(27)}-`,
+  ];
+  for (const value of nearMisses) {
+    expect(() => scanPublicContent([{ path: "near-miss.txt", content: Buffer.from(value) }]), value).not.toThrow();
   }
 });
 
@@ -604,7 +683,7 @@ test("privacy scanner permits semantic names, neutral prose, references, placeho
   const modelKey = ["mod", "el"].join("");
   const providerKey = ["provid", "er"].join("");
   const safe = [
-    ["src/slots.ts", `interface Binding { ${modelKey}: string; ${providerKey}?: unknown }\nconst typedModelSlot: string = 'craft';\nconst model: Model | undefined = binding.model;\nconst provider: Provider<string> = resolved.provider;\nconst apiKey: Secret = authValue.secret;\nconst secret: Secret = authValue.secret;\nconst modelSlot = 'craft';\nconst ${modelKey} = parsed.values.get(id);\nconst token = parsed.values.get('token');\nheaders.authorization = \`Bearer \${options.config.auth.token}\`;\nconst token: Token = props[i];\nconst credential: Credential = item[field];\nconst secret: Secret = error ?? stack.pop();\nconst password: Password = { source: authValue.secret };\nconst credential: Secret = \`\${scope}-settings-secret\`;\nreturn { ${modelKey}: binding.${modelKey}, ${providerKey}: resolved.${providerKey}, ${modelKey}s: options.${modelKey}s, secret: authValue.secret };\n`],
+    ["src/slots.ts", `interface Binding { ${modelKey}: string; ${providerKey}?: unknown }\nconst typedModelSlot: string = 'craft';\ninterface Options { models?: ModelCatalog; }\nconst model: Model | undefined = binding.model;\nconst qualifiedModel: Foo.Bar = binding.model;\nconst importedModel: import("types").Model = binding.model;\nconst provider: Provider<string> = resolved.provider;\nconst qualifiedProvider: Namespace.Type<string> = resolved.provider;\nconst apiKey: Secret = authValue.secret;\nconst secret: Secret = authValue.secret;\nconst modelSlot = 'craft';\nconst ${modelKey} = parsed.values.get(id);\nconst token = parsed.values.get('token');\nheaders.authorization = \`Bearer \${options.config.auth.token}\`;\nconst token: Token = props[i];\nconst credential: Credential = item[field];\nconst secret: Secret = error ?? stack.pop();\nconst password: Password = { source: authValue.secret };\nconst credential: Secret = \`\${scope}-settings-secret\`;\nreturn { ${modelKey}: binding.${modelKey}, ${providerKey}: resolved.${providerKey}, ${modelKey}s: options.${modelKey}s, secret: authValue.secret };\n`],
     ["docs/model-neutral.md", "Models and providers are selected through semantic slots. A model-neutral release has no concrete binding.\n"],
     ["config/example.env", `${["API", "KEY"].join("_")}=your_api_key_here\nTOKEN=<token>\nPASSWORD=changeme\n`],
     ["config/example.yaml", `${modelKey}: <model-name>\n${providerKey}: your-provider-here\n${modelKey}s: [provider/model, project/craft, p/m, unknown/model]\n`],
