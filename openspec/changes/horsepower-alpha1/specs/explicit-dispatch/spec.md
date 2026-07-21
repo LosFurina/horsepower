@@ -94,3 +94,29 @@ Managed handoff tool output and webhook evidence SHALL expose only bounded summa
 #### Scenario: Captain receives managed result
 - **WHEN** a managed report is validated
 - **THEN** the tool result returns its artifact ID, SHA-256, byte count, media type, and bounded summary without returning the managed filesystem path
+
+### Requirement: Captain-defined review campaign budget
+Before the first reviewer dispatch in a review campaign, the Captain SHALL provide a positive finite dispatch budget and a fixed acceptance scope. Horsepower SHALL count review and corrective dispatches against that campaign and SHALL NOT permit a worker, verdict, recommendation, or helper to increase, reset, replace, or automatically continue the budget.
+
+#### Scenario: Campaign consumes its budget
+- **WHEN** the Captain explicitly dispatches a reviewer or corrective worker in a review campaign
+- **THEN** Horsepower consumes one unit from the Captain-defined budget and records the dispatch under the campaign ID
+
+#### Scenario: Reviewer rejects work
+- **WHEN** a reviewer reports `NOT APPROVED` or recommends another worker
+- **THEN** Horsepower returns that evidence to the Captain without automatically dispatching a fixer or another reviewer
+
+#### Scenario: Campaign budget is exhausted
+- **WHEN** another review or corrective dispatch would exceed the Captain-defined budget
+- **THEN** Horsepower rejects it until the Captain ends the campaign, changes official scope, reports `blocked_needs_human`, or supplies a human-authorized budget increase with a non-empty reason
+
+### Requirement: Review finding deduplication and scope stability
+The Captain SHALL classify campaign findings by root cause against the declared acceptance scope. Additional examples, syntax variants, or adversarial inputs for an existing root cause SHALL NOT create a new finding identity or silently expand campaign scope.
+
+#### Scenario: Reviewer supplies another variant
+- **WHEN** a later review reports a new reproduction of an already recorded root cause
+- **THEN** Horsepower correlates it with the existing finding and leaves continuation judgment with the Captain
+
+#### Scenario: Reviewer expands acceptance scope
+- **WHEN** a reviewer proposes a requirement outside the campaign's declared OpenSpec-grounded acceptance scope
+- **THEN** Horsepower records it as out-of-scope evidence and does not authorize another dispatch from that proposal

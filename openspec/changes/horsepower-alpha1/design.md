@@ -190,7 +190,19 @@ Alternative rejected: automatically classifying long work. Hidden heuristics con
 
 Alternative rejected: forcing files for every status/control message. Inline communication remains appropriate for short work and control operations.
 
-### 13. Incremental delivery
+### 13. Captain-defined review campaigns
+
+A review campaign is an explicit Captain-owned sequence of review and corrective dispatches. Before its first reviewer dispatch, the Captain defines a positive finite dispatch budget and a fixed acceptance scope grounded in the active OpenSpec change. Horsepower records consumption by campaign ID and rejects dispatches after exhaustion. No reviewer, fixer, helper, recommendation, or worker output can increase, reset, or replace the budget.
+
+The Captain classifies findings by root cause before another dispatch. Additional examples, syntax variants, or adversarial inputs for an already recorded root cause consume no new finding identity and cannot silently expand acceptance scope. A reviewer result, including `NOT APPROVED`, is evidence for Captain judgment rather than an automatic trigger for another worker.
+
+At exhaustion the Captain must stop the campaign and explicitly choose one outcome: accept the available evidence, narrow or defer scope through the official OpenSpec change, report `blocked_needs_human`, or request a human-authorized budget increase with a non-empty reason. Horsepower records campaign budget, consumption, scope digest, outcome, and override reason as process-lifetime execution evidence only; it does not create or edit OpenSpec task facts.
+
+Alternative rejected: a product-wide fixed number of review rounds. Appropriate review depth depends on change risk, so the Captain sets each finite budget while Horsepower enforces that workers cannot renew it.
+
+Alternative rejected: automatically dispatching a fixer or reviewer from a verdict. Automatic continuation transfers orchestration authority away from the Captain and permits unbounded review loops.
+
+### 14. Incremental delivery
 
 Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, OpenSpec execution gating, Captain-controlled E2E completion, run lifecycle and optional webhook notification, managed text handoffs, CLI setup/doctor/enable/disable/uninstall, release construction, curl installation, tests, and CI.
 

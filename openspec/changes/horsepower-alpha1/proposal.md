@@ -16,6 +16,7 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 - Add a Captain-controlled verification gate: the Captain explicitly chooses change-specific E2E verification, and completion requires passing evidence or an explicit reasoned E2E waiver with alternative evidence.
 - Add optional terminal-state webhook notification at change and dispatch scope, with change notifications enabled by default, dispatch notifications opt-in, HMAC/Bearer/none authentication, redacted payloads, and non-blocking in-process retries.
 - Add an explicit managed text-handoff mode for substantial delegated work, with private brief/report artifacts, bounded attachments, opaque references, retained execution evidence, and no competing OpenSpec facts.
+- Add Captain-defined review campaigns whose finite budget, fixed acceptance scope, and root-cause deduplication prevent reviewer/fixer loops from expanding or renewing themselves.
 - Add CLI `enable` and `disable` operations that atomically manage only the Pi extension and skill links while preserving the CLI link, installed releases, configuration, state, memory, and handoffs.
 
 ## Capabilities
