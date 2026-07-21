@@ -9,17 +9,23 @@ import { validateOpenSpecInstallation } from "../openspec/boundary.js";
 import { validateReleaseCompatibility } from "../release-manifest.js";
 import { createHandoffStore } from "../handoffs/store.js";
 import { message as localizedMessage, resolveOutputLocale, validateOutputLocale, type MessageId, type OutputLocale } from "../localization/index.js";
-import { createSlotRegistry, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
+import { createSlotRegistry, thinkingLevels, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
 import { auditSkillExposure, type StaticSkillResolver, type SkillAuditResult } from "../skills/audit.js";
+import type { PiModelCatalog } from "../capabilities/model-catalog.js";
+import type { ModelCapabilityProbe } from "../runtime/model-capability-probe.js";
+import { collectGuidedSetup, commitSetup, requiredSetupSlots, SetupFailure, type SetupTerminal } from "./setup.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
-interface CommandResult { data: unknown; ok?: boolean; exitCode?: number; message?: string }
+interface CommandResult { data: unknown; ok?: boolean; exitCode?: number; message?: string; summaryId?: MessageId }
 interface RunResult { code: number; stdout: string; stderr: string }
 export interface CliOptions {
   homeDir: string;
   cwd: string;
   platform: NodeJS.Platform;
   models?: ModelCatalog;
+  modelCatalog?: PiModelCatalog;
+  capabilityProbe?: ModelCapabilityProbe;
+  terminal?: SetupTerminal;
   runOpenSpec(args: readonly string[], options: { cwd: string }): Promise<RunResult>;
   fetch?: typeof fetch;
   now?: () => Date;
@@ -70,7 +76,7 @@ function withoutCredentials(value: JsonObject): JsonObject {
 }
 function flags(args: readonly string[]): { positionals: string[]; values: Map<string, string>; switches: Set<string> } {
   const positionals: string[] = []; const values = new Map<string, string>(); const switches = new Set<string>();
-  const boolean = new Set(["json", "yes", "dispatch", "no-dispatch", "change", "no-change", "installation-only"]);
+  const boolean = new Set(["json", "yes", "dispatch", "no-dispatch", "change", "no-change", "installation-only", "interactive"]);
   for (let index = 0; index < args.length; index += 1) {
     const item = args[index]!;
     if (!item.startsWith("--")) { positionals.push(item); continue; }
@@ -334,14 +340,32 @@ export function createCli(options: CliOptions) {
   function requireSupportedPlatform(): void {
     if (options.platform !== "linux" && options.platform !== "darwin") throw new Error(`Unsupported platform: ${options.platform}`);
   }
+  function setupCatalog(): PiModelCatalog | undefined {
+    if (options.modelCatalog) return options.modelCatalog;
+    if (!options.models) return undefined;
+    const modelIds = Object.keys(options.models).sort();
+    return { status: "available", modelIds, models: options.models, revision: createHash("sha256").update(JSON.stringify(options.models)).digest("hex") };
+  }
   async function setup(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
-    only(parsed, ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"], []);
+    only(parsed, ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"], ["interactive"]);
     if (parsed.positionals.length) throw new UsageError("setup accepts no positional arguments");
-    const slots: Record<string, SlotBinding> = {};
-    for (const id of ["judgment", "craft", "utility"] as const) {
-      const model = parsed.values.get(id), thinking = parsed.values.get(`${id}-thinking`);
-      if (!model || !thinking) throw new UsageError(`setup requires --${id} and --${id}-thinking`);
-      slots[id] = { model, thinking: thinking as ThinkingLevel };
+    if (parsed.switches.has("interactive") && parsed.values.size > 0) throw new UsageError("--interactive cannot be combined with explicit slot options");
+    if (parsed.switches.has("interactive") && !options.terminal) throw new UsageError("Interactive setup requires a controlling terminal");
+    let selections: Record<(typeof requiredSetupSlots)[number], { model: string; thinking: ThinkingLevel }>;
+    let prevalidated;
+    if (parsed.switches.has("interactive")) {
+      const guided = await collectGuidedSetup(setupCatalog(), options.capabilityProbe, options.terminal!);
+      if (guided.status !== "selected") return { data: guided, ok: guided.status === "skipped", exitCode: guided.status === "skipped" ? 0 : 1, summaryId: guided.status === "skipped" ? "setup.skipped" : "setup.canceled" };
+      selections = guided.selections;
+      prevalidated = guided.validations;
+    } else {
+      selections = {} as typeof selections;
+      for (const id of requiredSetupSlots) {
+        const model = parsed.values.get(id), thinking = parsed.values.get(`${id}-thinking`);
+        if (!model || !thinking) throw new UsageError(`setup requires --${id} and --${id}-thinking`);
+        if (!thinkingLevels.includes(thinking as ThinkingLevel)) throw new UsageError(`Invalid thinking level for slot ${id}: ${thinking}`);
+        selections[id] = { model, thinking: thinking as ThinkingLevel };
+      }
     }
     try {
       const [globalSlots, projectSlots, settings, projectSettings] = await Promise.all([
@@ -350,15 +374,18 @@ export function createCli(options: CliOptions) {
         existingConfiguration(options.homeDir, paths.global.settings),
         existingConfiguration(options.cwd, paths.project.settings),
       ]);
-      const nextGlobal = { ...globalSlots, slots: { ...object(globalSlots.slots), ...slots } };
-      const data = registryData({ global: nextGlobal as SlotConfiguration, project: projectSlots });
       parseWebhookSettings(settings.webhook, projectSettings.webhook);
-      await writeConfigs([
-        { path: paths.global.modelSlots, value: nextGlobal },
-        { path: paths.global.settings, value: settings },
-      ]);
-      return { data, message: "Horsepower configured" };
-    } catch (cause) { throw new UsageError((cause as Error).message); }
+      return {
+        data: await commitSetup({
+          catalog: setupCatalog(), probe: options.capabilityProbe, ...(prevalidated ? { prevalidated } : { forceLiveProbe: true }), currentGlobal: globalSlots,
+          project: projectSlots, settings, modelSlotsPath: paths.global.modelSlots,
+          settingsPath: paths.global.settings, write: writeConfigs,
+        }, selections),
+      };
+    } catch (cause) {
+      if (cause instanceof SetupFailure) throw cause;
+      throw new UsageError(cause instanceof Error ? cause.message : "Invalid setup configuration");
+    }
   }
   async function setSlot(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["model", "thinking", "fallback", "scope"], []); const id = parsed.positionals[0];
@@ -713,7 +740,7 @@ export function createCli(options: CliOptions) {
   };
   const completed = "cli.commandCompleted" as const;
   const commands = {
-    setup: { run: setup, requiresPlatform: true, summaryId: completed },
+    setup: { run: setup, requiresPlatform: true, summaryId: "cli.setupCompleted" },
     configure: {
       run: configure,
       requiresPlatform: (parsed) => parsed.values.size > 0,
@@ -751,7 +778,7 @@ export function createCli(options: CliOptions) {
       const result = await definition.run(parsed);
       try { locale = command === "skill-audit" && parsed.values.has("locale") ? validateOutputLocale(parsed.values.get("locale")) : await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* doctor and diagnostics retain their structured evidence */ }
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1);
-      const summaryId = typeof definition.summaryId === "function" ? definition.summaryId(parsed) : definition.summaryId;
+      const summaryId = result.summaryId ?? (typeof definition.summaryId === "function" ? definition.summaryId(parsed) : definition.summaryId);
       const audit = command === "skill-audit" ? result.data as SkillAuditResult : undefined;
       const summary = audit ? localizedMessage(locale, "audit.summary", { status: audit.status, count: audit.externalCount }) : localizedMessage(locale, summaryId, { command: commandName, ...definition.summaryVariables?.(parsed) });
       if (machine) return { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" };
@@ -761,6 +788,6 @@ export function createCli(options: CliOptions) {
         return { exitCode, stdout: `${text}\n`, stderr: "" };
       }
       return { exitCode, stdout: `${summary}\n`, stderr: "" };
-    } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(locale === "zh-CN" ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }
+    } catch (cause) { const usage = cause instanceof UsageError; const setupFailure = cause instanceof SetupFailure ? cause : undefined; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : setupFailure ? localizedMessage(locale, setupFailure.code === "MODEL_CAPABILITY_UNSUPPORTED" ? "setup.unsupported" : setupFailure.code === "SETUP_COMMIT_FAILED" ? "setup.writeFailed" : setupFailure.code === "SETUP_CANCELED" ? "setup.canceled" : "setup.inconclusive") : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = setupFailure ? setupFailure.code : rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(setupFailure ? setupFailure.fields : {}), ...((locale === "zh-CN" || setupFailure) ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }
   } };
 }

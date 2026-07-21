@@ -35,6 +35,7 @@ async function harness(options: Record<string, unknown> = {}) {
     cwd,
     platform: "linux",
     models,
+    capabilityProbe: { probe: async () => ({ status: "supported", evidence: { code: "fixture_supported" } }) },
     runOpenSpec: async (args: readonly string[]) => {
       if (args[0] === "--version") return { code: 0, stdout: "1.6.0\n", stderr: "" };
       return { code: 0, stdout: JSON.stringify({ root: { path: cwd, healthy: true } }), stderr: "" };
