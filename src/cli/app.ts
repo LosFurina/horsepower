@@ -201,11 +201,14 @@ async function readManagedManifest(release: string): Promise<JsonObject> {
     await verifyNoSymlinkPath(dirname(release), release, "directory");
     await verifyNoSymlinkPath(release, manifestPath, "file");
     const manifest = await readJsonObject(manifestPath);
+    if (Object.keys(manifest).sort().join(",") !== "compatibility,digests,entryPoints,version") throw new ManagedTopologyError("Invalid release manifest fields");
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new ManagedTopologyError("Invalid release manifest version");
     try { validateReleaseCompatibility(manifest.compatibility); }
     catch (cause) { throw new ManagedTopologyError((cause as Error).message); }
     const entries = object(manifest.entryPoints);
     const digests = object(manifest.digests);
+    if (Object.keys(entries).sort().join(",") !== "cli,extension,skill") throw new ManagedTopologyError("Invalid release manifest entry point fields");
+    if (Object.keys(digests).sort().join(",") !== Object.values(releaseEntryPoints).sort().join(",")) throw new ManagedTopologyError("Invalid release manifest digest fields");
     for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) {
       if (entries[name] !== expectedPath) throw new ManagedTopologyError(`Invalid release manifest ${name} entry point`);
       const digest = digests[expectedPath];

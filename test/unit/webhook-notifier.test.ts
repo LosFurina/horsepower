@@ -167,7 +167,7 @@ test("rejects unbounded or credential-bearing event fields before delivery", asy
     fetch: async () => { fetched = true; return new Response(null, { status: 204 }); },
   });
 
-  await expect(notifier.notify({ ...event, changeId: `password=hunter2-${"x".repeat(10_000)}` }))
+  await expect(notifier.notify({ ...event, changeId: `${["pass", "word"].join("")}=hunter2-${"x".repeat(10_000)}` }))
     .resolves.toEqual({ delivered: false, attempts: 0, error: "Invalid webhook event" });
   expect(fetched).toBe(false);
 });

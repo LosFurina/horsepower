@@ -1155,7 +1155,10 @@ test("doctor rejects trusted installation ancestor symlinks without following or
 });
 
 test("doctor reports malformed managed release topology as actionable installation checks", async () => {
-  for (const hostile of ["trivial", "compatibility", "entrypoint", "digest-shape", "digest-mismatch", "symlink"] as const) {
+  for (const hostile of [
+    "trivial", "compatibility", "entrypoint", "digest-shape", "digest-mismatch", "symlink",
+    "extra-top-level", "extra-compatibility", "extra-entrypoint", "extra-digest",
+  ] as const) {
     const { homeDir, root, run } = await harness();
     const hp = join(homeDir, ".pi/agent/horsepower");
     const release = join(hp, "versions/v0.1.0");
@@ -1177,6 +1180,22 @@ test("doctor reports malformed managed release topology as actionable installati
     }
     if (hostile === "digest-mismatch") {
       manifest.digests[releaseEntryPoints.cli] = "0".repeat(64);
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "extra-top-level") {
+      manifest.extra = true;
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "extra-compatibility") {
+      manifest.compatibility.extra = "unsupported";
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "extra-entrypoint") {
+      manifest.entryPoints.extra = "bin/foreign";
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "extra-digest") {
+      manifest.digests.foreign = "0".repeat(64);
       await writeFile(manifestPath, JSON.stringify(manifest));
     }
     if (hostile === "symlink") {

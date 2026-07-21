@@ -112,7 +112,7 @@ test("built release scanner executes with the runtime yaml dependency", async ()
   await expect(execFileAsync(process.execPath, ["--input-type=module", "--eval", script], { cwd: process.cwd() })).resolves.toMatchObject({ stderr: "" });
 });
 
-test("produces byte-identical archives and a verifiable external checksum", async () => {
+test("produces byte-identical archives with platform-neutral gzip framing and a verifiable checksum", async () => {
   const repositoryRoot = await fixtureRepository();
   const firstOutput = join(await temporaryDirectory(), "first");
   const secondOutput = join(await temporaryDirectory(), "second");
@@ -123,8 +123,11 @@ test("produces byte-identical archives and a verifiable external checksum", asyn
     readFile(first.archivePath), readFile(second.archivePath), readFile(first.checksumPath, "utf8"),
   ]);
 
+  expect(firstBytes.subarray(0, 10)).toEqual(Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff]));
   expect(firstBytes).toEqual(secondBytes);
-  expect(checksum).toBe(`${createHash("sha256").update(firstBytes).digest("hex")}  horsepower-v1.2.3-alpha.1.tar.gz\n`);
+  const expectedDigest = createHash("sha256").update(firstBytes).digest("hex");
+  expect(first.checksum).toBe(expectedDigest);
+  expect(checksum).toBe(`${expectedDigest}  horsepower-v1.2.3-alpha.1.tar.gz\n`);
   expect((await readdir(firstOutput)).sort()).toEqual(["horsepower-v1.2.3-alpha.1.tar.gz", "horsepower-v1.2.3-alpha.1.tar.gz.sha256"]);
 });
 
@@ -213,6 +216,44 @@ test("concurrent builds use isolated staging and remain deterministic", async ()
     buildRelease({ repositoryRoot, outputDir: join(outputParent, `concurrent-${index}`), version: "1.2.3-alpha.1", runBuild: async () => {} })));
   const archives = await Promise.all(outputs.map(({ archivePath }) => readFile(archivePath)));
   for (const archive of archives.slice(1)) expect(archive).toEqual(archives[0]);
+});
+
+test("strict staged validation rejects unknown manifest fields", async () => {
+  const stage = join(await temporaryDirectory(), "horsepower");
+  const files = {
+    "bin/horsepower": "cli\n",
+    "pi/extensions/horsepower/index.js": "extension\n",
+    "pi/skills/horsepower/SKILL.md": "skill\n",
+  };
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(stage, path, ".."), { recursive: true });
+    await writeFile(join(stage, path), content);
+    await chmod(join(stage, path), path === "bin/horsepower" ? 0o755 : 0o644);
+  }
+  const manifest = {
+    version: "1.2.3-alpha.1",
+    compatibility: { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0" },
+    entryPoints: {
+      cli: "bin/horsepower",
+      extension: "pi/extensions/horsepower/index.js",
+      skill: "pi/skills/horsepower/SKILL.md",
+    },
+    digests: Object.fromEntries(Object.entries(files).map(([path, content]) => [path, createHash("sha256").update(content).digest("hex")])),
+  };
+  const allowedFiles = [...Object.keys(files), "release-manifest.json"];
+  for (const [label, mutate] of [
+    ["top-level", (value: any) => { value.extra = true; }],
+    ["compatibility", (value: any) => { value.compatibility.extra = "unsupported"; }],
+    ["entry point", (value: any) => { value.entryPoints.extra = "bin/foreign"; }],
+    ["digest", (value: any) => { value.digests["foreign"] = "0".repeat(64); }],
+  ] as const) {
+    const hostile = structuredClone(manifest);
+    mutate(hostile);
+    await writeFile(join(stage, "release-manifest.json"), JSON.stringify(hostile));
+    await chmod(join(stage, "release-manifest.json"), 0o644);
+    await expect(validateStagedRelease(stage, { version: "1.2.3-alpha.1", allowedFiles }), label)
+      .rejects.toThrow(/manifest/u);
+  }
 });
 
 test("strict staged validation rejects unexpected paths, links, and unsafe modes", async () => {
@@ -640,6 +681,48 @@ test("privacy scanner rejects typed TypeScript bindings across whitespace and co
   }
 });
 
+test("privacy scanner rejects defaults, destructuring, fields, and logical assignments", () => {
+  const key = (left: string, right = "") => [left, right].join("");
+  const forbidden = [
+    ["model parameter default", `function run(${key("mod", "el")} = "private-alpha") {}`],
+    ["provider arrow default", `const run = (${key("provid", "er")}: string = "secret-cloud") => {};`],
+    ["token parameter default", `function auth(${key("to", "ken")} = "${"t".repeat(24)}") {}`],
+    ["parenthesized model", `(${key("mod", "el")} = "private-parenthesized")`],
+    ["nullish model assignment", `options.${key("mod", "el")} ??= "private-nullish";`],
+    ["or provider assignment", `options["${key("provid", "er")}"] ||= "secret-provider";`],
+    ["and token assignment", `options.${key("to", "ken")} &&= "${"a".repeat(24)}";`],
+    ["destructured model default", `const { ${key("mod", "el")} = "private-destructured" } = options;`],
+    ["destructured token default", `const { ${key("to", "ken")}: auth = "${"b".repeat(24)}" } = options;`],
+    ["class provider field", `class Config { ${key("provid", "er")} = "private-provider"; }`],
+    ["object token field", `const auth = { ${key("to", "ken")}: "${"c".repeat(24)}" };`],
+    ["commented newline model", `consume(/* gap */\n${key("mod", "el")} /* gap */ =\n "private-commented")`],
+  ] as const;
+  for (const [label, content] of forbidden) {
+    expect(() => scanPublicContent([{ path: `src/${label}.ts`, content: Buffer.from(content) }]), label)
+      .toThrow(/Forbidden public content/u);
+  }
+});
+
+test("privacy scanner permits comparisons, arrows, placeholders, and runtime references near sensitive names", () => {
+  const key = (left: string, right = "") => [left, right].join("");
+  const safe = [
+    `if (${key("mod", "el")} === binding.${key("mod", "el")}) use(${key("mod", "el")});`,
+    `const same = ${key("provid", "er")} == resolved.${key("provid", "er")};`,
+    `const predicate = (${key("to", "ken")}: string) => ${key("to", "ken")}.length > 0;`,
+    `function run(${key("mod", "el")} = process.env.MODEL) {}`,
+    `options.${key("mod", "el")} ??= binding.${key("mod", "el")};`,
+    `const { ${key("provid", "er")} = resolved.${key("provid", "er")} } = options;`,
+    `const { ${key("to", "ken")} = process.env.TOKEN } = options;`,
+    `const config = { ${key("mod", "el")}: "<model-name>", ${key("to", "ken")}: "<token>" };`,
+    `throw new Error(\`Must not bind ${key("mod", "el")}: \${source}\`);`,
+    `{"dependencies":{"@aws-sdk/credential-provider-node":"^3.972.42","@aws-sdk/token-providers":"3.1048.0"}}`,
+    `expect(error).toContain("Unknown ${key("mod", "el")}: unknown/model");`,
+  ];
+  for (const content of safe) {
+    expect(() => scanPublicContent([{ path: "src/safe.ts", content: Buffer.from(content) }]), content).not.toThrow();
+  }
+});
+
 test("privacy scanner detects current GitHub credential shapes without matching near misses", () => {
   const classic = `${["gh", "p"].join("")}_${"a".repeat(36)}`;
   const fineGrained = `${["github", "pat"].join("_")}_${"A1_".repeat(27)}Z`;
@@ -659,7 +742,7 @@ test("privacy scanner detects current GitHub credential shapes without matching 
 
 test("privacy scanner rejects non-text encodings and accepts valid multibyte UTF-8", () => {
   const utf16Token = Buffer.from(`${["api", "key"].join("_")} = '${"a".repeat(28)}'`, "utf16le");
-  const utf16Model = Buffer.from(`model = "private-alpha"`, "utf16le");
+  const utf16Model = Buffer.from(`${["mod", "el"].join("")} = "private-alpha"`, "utf16le");
   const utf16PrivatePath = Buffer.from(["", "Users", "alice", "private"].join("/"), "utf16le");
   const utf16Be = Buffer.from(utf16Model);
   utf16Be.swap16();
@@ -752,5 +835,7 @@ function makeHostileArchive(options: {
   if (options.corruptChecksum === true) header[0] = (header[0] ?? 0) ^ 1;
   const padding = Buffer.alloc((512 - (content.length % 512)) % 512);
   if (options.nonZeroPadding === true && padding.length > 0) padding[0] = 1;
-  return gzipSync(Buffer.concat([header, content, padding, Buffer.alloc(zeroBlocks * 512), tail]), { level: 9 });
+  const archive = gzipSync(Buffer.concat([header, content, padding, Buffer.alloc(zeroBlocks * 512), tail]), { level: 9 });
+  archive[9] = 0xff;
+  return archive;
 }

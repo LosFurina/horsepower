@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { gzipSync, inflateRawSync } from "node:zlib";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { parse as parseYaml } from "yaml";
 import { validateReleaseCompatibility, type ReleaseCompatibility } from "../release-manifest.js";
 
@@ -320,9 +320,13 @@ export async function validateStagedRelease(
 
 async function validateManifest(root: string, version: string): Promise<ReleaseManifest> {
   const manifest = JSON.parse(await readFile(join(root, "release-manifest.json"), "utf8")) as ReleaseManifest;
+  if (Object.keys(manifest).sort().join(",") !== "compatibility,digests,entryPoints,version") throw new Error("Invalid release manifest fields");
   if (manifest.version !== version) throw new Error(`Staged manifest version mismatch: expected ${version}`);
   validateReleaseCompatibility(manifest.compatibility);
-  if (JSON.stringify(manifest.entryPoints) !== JSON.stringify(entryPoints)) throw new Error("Invalid release manifest entry points");
+  if (Object.keys(manifest.entryPoints).sort().join(",") !== "cli,extension,skill"
+    || Object.entries(entryPoints).some(([name, path]) => manifest.entryPoints[name as keyof typeof entryPoints] !== path)) {
+    throw new Error("Invalid release manifest entry points");
+  }
   const digestPaths = Object.keys(manifest.digests).sort();
   if (JSON.stringify(digestPaths) !== JSON.stringify([...criticalFiles].sort())) throw new Error("Invalid release manifest digest fields");
   for (const path of criticalFiles) {
@@ -405,11 +409,15 @@ function createArchive(stageRoot: string): Promise<Buffer> {
       if (entry.type === "file") chunks.push(entry.content, tarPadding(entry.content.length));
     }
     chunks.push(Buffer.alloc(1024));
-    return gzipSync(Buffer.concat(chunks), { level: 9 });
+    const tar = Buffer.concat(chunks);
+    const trailer = Buffer.alloc(8);
+    trailer.writeUInt32LE(crc32(tar), 0);
+    trailer.writeUInt32LE(tar.length >>> 0, 4);
+    return Buffer.concat([canonicalGzipHeader, deflateRawSync(tar, { level: 9 }), trailer]);
   });
 }
 
-const canonicalGzipHeader = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x13]);
+const canonicalGzipHeader = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff]);
 
 function crc32(content: Buffer): number {
   let crc = 0xffffffff;
@@ -638,7 +646,8 @@ function structuredDocument(path: string, text: string): unknown | undefined {
 }
 
 function isRuntimeReference(value: string): boolean {
-  if (/^(?:new\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/u.test(value)
+  if (/^\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}$/u.test(value)
+    || /^(?:new\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/u.test(value)
     || /^[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\[\s*(?:\d+|[A-Za-z_$][\w$]*|["'][^"']+["'])\s*\]))+$/u.test(value)
     || /^`\s*(?:(?:bearer|basic)\s+)?\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}(?:-(?:settings-)?(?:secret|token|credential|password))?\s*`$/iu.test(value)) return true;
   const coalescing = /^([A-Za-z_$][\w$]*)\s*\?\?\s*(.+)$/u.exec(value);
@@ -664,13 +673,26 @@ const typeTerm = String.raw`(?:\(\s*)?(?:(?:keyof|readonly|typeof)\s+)?${generic
 const typeAnnotation = String.raw`${typeTerm}(?:\s*(?:\||&)\s*${typeTerm})*`;
 
 function assignmentPattern(keys: string): RegExp {
-  const start = String.raw`(?:^|[\n;,{}])\s*(?:(?:[-*]\s+)|(?:export\s+)?(?:const|let|var)\s+|export\s+)?(?:[A-Za-z_$][\w$]*\s*(?:\.\s*|\[\s*))?["']?`;
-  return new RegExp(`${start}(${keys})["']?\\s*\\]?\\s*(?:\\??\\s*:\\s*${typeAnnotation}\\s*=|[:=])\\s*`, "gimu");
+  const key = String.raw`(?<![\w$.)\\-])(?:[A-Za-z_$][\w$]*\s*(?:\.\s*|\[\s*))?["']?(${keys})["']?\s*\]?`;
+  const typedDefault = String.raw`\??\s*:\s*${typeAnnotation}\s*=(?!=|>)`;
+  const destructuredDefault = String.raw`:\s*[A-Za-z_$][\w$]*\s*=(?!=|>)`;
+  const assignment = String.raw`(?:\?\?=|\|\|=|&&=|=(?!=|>)|:)`;
+  return new RegExp(String.raw`${key}\s*(?:${typedDefault}|${destructuredDefault}|${assignment})\s*`, "gimu");
+}
+
+function isNonAssignmentLabel(text: string, match: RegExpMatchArray): boolean {
+  const key = match[1] ?? "";
+  const prefix = text.slice(0, match.index ?? 0);
+  const sensitiveTypeName = /^[A-Z][a-z]/u.test(key) && /[:|&<(,]\s*$/u.test(prefix);
+  const proseLabel = match[0].trimEnd().endsWith(":") && /[A-Za-z]\s+$/u.test(prefix);
+  return sensitiveTypeName || proseLabel;
 }
 
 function findTextualBinding(text: string): string | undefined {
+  const uncommented = withoutComments(text);
   const assignment = assignmentPattern("providerMapping|providers?|models?|modelId|modelName|model");
-  for (const match of withoutComments(text).matchAll(assignment)) {
+  for (const match of uncommented.matchAll(assignment)) {
+    if (isNonAssignmentLabel(uncommented, match)) continue;
     const key = match[1]?.toLowerCase() ?? "";
     const tail = text.slice((match.index ?? 0) + match[0].length);
     const quoted = /^(["'])([^\r\n]*?)\1/u.exec(tail);
@@ -690,7 +712,7 @@ function findTextualBinding(text: string): string | undefined {
       if (body.length > 0 && !safePlaceholderArray && !safePlaceholderMap) return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
       continue;
     }
-    const bare = /^(\$\{[A-Z_][A-Z0-9_]*\}|[^\s,;}]+)/u.exec(tail)?.[1] ?? "";
+    const bare = /^(\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}|[^\s,;})]+)/u.exec(tail)?.[1] ?? "";
     const typeKeyword = /^(?:string|unknown|never|boolean|number|undefined|null)$/u.test(bare);
     if (bare.length > 0 && !typeKeyword && !isRuntimeReference(bare) && !isPlaceholder(bare)) {
       return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
@@ -700,9 +722,13 @@ function findTextualBinding(text: string): string | undefined {
 }
 
 function hasLabeledCredential(text: string): boolean {
+  const uncommented = withoutComments(text);
   const assignment = assignmentPattern("api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password|credential|authorization");
-  for (const match of withoutComments(text).matchAll(assignment)) {
+  const typeOnly = new RegExp(String.raw`^${typeAnnotation}\s*(?:[,);{]|=>)`, "u");
+  for (const match of uncommented.matchAll(assignment)) {
+    if (isNonAssignmentLabel(uncommented, match)) continue;
     const tail = text.slice((match.index ?? 0) + match[0].length);
+    if (match[0].trimEnd().endsWith(":") && typeOnly.test(tail)) continue;
     const quoted = /^(["'])([A-Za-z0-9_./+= -]+?)\1/u.exec(tail)?.[2];
     const template = /^`[^`\r\n]*`/u.exec(tail)?.[0];
     const expression = quoted ?? template ?? /^([^,;}\r\n]+)/u.exec(tail)?.[1] ?? "";
