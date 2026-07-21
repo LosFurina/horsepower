@@ -2,7 +2,7 @@ import type { WebhookAuth, WebhookNotifierOptions } from "../lifecycle/webhook-n
 import type { JsonObject } from "./json-store.js";
 
 const SECRET = "[REDACTED]";
-const credentialKeys = new Set([
+const credentialTerms = new Set([
   "auth",
   "authentication",
   "authorization",
@@ -11,30 +11,40 @@ const credentialKeys = new Set([
   "password",
   "secret",
   "token",
-  "apikey",
-  "accesstoken",
-  "refreshtoken",
-  "clientsecret",
-  "authkey",
-  "authsecret",
-  "authtoken",
-  "authenticationkey",
-  "authenticationsecret",
-  "authenticationtoken",
-  "authorizationkey",
-  "authorizationsecret",
-  "authorizationtoken",
+]);
+const credentialPrefixes = new Set([
+  "access",
+  "api",
+  "auth",
+  "authentication",
+  "authorization",
+  "client",
+  "refresh",
+  "signing",
+  "webhook",
 ]);
 
-function normalizedCredentialKey(value: string): string {
-  let decoded: string;
-  try { decoded = decodeURIComponent(value.replaceAll("+", " ")); }
-  catch { decoded = value; }
-  return decoded.toLowerCase().replaceAll(/[^a-z0-9]/gu, "");
+function decodedCredentialKey(value: string): string {
+  try { return decodeURIComponent(value.replaceAll("+", " ")); }
+  catch { return value; }
+}
+
+function credentialKeyParts(value: string): { compact: string; tokens: string[] } {
+  const decoded = decodedCredentialKey(value)
+    .replaceAll(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
+    .replaceAll(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .toLowerCase();
+  return {
+    compact: decoded.replaceAll(/[^a-z0-9]/gu, ""),
+    tokens: decoded.split(/[^a-z0-9]+/gu).filter(Boolean),
+  };
 }
 
 export function isCredentialKey(value: string): boolean {
-  return credentialKeys.has(normalizedCredentialKey(value));
+  const { compact, tokens } = credentialKeyParts(value);
+  if (credentialTerms.has(compact) || tokens.some((token) => credentialTerms.has(token))) return true;
+  return [...credentialPrefixes].some((prefix) => compact.startsWith(prefix)
+    && ["credential", "key", "password", "secret", "token"].some((term) => compact === `${prefix}${term}`));
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -71,7 +81,7 @@ function redactUrls(value: string): string {
 }
 
 export function redactCredentials(value: unknown, key = "", insideAuth = false): unknown {
-  const normalizedKey = normalizedCredentialKey(key);
+  const normalizedKey = credentialKeyParts(key).compact;
   const authContainer = insideAuth || normalizedKey === "auth" || normalizedKey === "authentication";
   if (isCredentialKey(key) && normalizedKey !== "auth" && normalizedKey !== "authentication") return SECRET;
   if (Array.isArray(value)) return value.map((item) => redactCredentials(item, "", authContainer));
@@ -133,20 +143,27 @@ export function validateWebhookSettingsShape(value: unknown, label = ""): void {
 }
 
 export function parseWebhookSettings(globalValue: unknown, projectValue?: unknown): ParsedWebhook | undefined {
-  const global = settingObject(globalValue, "webhook");
   const project = settingObject(projectValue, "project webhook");
-  validateWebhookShape(global, "");
-  validateWebhookShape(project, "project ");
-  if (project.enabled === false || (project.enabled === undefined && global.enabled === false)) return undefined;
+  if (project.enabled !== undefined && typeof project.enabled !== "boolean") {
+    throw new Error("Invalid Horsepower webhook configuration: project enabled must be boolean");
+  }
+  if (project.enabled === false) return undefined;
+
+  const global = settingObject(globalValue, "webhook");
   if (Object.keys(global).length === 0 && Object.keys(project).length === 0) return undefined;
 
-  const globalNotifications = settingObject(global.notifications, "notifications");
-  const projectNotifications = settingObject(project.notifications, "notifications");
+  const projectNotifications = settingObject(project.notifications, "project notifications");
+  const projectReplacesAllNotifications = Object.hasOwn(projectNotifications, "change")
+    && Object.hasOwn(projectNotifications, "dispatch");
+  const globalNotifications = projectReplacesAllNotifications
+    ? {}
+    : settingObject(global.notifications, "notifications");
   const merged: JsonObject = {
     ...global,
     ...project,
     notifications: { ...globalNotifications, ...projectNotifications },
   };
+  validateWebhookShape(merged, "");
   if (merged.enabled === false) return undefined;
   if (typeof merged.url !== "string" || !merged.url) {
     throw new Error("Invalid Horsepower webhook configuration: url is required");

@@ -220,6 +220,38 @@ test("webhook configure validates the complete prospective runtime settings befo
   }
 });
 
+test.each([
+  ["auth", { enabled: true, url: "https://global.test/hook", auth: { mode: "bearer", token: [] } }],
+  ["url", { enabled: true, url: "ftp://global.test/hook", auth: { mode: "none" } }],
+  ["notifications", { enabled: true, url: "https://global.test/hook", auth: { mode: "none" }, notifications: { change: "invalid" } }],
+] as const)("project disabled override ignores malformed global %s", async (_field, globalWebhook) => {
+  const { parseWebhookSettings } = await import("../../src/config/webhook.js");
+  expect(parseWebhookSettings(globalWebhook, { enabled: false })).toBeUndefined();
+});
+
+test.each([
+  [
+    "auth",
+    { enabled: true, url: "https://global.test/hook", auth: { mode: "bearer", token: [] } },
+    { auth: { mode: "none" } },
+  ],
+  [
+    "url",
+    { enabled: true, url: "ftp://global.test/hook", auth: { mode: "none" } },
+    { url: "https://project.test/hook" },
+  ],
+  [
+    "notifications",
+    { enabled: true, url: "https://global.test/hook", auth: { mode: "none" }, notifications: { change: "invalid", dispatch: false } },
+    { notifications: { change: true } },
+  ],
+] as const)("project %s override prevents validation of the shadowed global field", async (_field, globalWebhook, projectWebhook) => {
+  const { parseWebhookSettings } = await import("../../src/config/webhook.js");
+  expect(parseWebhookSettings(globalWebhook, projectWebhook)).toMatchObject({
+    config: { auth: { mode: "none" } },
+  });
+});
+
 test("webhook configure and runtime parser accept only HTTPS or local HTTP", async () => {
   const { homeDir, run } = await harness();
   const { parseWebhookSettings } = await import("../../src/config/webhook.js");
@@ -339,6 +371,48 @@ test("CLI webhook settings exactly match runtime parsing and disabled settings r
   expect(JSON.stringify(disabled)).not.toContain("stale-credential");
   expect(disabled).not.toHaveProperty("url");
   expect(disabled).not.toHaveProperty("auth");
+});
+
+test("compound credential names share one classifier across output, removal, and URL queries", async () => {
+  const { homeDir, run } = await harness();
+  await run(setupArgs);
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const credentialKeys = ["signing_secret", "webhookToken", "webhook_token", "clientSecretValue", "apiCredential"];
+  const safeFields = {
+    apiVersion: "v2",
+    clientName: "captain",
+    refreshInterval: 30,
+    signingAlgorithm: "sha256",
+    webhookUrl: "https://safe.example/hook",
+  };
+  const credentialBytes = credentialKeys.map((_, index) => `compound-credential-byte-${index}`);
+  const query = [
+    ...credentialKeys.map((key, index) => `${key}=${credentialBytes[index]}`),
+    "refreshInterval=30",
+    "webhookUrl=visible",
+  ].join("&");
+  await writeFile(settingsPath, JSON.stringify({
+    webhook: {
+      enabled: true,
+      url: `https://example.test/hook?${query}`,
+      auth: { mode: "none" },
+      future: {
+        ...safeFields,
+        ...Object.fromEntries(credentialKeys.map((key, index) => [key, credentialBytes[index]])),
+      },
+    },
+  }));
+
+  const shown = await run(["configure", "--json"]);
+  expect(shown).toMatchObject({ exitCode: 0, stderr: "" });
+  for (const credential of credentialBytes) expect(shown.stdout).not.toContain(credential);
+  for (const value of ["v2", "captain", "sha256", "safe.example", "visible"]) expect(shown.stdout).toContain(value);
+  expect(shown.stdout.match(/REDACTED/gu)).toHaveLength(credentialKeys.length * 2);
+
+  expect(await run(["webhook", "disable", "--json"])).toMatchObject({ exitCode: 0, stderr: "" });
+  const persistedBytes = await readFile(settingsPath, "utf8");
+  for (const credential of credentialBytes) expect(persistedBytes).not.toContain(credential);
+  expect(JSON.parse(persistedBytes).webhook.future).toEqual(safeFields);
 });
 
 test("CLI output redacts every credential-key URL query value while preserving safe parameters", async () => {
@@ -599,6 +673,33 @@ test.each([
     ...(_label === "malformed notifications" || _label === "malformed auth" ? { metadata: { keep: _label === "malformed notifications" ? "notifications" : "auth" } } : {}),
     enabled: false,
   });
+  const { parseWebhookSettings } = await import("../../src/config/webhook.js");
+  expect(parseWebhookSettings(global.webhook, persisted.webhook)).toBeUndefined();
+});
+
+test("webhook disable commits a project override despite malformed shadowed global fields", async () => {
+  const { homeDir, cwd, run } = await harness();
+  await run(setupArgs);
+  const globalPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const projectPath = join(cwd, ".pi/horsepower/settings.json");
+  await mkdir(dirname(projectPath), { recursive: true });
+  const global = {
+    webhook: {
+      enabled: true,
+      url: "ftp://global.test/hook",
+      auth: { mode: "bearer", token: [] },
+      notifications: { change: "invalid" },
+    },
+  };
+  await writeFile(globalPath, JSON.stringify(global));
+  await writeFile(projectPath, JSON.stringify({ webhook: { enabled: true, metadata: { keep: true } } }));
+
+  const result = await run(["webhook", "disable", "--json"]);
+
+  expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+  expect(await readFile(globalPath, "utf8")).toBe(JSON.stringify(global));
+  const persisted = JSON.parse(await readFile(projectPath, "utf8"));
+  expect(persisted.webhook).toEqual({ enabled: false, metadata: { keep: true } });
   const { parseWebhookSettings } = await import("../../src/config/webhook.js");
   expect(parseWebhookSettings(global.webhook, persisted.webhook)).toBeUndefined();
 });
