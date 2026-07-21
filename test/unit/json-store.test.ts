@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 const temporaryDirectories: string[] = [];
 
@@ -58,6 +58,38 @@ test("transactionally replaces private JSON without leaving temporary files", as
   expect(written.mode & 0o777).toBe(0o600);
   expect(await readdir(join(directory, "nested"))).toEqual(["settings.json"]);
   expect(written.ino).not.toBe(original.ino);
+});
+
+test("backup cleanup failure after commit never rolls back installed files", async () => {
+  const directory = await temporaryDirectory();
+  const first = join(directory, "first.json");
+  const second = join(directory, "second.json");
+  await writeFile(first, '{"old":1}\n');
+  await writeFile(second, '{"old":2}\n');
+  vi.resetModules();
+  vi.doMock("node:fs/promises", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:fs/promises")>();
+    return {
+      ...actual,
+      rm: async (path: Parameters<typeof actual.rm>[0], options?: Parameters<typeof actual.rm>[1]) => {
+        if (String(path).endsWith(".bak")) throw Object.assign(new Error("injected backup cleanup failure"), { code: "EIO" });
+        return actual.rm(path, options as never);
+      },
+    };
+  });
+
+  try {
+    const { writeJsonObjects } = await import("../../src/config/json-store.js");
+    await expect(writeJsonObjects([
+      { path: first, value: { next: 1 } },
+      { path: second, value: { next: 2 } },
+    ])).resolves.toBeUndefined();
+    expect(JSON.parse(await readFile(first, "utf8"))).toEqual({ next: 1 });
+    expect(JSON.parse(await readFile(second, "utf8"))).toEqual({ next: 2 });
+  } finally {
+    vi.doUnmock("node:fs/promises");
+    vi.resetModules();
+  }
 });
 
 test("updates known fields while preserving unknown fields", async () => {

@@ -98,6 +98,7 @@ export async function writeJsonObjects(entries: readonly JsonWrite[]): Promise<v
   }
 
   const staged: Array<{ entry: JsonWrite; temporaryPath: string; backupPath: string; hadOriginal: boolean }> = [];
+  let committed = false;
   try {
     for (const entry of entries) {
       const temporaryPath = await stageJsonWrite(entry);
@@ -113,20 +114,22 @@ export async function writeJsonObjects(entries: readonly JsonWrite[]): Promise<v
         await rename(item.temporaryPath, item.entry.path);
         installed += 1;
       }
-      for (const item of staged) if (item.hadOriginal) await rm(item.backupPath, { force: true });
+      committed = true;
     } catch (cause) {
       for (const item of staged.slice(0, installed).reverse()) await rm(item.entry.path, { force: true });
       for (const item of staged) {
         if (!item.hadOriginal) continue;
-        try { await rename(item.backupPath, item.entry.path); } catch { /* preserve the original failure */ }
+        try { await rename(item.backupPath, item.entry.path); } catch { /* retain an orphan backup rather than mask the original failure */ }
       }
       throw cause;
     }
   } finally {
-    await Promise.all(staged.flatMap((item) => [
-      rm(item.temporaryPath, { force: true }),
-      rm(item.backupPath, { force: true }),
-    ]));
+    await Promise.all(staged.map(async (item) => {
+      try { await rm(item.temporaryPath, { force: true }); } catch { /* cleanup is best effort */ }
+      if (committed) {
+        try { await rm(item.backupPath, { force: true }); } catch { /* committed files remain authoritative */ }
+      }
+    }));
   }
 }
 

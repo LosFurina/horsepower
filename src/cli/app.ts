@@ -234,12 +234,8 @@ async function verifyInstallDestination(home: string, root: string, versions: st
   let rootInfo;
   try { rootInfo = await lstat(root); } catch (cause) { if (absent(cause)) return; throw cause; }
   if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new ManagedTopologyError(`Refusing unowned Horsepower root: ${root}`);
-  try {
-    const versionsInfo = await lstat(versions);
-    if (versionsInfo.isSymbolicLink() || !versionsInfo.isDirectory()) throw new ManagedTopologyError(`Refusing unowned versions path: ${versions}`);
-  } catch (cause) {
-    if (!absent(cause)) throw cause;
-  }
+  const versionsOwnership = await versionsState(versions);
+  if (versionsOwnership.status === "conflict") throw new ManagedTopologyError(versionsOwnership.message ?? `Refusing unowned versions path: ${versions}`);
   await requireAbsent(destination, `Release destination already exists: ${destination}`);
 }
 
@@ -407,11 +403,20 @@ export function createCli(options: CliOptions) {
       only(parsed, [], []);
       const globalSettings = await trustedOptionalObject(options.homeDir, paths.global.settings);
       const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings);
-      const scope = Object.keys(object(projectSettings.webhook)).length > 0 ? "project" : "global";
+      const scope = Object.hasOwn(projectSettings, "webhook") ? "project" : "global";
       const current = scope === "project" ? projectSettings : globalSettings;
       const preserved = withoutCredentials(object(current.webhook));
       delete preserved.url;
+      delete preserved.auth;
+      delete preserved.notifications;
       const next = { ...current, webhook: { ...preserved, enabled: false } };
+      const prospectiveGlobal = scope === "global" ? next : globalSettings;
+      const prospectiveProject = scope === "project" ? next : projectSettings;
+      try {
+        if (parseWebhookSettings(prospectiveGlobal.webhook, prospectiveProject.webhook) !== undefined) {
+          throw new Error("disabled webhook remains enabled in the effective settings");
+        }
+      } catch (cause) { throw new UsageError((cause as Error).message); }
       await writeConfigs([{ path: scope === "project" ? paths.project.settings : paths.global.settings, value: next }]);
       return { data: redactSettings(next), message: `Webhook disabled (${scope})` };
     }

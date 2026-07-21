@@ -273,7 +273,6 @@ test("webhook configure and disable deep-patch unknown nested settings", async (
     webhook: {
       enabled: false,
       future: { metadata: { keep: true } },
-      notifications: { change: false, dispatch: true, futurePolicy: { retries: 7 } },
       headers: { futureHeaderMetadata: { keep: true } },
     },
   });
@@ -560,6 +559,50 @@ test.each([
   expect(requests).toEqual([{ url: "https://requested.test/hook", authorization: "Bearer requested-token" }]);
 });
 
+test.each([
+  ["malformed notifications", {
+    enabled: true,
+    url: "https://project.test/hook",
+    auth: { mode: "none" },
+    notifications: { change: "invalid", token: "notification-credential" },
+    metadata: { keep: "notifications" },
+  }],
+  ["malformed auth", {
+    enabled: true,
+    url: "https://project.test/hook",
+    auth: { mode: "bearer", token: ["auth-credential"] },
+    metadata: { keep: "auth" },
+  }],
+  ["array webhook", ["safe-array-value", { token: "array-credential" }]],
+  ["scalar webhook", "scalar-credential"],
+] as const)("webhook disable replaces %s project state with a runtime-safe disabled override", async (_label, malformedWebhook) => {
+  const { homeDir, cwd, run } = await harness();
+  await run(setupArgs);
+  const globalPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const projectPath = join(cwd, ".pi/horsepower/settings.json");
+  await mkdir(dirname(projectPath), { recursive: true });
+  const global = { webhook: { enabled: true, url: "https://global.test/hook", auth: { mode: "bearer", token: "global-credential" } } };
+  await writeFile(globalPath, JSON.stringify(global));
+  await writeFile(projectPath, JSON.stringify({ projectTopLevel: { keep: true }, webhook: malformedWebhook }));
+
+  const result = await run(["webhook", "disable", "--json"]);
+
+  expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+  expect(await readFile(globalPath, "utf8")).toBe(JSON.stringify(global));
+  const persistedBytes = await readFile(projectPath, "utf8");
+  for (const credential of ["notification-credential", "auth-credential", "array-credential", "scalar-credential"]) {
+    expect(persistedBytes).not.toContain(credential);
+  }
+  const persisted = JSON.parse(persistedBytes);
+  expect(persisted.projectTopLevel).toEqual({ keep: true });
+  expect(persisted.webhook).toEqual({
+    ...(_label === "malformed notifications" || _label === "malformed auth" ? { metadata: { keep: _label === "malformed notifications" ? "notifications" : "auth" } } : {}),
+    enabled: false,
+  });
+  const { parseWebhookSettings } = await import("../../src/config/webhook.js");
+  expect(parseWebhookSettings(global.webhook, persisted.webhook)).toBeUndefined();
+});
+
 test("webhook disable defaults to the effective active project and removes project credentials", async () => {
   const { homeDir, cwd, run } = await harness();
   await run(setupArgs);
@@ -844,6 +887,38 @@ test("preflight rejects an existing immutable version destination without modify
       expect(await readFile(join(external, "keep"), "utf8")).toBe("external data");
     }
   }
+});
+
+test.each(["foreign-file", "foreign-directory", "foreign-symlink", "malformed-release"] as const)(
+  "preflight rejects a %s anywhere in the existing versions tree",
+  async (kind) => {
+    const { homeDir, root, run } = await harness();
+    const staged = join(root, `staged-${kind}`);
+    await writeRelease(staged, "0.2.0");
+    const versions = join(homeDir, ".pi/agent/horsepower/versions");
+    await mkdir(versions, { recursive: true });
+    const existing = join(versions, kind === "malformed-release" ? "v0.1.0" : "foreign");
+    if (kind === "foreign-file") await writeFile(existing, "foreign data");
+    if (kind === "foreign-directory") await mkdir(existing);
+    if (kind === "foreign-symlink") await symlink(root, existing);
+    if (kind === "malformed-release") {
+      await writeRelease(existing, "0.1.0");
+      await writeFile(join(existing, "release-manifest.json"), "{malformed");
+    }
+
+    const result = await run(["preflight", staged, "--version", "0.2.0", "--json"]);
+
+    expect(result).toMatchObject({ exitCode: 1, stdout: "" });
+  },
+);
+
+test("preflight accepts an absent target when every other existing version is managed", async () => {
+  const { homeDir, root, run } = await harness();
+  const staged = join(root, "staged-valid-other-version");
+  await writeRelease(staged, "0.2.0");
+  await writeRelease(join(homeDir, ".pi/agent/horsepower/versions/v0.1.0"), "0.1.0");
+
+  expect(await run(["preflight", staged, "--version", "0.2.0", "--json"])).toMatchObject({ exitCode: 0, stderr: "" });
 });
 
 test("preflight rejects symlinked destination ancestors and versions without touching external paths", async () => {
