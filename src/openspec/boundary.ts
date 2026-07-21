@@ -35,6 +35,52 @@ function compareVersion(left: string, right: string): number {
   return (leftPrerelease ?? "").localeCompare(rightPrerelease ?? "");
 }
 
+export async function validateOpenSpecInstallation(
+  options: OpenSpecBoundaryOptions,
+  cwd: string,
+): Promise<{ version: string; projectRoot: string }> {
+  const versionResult = await options.run(["--version"], { cwd });
+  if (versionResult.code !== 0) {
+    throw new Error(
+      "Official OpenSpec CLI was not found. Install @fission-ai/openspec from the official Fission-AI/OpenSpec project.",
+    );
+  }
+  const version = versionResult.stdout.trim();
+  const strictSemver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+  if (!strictSemver.test(version) || compareVersion(version, "1.6.0") < 0) {
+    throw new Error(`OpenSpec 1.6.0 or newer is required; found ${version || "unknown"}`);
+  }
+  const doctor = await options.run(["doctor", "--json"], { cwd });
+  if (doctor.code !== 0) throw new Error("OpenSpec project is not healthy");
+  let projectRoot: string;
+  try {
+    const parsed = JSON.parse(doctor.stdout) as { root?: { healthy?: unknown; path?: unknown } };
+    if (parsed.root?.healthy !== true || typeof parsed.root.path !== "string" || !parsed.root.path) throw new Error("unhealthy");
+    projectRoot = parsed.root.path;
+  } catch {
+    throw new Error("OpenSpec project is not healthy");
+  }
+  const skillPath = `${projectRoot}/.pi/skills/openspec-apply-change/SKILL.md`;
+  const promptPath = `${projectRoot}/.pi/prompts/opsx-apply.md`;
+  let skill: string;
+  let prompt: string;
+  try {
+    [skill, prompt] = await Promise.all([options.readText(skillPath), options.readText(promptPath)]);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("OpenSpec Pi integration is missing; run: openspec init --tools pi");
+    }
+    throw cause;
+  }
+  const generatedBy = /^\s*generatedBy:\s*["']?([^\s"']+)/mu.exec(skill)?.[1];
+  const official = /^name:\s*openspec-apply-change\s*$/mu.test(skill) && /^\s*author:\s*openspec\s*$/mu.test(skill) &&
+    /^\s*allowed-tools:\s*Bash\(openspec:\*\)\s*$/mu.test(skill) && /^Implement tasks from an OpenSpec change\.?\s*$/mu.test(prompt);
+  if (!official || generatedBy !== version) {
+    throw new Error("OpenSpec Pi integration is stale; run: openspec update");
+  }
+  return { version, projectRoot };
+}
+
 export function createOpenSpecBoundary(options: OpenSpecBoundaryOptions) {
   return {
     async authorize(input: AuthorizationInput) {
@@ -42,44 +88,7 @@ export function createOpenSpecBoundary(options: OpenSpecBoundaryOptions) {
         return { allowed: true as const, action: input.action, openspecRequired: false as const };
       }
       if (!input.changeId?.trim()) throw new Error(`OpenSpec change is required for ${input.action}`);
-      const versionResult = await options.run(["--version"], { cwd: input.cwd });
-      if (versionResult.code !== 0) {
-        throw new Error(
-          "Official OpenSpec CLI was not found. Install @fission-ai/openspec from the official Fission-AI/OpenSpec project.",
-        );
-      }
-      const version = versionResult.stdout.trim();
-      if (!/^\d+\.\d+\.\d+(?:[-+].*)?$/u.test(version) || compareVersion(version, "1.6.0") < 0) {
-        throw new Error(`OpenSpec 1.6.0 or newer is required; found ${version || "unknown"}`);
-      }
-      const doctor = await options.run(["doctor", "--json"], { cwd: input.cwd });
-      if (doctor.code !== 0) throw new Error("OpenSpec project is not healthy");
-      let projectRoot: string;
-      try {
-        const parsed = JSON.parse(doctor.stdout) as { root?: { healthy?: unknown; path?: unknown } };
-        if (parsed.root?.healthy !== true || typeof parsed.root.path !== "string") throw new Error("unhealthy");
-        projectRoot = parsed.root.path;
-      } catch {
-        throw new Error("OpenSpec project is not healthy");
-      }
-      const skillPath = `${projectRoot}/.pi/skills/openspec-apply-change/SKILL.md`;
-      const promptPath = `${projectRoot}/.pi/prompts/opsx-apply.md`;
-      let skill: string;
-      let prompt: string;
-      try {
-        [skill, prompt] = await Promise.all([options.readText(skillPath), options.readText(promptPath)]);
-      } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-          throw new Error("OpenSpec Pi integration is missing; run: openspec init --tools pi");
-        }
-        throw cause;
-      }
-      const generatedBy = /generatedBy:\s*["']?([^\s"']+)/u.exec(skill)?.[1];
-      const official = /name:\s*openspec-apply-change/u.test(skill) && /author:\s*openspec/u.test(skill) &&
-        /Bash\(openspec:\*\)/u.test(skill) && /Implement tasks from an OpenSpec change/u.test(prompt);
-      if (!official || generatedBy !== version) {
-        throw new Error("OpenSpec Pi integration is stale; run: openspec update");
-      }
+      const { version } = await validateOpenSpecInstallation(options, input.cwd);
       const status = await options.run(
         ["status", "--change", input.changeId, "--json"],
         { cwd: input.cwd },

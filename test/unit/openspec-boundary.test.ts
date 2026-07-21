@@ -11,7 +11,7 @@ function setup(results: Record<string, Result>, piIntegration: "current" | "miss
         if (path.endsWith("SKILL.md")) {
           return `name: openspec-apply-change\nallowed-tools: Bash(openspec:*)\nauthor: openspec\ngeneratedBy: "${piIntegration === "stale" ? "1.5.0" : "1.6.0"}"`;
         }
-        return "Implement tasks from an OpenSpec change. Bash(openspec:*)";
+        return "Implement tasks from an OpenSpec change.";
       },
     })
   );
@@ -69,6 +69,24 @@ test("blocks advancing work when OpenSpec is missing or unsupported", async () =
   const prerelease = await setup({ "--version": { code: 0, stdout: "1.6.0-beta.1\n", stderr: "" } });
   await expect(prerelease.authorize({ action: "single", changeId: "x", cwd: "/project" }))
     .rejects.toThrow("OpenSpec 1.6.0 or newer is required; found 1.6.0-beta.1");
+
+  for (const invalidVersion of ["1.6.0+", "01.6.0", "1.6.0-alpha..1"]) {
+    const invalid = await setup({ "--version": { code: 0, stdout: `${invalidVersion}\n`, stderr: "" } });
+    await expect(invalid.authorize({ action: "single", changeId: "x", cwd: "/project" }))
+      .rejects.toThrow(`OpenSpec 1.6.0 or newer is required; found ${invalidVersion}`);
+  }
+});
+
+test("rejects deceptive text that only contains official OpenSpec marker substrings", async () => {
+  const { createOpenSpecBoundary } = await import("../../src/openspec/boundary.js");
+  const boundary = createOpenSpecBoundary({
+    run: async (args) => healthy[args.join(" ") as keyof typeof healthy] ?? { code: 1, stdout: "", stderr: "" },
+    readText: async (path) => path.endsWith("SKILL.md")
+      ? 'notname: openspec-apply-change\nnotauthor: openspec\ncomment: Bash(openspec:*)\ngeneratedBy: "1.6.0"'
+      : "This does not Implement tasks from an OpenSpec change safely",
+  });
+  await expect(boundary.authorize({ action: "create", changeId: "horsepower-alpha1", cwd: "/project" }))
+    .rejects.toThrow("OpenSpec Pi integration is stale");
 });
 
 test("checks Pi integration from the OpenSpec root rather than invocation cwd", async () => {
@@ -80,7 +98,7 @@ test("checks Pi integration from the OpenSpec root rather than invocation cwd", 
       paths.push(path);
       return path.endsWith("SKILL.md")
         ? 'name: openspec-apply-change\nallowed-tools: Bash(openspec:*)\nauthor: openspec\ngeneratedBy: "1.6.0"'
-        : "Implement tasks from an OpenSpec change. Bash(openspec:*)";
+        : "Implement tasks from an OpenSpec change.";
     },
   });
 

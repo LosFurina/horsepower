@@ -55,6 +55,9 @@ test("strictly parses commands and emits deterministic JSON with stable exit cod
   });
   expect((await run(setupArgs)).stdout).toBe((await run(setupArgs)).stdout);
   expect((await run(["slots", "--bogus"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["slots", "--json", "--json"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["webhook", "configure", "--url", "https://example.test", "--auth", "none", "--change", "--no-change", "--json"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["webhook", "configure", "--url", "https://example.test", "--auth", "none", "--dispatch", "--no-dispatch", "--json"]))).toMatchObject({ exitCode: 2 });
 });
 
 test("setup initializes missing private files and later writes preserve unknown fields", async () => {
@@ -90,38 +93,92 @@ test("slot set/unset validates through the registry and reports deterministic pr
   expect(listed.data.effective.craft).toEqual({ model: "project/craft", thinking: "max" });
   expect(listed.data.resolved.craft).toMatchObject({ requestedSlot: "craft", resolvedSlot: "craft", model: "project/craft", thinking: "max" });
   expect(listed.data.revision).toMatch(/^[a-f0-9]{64}$/u);
-  expect((await run(["set", "Bad Slot", "--fallback", "utility", "--json"]))).toMatchObject({ exitCode: 1 });
+  expect((await run(["set", "Bad Slot", "--fallback", "utility", "--json"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["set", "vision", "--model", "missing/model", "--thinking", "low", "--json"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["set", "vision", "--model", "provider/util", "--thinking", "extreme", "--json"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["configure", "--utility", "missing/model", "--utility-thinking", "low", "--json"]))).toMatchObject({ exitCode: 2 });
+  const invalidSetup = [...setupArgs];
+  invalidSetup[invalidSetup.indexOf("high")] = "extreme";
+  expect((await run(invalidSetup)).exitCode).toBe(2);
   expect((await run(["unset", "craft", "--scope", "project", "--json"]))).toMatchObject({ exitCode: 0 });
   expect(JSON.parse((await run(["slots", "--json"])).stdout).data.effective.craft.model).toBe("provider/craft");
-  expect((await run(["unset", "utility", "--json"]))).toMatchObject({ exitCode: 1 });
+  expect((await run(["unset", "utility", "--json"]))).toMatchObject({ exitCode: 2 });
 });
 
-test("webhook configuration supports skip, scopes and all auth modes without exposing credentials", async () => {
+test("CLI webhook settings exactly match runtime parsing and disabled settings remove credentials", async () => {
   const secret = "never-print-this";
-  const token = "also-never-print";
-  const fetch = vi.fn(async () => new Response(null, { status: 204 }));
-  const { homeDir, run } = await harness({ fetch });
+  const { homeDir, cwd, run } = await harness();
   await run(setupArgs);
-  for (const args of [
-    ["webhook", "configure", "--url", "https://example.test/hook", "--auth", "hmac", "--secret", secret],
-    ["webhook", "configure", "--url", "https://example.test/hook", "--auth", "bearer", "--token", token, "--dispatch"],
-    ["webhook", "configure", "--url", "https://example.test/hook", "--auth", "none", "--no-change"],
-  ]) {
-    const output = await run([...args, "--json"]);
-    expect(output.exitCode).toBe(0);
-    expect(output.stdout + output.stderr).not.toContain(secret);
-    expect(output.stdout + output.stderr).not.toContain(token);
-  }
-  const path = join(homeDir, ".pi/agent/horsepower/settings.json");
-  expect((await stat(path)).mode & 0o777).toBe(0o600);
-  const delivered = await run(["webhook", "test", "--json"]);
-  expect(delivered.exitCode).toBe(0);
-  expect(fetch).toHaveBeenCalledOnce();
+  const configured = await run([
+    "webhook", "configure", "--url", "https://example.test/hook", "--auth", "hmac", "--secret", secret,
+    "--change", "--dispatch", "--json",
+  ]);
+  expect(configured.exitCode).toBe(0);
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
+  expect(JSON.parse(await readFile(settingsPath, "utf8"))).toMatchObject({
+    webhook: { url: "https://example.test/hook", notifications: { change: true, dispatch: true }, auth: { mode: "hmac", secret } },
+  });
+  const { webhookOptions } = await import("../../src/extension/index.js");
+  expect(webhookOptions(homeDir, cwd)).toEqual({
+    config: { url: "https://example.test/hook", auth: { mode: "hmac", secret } },
+    notifications: { change: true, dispatch: true },
+  });
+
+  const withFuture = JSON.parse(await readFile(settingsPath, "utf8"));
+  withFuture.webhook.future = { keep: true };
+  withFuture.webhook.headers = { authorization: "stale-credential" };
+  await writeFile(settingsPath, JSON.stringify(withFuture));
   expect(await run(["webhook", "skip", "--json"])).toMatchObject({ exitCode: 0 });
-  const disabled = JSON.parse((await run(["configure", "--json"])).stdout).data.webhook;
-  expect(disabled).toMatchObject({ enabled: false, auth: { mode: "none" } });
+  expect(webhookOptions(homeDir, cwd)).toBeUndefined();
+  const disabled = JSON.parse(await readFile(settingsPath, "utf8")).webhook;
+  expect(disabled).toMatchObject({ enabled: false, future: { keep: true } });
   expect(JSON.stringify(disabled)).not.toContain(secret);
-  expect(JSON.stringify(disabled)).not.toContain(token);
+  expect(JSON.stringify(disabled)).not.toContain("stale-credential");
+  expect(disabled).not.toHaveProperty("url");
+  expect(disabled).not.toHaveProperty("auth");
+});
+
+test("webhook diagnostics recursively redact malformed and future credential fields", async () => {
+  const { homeDir, run } = await harness();
+  await run(setupArgs);
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const credentials = ["deep-secret", "future-token", "raw-authorization", "auth-value", "future-value"];
+  await writeFile(settingsPath, JSON.stringify({
+    webhook: {
+      enabled: true,
+      url: "https://example.test/hook",
+      auth: { mode: "future", secret: credentials[0], value: credentials[4], nested: { refreshToken: credentials[1] } },
+      headers: { Authorization: credentials[2], authentication: credentials[3] },
+      notifications: { change: true, dispatch: false },
+    },
+  }));
+  for (const args of [["configure", "--json"], ["doctor", "--json"]]) {
+    const output = await run(args);
+    for (const credential of credentials) expect(output.stdout + output.stderr).not.toContain(credential);
+  }
+  const shown = JSON.parse((await run(["configure", "--json"])).stdout).data;
+  expect(shown.webhook.auth.secret).toBe("[REDACTED]");
+  expect(shown.webhook.auth.value).toBe("[REDACTED]");
+  expect(shown.webhook.auth.nested.refreshToken).toBe("[REDACTED]");
+  expect(shown.webhook.headers.Authorization).toBe("[REDACTED]");
+  expect(shown.webhook.headers.authentication).toBe("[REDACTED]");
+  const notification = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks.find((check: { id: string }) => check.id === "notification");
+  expect(notification).toMatchObject({ status: "error", action: expect.stringContaining("webhook configure") });
+});
+
+test("webhook test sends HMAC and Bearer authentication headers", async () => {
+  const requests: RequestInit[] = [];
+  const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => { requests.push(init ?? {}); return new Response(null, { status: 204 }); });
+  const { run } = await harness({ fetch });
+  await run(setupArgs);
+  await run(["webhook", "configure", "--url", "https://example.test/hook", "--auth", "hmac", "--secret", "hmac-value", "--json"]);
+  expect((await run(["webhook", "test", "--json"])).exitCode).toBe(0);
+  expect(new Headers(requests[0]!.headers).get("x-horsepower-signature")).toMatch(/^[a-f0-9]{64}$/u);
+  expect(new Headers(requests[0]!.headers).get("authorization")).toBeNull();
+  await run(["webhook", "configure", "--url", "https://example.test/hook", "--auth", "bearer", "--token", "bearer-value", "--json"]);
+  expect((await run(["webhook", "test", "--json"])).exitCode).toBe(0);
+  expect(new Headers(requests[1]!.headers).get("authorization")).toBe("Bearer bearer-value");
 });
 
 test("doctor reports configuration, notifications, OpenSpec, skipped models, and ownership actionably", async () => {
@@ -139,19 +196,31 @@ test("doctor reports configuration, notifications, OpenSpec, skipped models, and
   ]));
 });
 
-test("doctor distinguishes healthy, missing, and stale official OpenSpec integration", async () => {
-  for (const [kind, expected] of [["healthy", "ok"], ["missing", "error"], ["stale", "error"]] as const) {
+test("doctor distinguishes healthy, missing, stale, and unofficial OpenSpec integration", async () => {
+  for (const [kind, expected] of [["healthy", "ok"], ["missing", "error"], ["stale", "error"], ["unofficial", "error"]] as const) {
     const { cwd, run } = await harness();
     if (kind !== "missing") {
-      const generated = kind === "healthy" ? "1.6.0" : "1.5.0";
+      const generated = kind === "stale" ? "1.5.0" : "1.6.0";
       await mkdir(join(cwd, ".pi/skills/openspec-apply-change"), { recursive: true });
       await mkdir(join(cwd, ".pi/prompts"), { recursive: true });
-      await writeFile(join(cwd, ".pi/skills/openspec-apply-change/SKILL.md"), `name: openspec-apply-change\nauthor: openspec\ngeneratedBy: \"${generated}\"`);
-      await writeFile(join(cwd, ".pi/prompts/opsx-apply.md"), "official");
+      await writeFile(join(cwd, ".pi/skills/openspec-apply-change/SKILL.md"), kind === "unofficial"
+        ? `name: arbitrary\ngeneratedBy: \"${generated}\"`
+        : `name: openspec-apply-change\nallowed-tools: Bash(openspec:*)\nauthor: openspec\ngeneratedBy: \"${generated}\"`);
+      await writeFile(join(cwd, ".pi/prompts/opsx-apply.md"), kind === "unofficial"
+        ? "arbitrary file"
+        : "Implement tasks from an OpenSpec change.");
     }
     const checks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
     expect(checks.find((check: { id: string }) => check.id === "openspec").status).toBe(expected);
   }
+});
+
+test("doctor rejects malformed partial OpenSpec semver", async () => {
+  const { run } = await harness({ runOpenSpec: async (args: readonly string[]) => args[0] === "--version"
+    ? { code: 0, stdout: "1.6.\n", stderr: "" }
+    : { code: 0, stdout: JSON.stringify({ root: { path: "/project", healthy: true } }), stderr: "" } });
+  const checks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
+  expect(checks.find((check: { id: string }) => check.id === "openspec")).toMatchObject({ status: "error", message: expect.stringContaining("1.6.0") });
 });
 
 test("staged-release preflight validates manifest, version, layout, and current/link ownership", async () => {
@@ -160,12 +229,31 @@ test("staged-release preflight validates manifest, version, layout, and current/
   for (const path of ["bin/horsepower", "pi/extensions/horsepower/index.js", "pi/skills/horsepower/SKILL.md"]) {
     await mkdir(dirname(join(staged, path)), { recursive: true }); await writeFile(join(staged, path), "ok");
   }
-  await writeFile(join(staged, "release-manifest.json"), JSON.stringify({ version: "0.1.0-alpha.1", entryPoints: { cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" } }));
+  const manifest = { version: "0.1.0-alpha.1", entryPoints: { cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" } };
+  await writeFile(join(staged, "release-manifest.json"), JSON.stringify(manifest));
   expect(await run(["preflight", staged, "--version", "0.1.0-alpha.1", "--json"])).toMatchObject({ exitCode: 0 });
+
+  const linkedStage = join(root, "linked-stage");
+  await symlink(staged, linkedStage);
+  expect(await run(["preflight", linkedStage, "--version", "0.1.0-alpha.1", "--json"])).toMatchObject({ exitCode: 1 });
+
+  const hp = join(homeDir, ".pi/agent/horsepower");
+  const externalRoot = join(root, "external-install");
+  await mkdir(externalRoot);
+  await mkdir(dirname(hp), { recursive: true });
+  await symlink(externalRoot, hp);
+  expect(await run(["preflight", staged, "--version", "0.1.0-alpha.1", "--json"])).toMatchObject({ exitCode: 1 });
+  await rm(hp);
+
+  const cliLink = join(homeDir, ".local/bin/horsepower");
+  await mkdir(dirname(cliLink), { recursive: true });
+  await symlink("/unrelated", cliLink);
+  const ownership = await run(["preflight", staged, "--version", "0.1.0-alpha.1", "--json"]);
+  expect(ownership).toMatchObject({ exitCode: 1 });
+  expect(ownership.stderr).toContain("unrelated symlink");
+
   await writeFile(join(staged, "release-manifest.json"), JSON.stringify({ version: "wrong", entryPoints: {} }));
   expect(await run(["preflight", staged, "--version", "0.1.0-alpha.1", "--json"])).toMatchObject({ exitCode: 1 });
-  const cliLink = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cliLink), { recursive: true }); await symlink("/unrelated", cliLink);
-  expect(await run(["preflight", staged, "--version", "wrong", "--json"])).toMatchObject({ exitCode: 1 });
 });
 
 test("safe uninstall removes only owned topology while preserving user data", async () => {
@@ -202,6 +290,38 @@ test("uninstall refuses regular, unrelated, and hostile symlink targets without 
   expect(await readFile(extension, "utf8")).toBe("foreign");
   expect(await readFile(join(outside, "keep"), "utf8")).toBe("safe");
   expect(await readlink(join(hp, "current"))).toBe(outside);
+});
+
+test("uninstall removes only a verified direct current release target", async () => {
+  for (const deceptive of ["nested", "dangling", "mismatch", "invalid-version"] as const) {
+    const { homeDir, run } = await harness();
+    const hp = join(homeDir, ".pi/agent/horsepower");
+    const versions = join(hp, "versions");
+    await mkdir(versions, { recursive: true });
+    let target: string;
+    if (deceptive === "nested") {
+      const release = join(versions, "container/v0.1.0");
+      await mkdir(release, { recursive: true });
+      await writeFile(join(release, "release-manifest.json"), JSON.stringify({ version: "0.1.0" }));
+      target = "versions/container/v0.1.0";
+    } else if (deceptive === "dangling") {
+      target = "versions/v0.1.0";
+    } else if (deceptive === "mismatch") {
+      const release = join(versions, "v0.1.0");
+      await mkdir(release);
+      await writeFile(join(release, "release-manifest.json"), JSON.stringify({ version: "0.2.0" }));
+      target = "versions/v0.1.0";
+    } else {
+      const release = join(versions, "v01.0.0");
+      await mkdir(release);
+      await writeFile(join(release, "release-manifest.json"), JSON.stringify({ version: "01.0.0" }));
+      target = "versions/v01.0.0";
+    }
+    await symlink(target, join(hp, "current"));
+    const result = await run(["uninstall", "--json"]);
+    expect(result.exitCode, deceptive).toBe(1);
+    expect(await readlink(join(hp, "current"))).toBe(target);
+  }
 });
 
 test("uninstall and purge refuse a symlinked Horsepower root without following it", async () => {
@@ -243,6 +363,26 @@ test("purge requires confirmation and --yes noninteractively, then removes only 
   expect(await run(["purge", "--yes", "--json"])).toMatchObject({ exitCode: 0 });
   await expect(lstat(join(homeDir, ".pi/agent/horsepower"))).rejects.toMatchObject({ code: "ENOENT" });
   await expect(lstat(join(cwd, ".pi/horsepower"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("interactive purge requires an explicit yes and a negative answer changes nothing", async () => {
+  const confirmNo = vi.fn(async () => false);
+  const rejected = await harness({ interactive: true, confirm: confirmNo });
+  await mkdir(join(rejected.homeDir, ".pi/agent/horsepower/memory"), { recursive: true });
+  await writeFile(join(rejected.homeDir, ".pi/agent/horsepower/memory/keep"), "safe");
+  await mkdir(join(rejected.cwd, ".pi/horsepower"), { recursive: true });
+  expect(await rejected.run(["purge", "--json"])).toMatchObject({ exitCode: 0 });
+  expect(confirmNo).toHaveBeenCalledOnce();
+  expect(await readFile(join(rejected.homeDir, ".pi/agent/horsepower/memory/keep"), "utf8")).toBe("safe");
+  expect(await stat(join(rejected.cwd, ".pi/horsepower"))).toBeTruthy();
+
+  const confirmYes = vi.fn(async () => true);
+  const accepted = await harness({ interactive: true, confirm: confirmYes });
+  await mkdir(join(accepted.homeDir, ".pi/agent/horsepower/memory"), { recursive: true });
+  await mkdir(join(accepted.cwd, ".pi/horsepower"), { recursive: true });
+  expect(await accepted.run(["purge", "--json"])).toMatchObject({ exitCode: 0 });
+  expect(confirmYes).toHaveBeenCalledOnce();
+  await expect(lstat(join(accepted.homeDir, ".pi/agent/horsepower"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("CLI never mutates Pi model/provider configuration or API keys", async () => {

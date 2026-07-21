@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveHorsepowerPaths } from "../config/paths.js";
-import type { WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
+import { parseWebhookSettings } from "../config/webhook.js";
 import { horsepowerSubagentSchema } from "../orchestration/schema.js";
 import { acquireGlobalRuntime, type RuntimeLease } from "../runtime/global-runtime.js";
 import type { CreateHorsepowerRuntimeOptions, HorsepowerRuntime, HorsepowerRuntimeContext } from "./runtime.js";
@@ -141,46 +141,10 @@ function readSettings(path: string): Record<string, unknown> {
 
 export function webhookOptions(homeDir: string, projectDir: string): CreateHorsepowerRuntimeOptions["webhook"] {
   const paths = resolveHorsepowerPaths({ homeDir, projectDir });
-  const rawGlobal = readSettings(paths.global.settings).webhook;
-  const rawProject = readSettings(paths.project.settings).webhook;
-  const objectSetting = (value: unknown, label: string): Record<string, unknown> => {
-    if (value === undefined) return {};
-    if (value === null || Array.isArray(value) || typeof value !== "object") {
-      throw new Error(`Invalid Horsepower webhook configuration: ${label} must be an object`);
-    }
-    return value as Record<string, unknown>;
-  };
-  const global = objectSetting(rawGlobal, "webhook");
-  const project = objectSetting(rawProject, "webhook");
-  if (Object.keys(global).length === 0 && Object.keys(project).length === 0) return undefined;
-  const globalNotifications = objectSetting(global.notifications, "notifications");
-  const projectNotifications = objectSetting(project.notifications, "notifications");
-  const merged = {
-    ...global,
-    ...project,
-    notifications: { ...globalNotifications, ...projectNotifications },
-  } as Record<string, unknown>;
-  if (typeof merged.url !== "string" || !merged.url) throw new Error("Invalid Horsepower webhook configuration: url is required");
-  const auth = merged.auth;
-  if (auth === null || Array.isArray(auth) || typeof auth !== "object") {
-    throw new Error("Invalid Horsepower webhook configuration: auth is required");
-  }
-  const rawAuth = auth as Record<string, unknown>;
-  const validAuth = rawAuth.mode === "none" ||
-    (rawAuth.mode === "hmac" && typeof rawAuth.secret === "string" && rawAuth.secret.length > 0) ||
-    (rawAuth.mode === "bearer" && typeof rawAuth.token === "string" && rawAuth.token.length > 0);
-  if (!validAuth) throw new Error("Invalid Horsepower webhook configuration: auth credentials are missing or invalid");
-  const notifications = merged.notifications;
-  const rawNotifications = notifications !== null && !Array.isArray(notifications) && typeof notifications === "object"
-    ? notifications as Record<string, unknown>
-    : {};
-  return {
-    config: { url: merged.url, auth: rawAuth as WebhookNotifierOptions["config"]["auth"] },
-    notifications: {
-      ...(typeof rawNotifications.change === "boolean" ? { change: rawNotifications.change } : {}),
-      ...(typeof rawNotifications.dispatch === "boolean" ? { dispatch: rawNotifications.dispatch } : {}),
-    },
-  };
+  return parseWebhookSettings(
+    readSettings(paths.global.settings).webhook,
+    readSettings(paths.project.settings).webhook,
+  );
 }
 
 function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {

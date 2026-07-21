@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, readlink, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { readJsonObject, writeJsonObject, type JsonObject } from "../config/json-store.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
-import { createWebhookNotifier, type WebhookAuth, type WebhookConfig } from "../lifecycle/webhook-notifier.js";
+import { parseWebhookSettings, redactCredentials } from "../config/webhook.js";
+import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-notifier.js";
+import { validateOpenSpecInstallation } from "../openspec/boundary.js";
 import { createSlotRegistry, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
@@ -18,12 +20,12 @@ export interface CliOptions {
   fetch?: typeof fetch;
   now?: () => Date;
   interactive?: boolean;
-  confirm?: (message: string) => Promise<boolean>;
+  confirm?: (message: string) => Promise<boolean | undefined>;
 }
 
 class UsageError extends Error {}
-const SECRET = "[REDACTED]";
 const slotId = /^[a-z][a-z0-9-]{0,31}$/u;
+const releaseVersion = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stable);
@@ -43,7 +45,11 @@ function flags(args: readonly string[]): { positionals: string[]; values: Map<st
     const item = args[index]!;
     if (!item.startsWith("--")) { positionals.push(item); continue; }
     const name = item.slice(2);
-    if (boolean.has(name)) { switches.add(name); continue; }
+    if (boolean.has(name)) {
+      if (switches.has(name)) throw new UsageError(`Duplicate option: --${name}`);
+      switches.add(name);
+      continue;
+    }
     const value = args[++index];
     if (!value || value.startsWith("--")) throw new UsageError(`Missing value for --${name}`);
     if (values.has(name)) throw new UsageError(`Duplicate option: --${name}`);
@@ -69,9 +75,7 @@ async function updateSlot(path: string, id: string, binding: SlotBinding | undef
   const next = { ...current, slots }; await writeJsonObject(path, next); return next;
 }
 function redactSettings(raw: JsonObject): JsonObject {
-  const webhook = object(raw.webhook); const auth = object(webhook.auth);
-  const redactedAuth = auth.mode === "hmac" ? { mode: "hmac", secret: SECRET } : auth.mode === "bearer" ? { mode: "bearer", token: SECRET } : auth.mode === "none" ? { mode: "none" } : undefined;
-  return { ...raw, ...(raw.webhook === undefined ? {} : { webhook: { ...webhook, ...(redactedAuth ? { auth: redactedAuth } : {}) } }) };
+  return redactCredentials(raw) as JsonObject;
 }
 function installTopology(home: string) {
   const root = join(home, ".pi", "agent", "horsepower");
@@ -92,13 +96,35 @@ async function linkState(path: string, expected: string): Promise<{ status: "abs
     return actual === resolve(expected) ? { status: "owned" } : { status: "conflict", message: `Refusing unrelated symlink: ${path}` };
   } catch (cause) { if (absent(cause)) return { status: "absent" }; throw cause; }
 }
-function safeManagedCurrent(root: string, target: string): boolean {
-  const resolved = resolve(root, target); const versions = join(resolve(root), "versions");
-  return relative(versions, resolved) !== "" && !relative(versions, resolved).startsWith("..") && !isAbsolute(relative(versions, resolved));
-}
 async function currentState(root: string, current: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
-  try { const info = await lstat(current); if (!info.isSymbolicLink()) return { status: "conflict", message: `Refusing non-symlink: ${current}` }; const target = await readlink(current); return safeManagedCurrent(root, target) ? { status: "owned" } : { status: "conflict", message: `Refusing unmanaged current target: ${current}` }; }
-  catch (cause) { if (absent(cause)) return { status: "absent" }; throw cause; }
+  try {
+    const info = await lstat(current);
+    if (!info.isSymbolicLink()) return { status: "conflict", message: `Refusing non-symlink: ${current}` };
+    const target = await readlink(current);
+    const versions = join(resolve(root), "versions");
+    const resolved = resolve(dirname(current), target);
+    const name = resolved.startsWith(`${versions}/`) && dirname(resolved) === versions ? resolved.slice(versions.length + 1) : "";
+    if (!name.startsWith("v") || !releaseVersion.test(name.slice(1))) {
+      return { status: "conflict", message: `Refusing unmanaged current target: ${current}` };
+    }
+    const versionsInfo = await lstat(versions);
+    const releaseInfo = await lstat(resolved);
+    if (!versionsInfo.isDirectory() || versionsInfo.isSymbolicLink() || !releaseInfo.isDirectory() || releaseInfo.isSymbolicLink()) {
+      return { status: "conflict", message: `Refusing unmanaged current target: ${current}` };
+    }
+    const manifest = await readJsonObject(join(resolved, "release-manifest.json"));
+    if (manifest.version !== name.slice(1)) return { status: "conflict", message: `Refusing current target with mismatched manifest: ${current}` };
+    return { status: "owned" };
+  } catch (cause) {
+    if (absent(cause)) {
+      try { await lstat(current); } catch (currentCause) { if (absent(currentCause)) return { status: "absent" }; }
+      return { status: "conflict", message: `Refusing dangling current target: ${current}` };
+    }
+    if (cause instanceof Error && cause.message.startsWith("Malformed JSON")) {
+      return { status: "conflict", message: `Refusing current target with invalid manifest: ${current}` };
+    }
+    throw cause;
+  }
 }
 async function versionsState(versions: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
   try {
@@ -106,7 +132,7 @@ async function versionsState(versions: string): Promise<{ status: "absent" | "ow
     if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) return { status: "conflict", message: `Refusing unowned versions path: ${versions}` };
     for (const name of await readdir(versions)) {
       const release = join(versions, name); const info = await lstat(release);
-      if (!/^v[0-9][0-9A-Za-z.-]*$/u.test(name) || !info.isDirectory() || info.isSymbolicLink()) return { status: "conflict", message: `Refusing unmanaged version: ${release}` };
+      if (!name.startsWith("v") || !releaseVersion.test(name.slice(1)) || !info.isDirectory() || info.isSymbolicLink()) return { status: "conflict", message: `Refusing unmanaged version: ${release}` };
       try { const manifest = await readJsonObject(join(release, "release-manifest.json")); if (`v${String(manifest.version)}` !== name) throw new Error(); }
       catch { return { status: "conflict", message: `Refusing version without matching manifest: ${release}` }; }
     }
@@ -132,7 +158,8 @@ export function createCli(options: CliOptions) {
       if (!model || !thinking) throw new UsageError(`setup requires --${id} and --${id}-thinking`);
       slots[id] = { model, thinking: thinking as ThinkingLevel };
     }
-    createSlotRegistry({ global: { slots }, ...(options.models ? { models: options.models } : {}) });
+    try { createSlotRegistry({ global: { slots }, ...(options.models ? { models: options.models } : {}) }); }
+    catch (cause) { throw new UsageError((cause as Error).message); }
     const current = await optionalObject(paths.global.modelSlots); await writeJsonObject(paths.global.modelSlots, { ...current, slots: { ...object(current.slots), ...slots } });
     const settings = await optionalObject(paths.global.settings); await writeJsonObject(paths.global.settings, settings);
     return { data: await slotsData(), message: "Horsepower configured" };
@@ -143,14 +170,15 @@ export function createCli(options: CliOptions) {
     let binding: SlotBinding;
     if (parsed.values.has("fallback")) { if (parsed.values.has("model") || parsed.values.has("thinking")) throw new UsageError("Choose --fallback or --model/--thinking"); binding = { fallback: parsed.values.get("fallback")! }; }
     else { const model = parsed.values.get("model"), thinking = parsed.values.get("thinking"); if (!model || !thinking) throw new UsageError("set requires --model and --thinking"); binding = { model, thinking: thinking as ThinkingLevel }; }
-    if (!slotId.test(id)) throw new Error(`Invalid model slot ID: ${id}`);
+    if (!slotId.test(id)) throw new UsageError(`Invalid model slot ID: ${id}`);
     const path = scopePath(parsed.values.get("scope"), paths); const before = await optionalObject(path); await updateSlot(path, id, binding);
-    try { return { data: await slotsData(), message: `Set ${id}` }; } catch (cause) { await writeJsonObject(path, before); throw cause; }
+    try { return { data: await slotsData(), message: `Set ${id}` }; } catch (cause) { await writeJsonObject(path, before); throw new UsageError((cause as Error).message); }
   }
   async function unsetSlot(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["scope"], []); const id = parsed.positionals[0]; if (!id || parsed.positionals.length !== 1) throw new UsageError("unset requires one slot ID");
+    if (!slotId.test(id)) throw new UsageError(`Invalid model slot ID: ${id}`);
     const path = scopePath(parsed.values.get("scope"), paths); const before = await optionalObject(path); await updateSlot(path, id, undefined);
-    try { return { data: await slotsData(), message: `Unset ${id}` }; } catch (cause) { await writeJsonObject(path, before); throw cause; }
+    try { return { data: await slotsData(), message: `Unset ${id}` }; } catch (cause) { await writeJsonObject(path, before); throw new UsageError((cause as Error).message); }
   }
   async function configure(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     const values = ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"];
@@ -163,54 +191,74 @@ export function createCli(options: CliOptions) {
       if (model && thinking) slots[id] = { model, thinking };
     }
     const before = current; await writeJsonObject(paths.global.modelSlots, { ...current, slots });
-    try { return { data: await slotsData(), message: "Horsepower configuration updated" }; } catch (cause) { await writeJsonObject(paths.global.modelSlots, before); throw cause; }
+    try { return { data: await slotsData(), message: "Horsepower configuration updated" }; } catch (cause) { await writeJsonObject(paths.global.modelSlots, before); throw new UsageError((cause as Error).message); }
   }
   async function webhook(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     const action = parsed.positionals[0]; if (!action || parsed.positionals.length !== 1) throw new UsageError("webhook requires configure, skip, disable, or test");
-    if (action === "disable" || action === "skip") { only(parsed, [], []); const current = await optionalObject(paths.global.settings); await writeJsonObject(paths.global.settings, { ...current, webhook: { ...object(current.webhook), enabled: false } }); return { data: { webhook: { enabled: false } }, message: "Webhook disabled" }; }
+    if (action === "disable" || action === "skip") {
+      only(parsed, [], []);
+      const current = await optionalObject(paths.global.settings);
+      const scrubbed = redactCredentials(object(current.webhook)) as JsonObject;
+      const { url: _url, auth: _auth, notifications: _notifications, scopes: _scopes, ...preserved } = scrubbed;
+      const next = { ...current, webhook: { ...preserved, enabled: false } };
+      await writeJsonObject(paths.global.settings, next);
+      return { data: redactSettings(next), message: "Webhook disabled" };
+    }
     if (action === "configure") {
       only(parsed, ["url", "auth", "secret", "token"], ["dispatch", "no-dispatch", "change", "no-change"]);
+      if (parsed.switches.has("change") && parsed.switches.has("no-change")) throw new UsageError("Choose --change or --no-change");
+      if (parsed.switches.has("dispatch") && parsed.switches.has("no-dispatch")) throw new UsageError("Choose --dispatch or --no-dispatch");
       const url = parsed.values.get("url"), mode = parsed.values.get("auth"); if (!url || !mode) throw new UsageError("webhook configure requires --url and --auth");
       try { const parsedUrl = new URL(url); if (parsedUrl.protocol !== "https:" && parsedUrl.hostname !== "localhost" && parsedUrl.hostname !== "127.0.0.1") throw new Error(); } catch { throw new UsageError("Webhook URL must be HTTPS (localhost is allowed for testing)"); }
       let auth: WebhookAuth; if (mode === "hmac") { const secret = parsed.values.get("secret"); if (!secret) throw new UsageError("HMAC authentication requires --secret"); auth = { mode, secret }; }
       else if (mode === "bearer") { const token = parsed.values.get("token"); if (!token) throw new UsageError("Bearer authentication requires --token"); auth = { mode, token }; }
       else if (mode === "none") auth = { mode }; else throw new UsageError(`Invalid webhook auth mode: ${mode}`);
       const current = await optionalObject(paths.global.settings); const previous = object(current.webhook);
-      const next = { ...current, webhook: { ...previous, enabled: true, url, scopes: { change: parsed.switches.has("no-change") ? false : parsed.switches.has("change") ? true : object(previous.scopes).change ?? true, dispatch: parsed.switches.has("dispatch") ? true : parsed.switches.has("no-dispatch") ? false : object(previous.scopes).dispatch ?? false }, auth } };
+      const next = { ...current, webhook: { ...previous, enabled: true, url, notifications: { change: parsed.switches.has("no-change") ? false : parsed.switches.has("change") ? true : object(previous.notifications).change ?? true, dispatch: parsed.switches.has("dispatch") ? true : parsed.switches.has("no-dispatch") ? false : object(previous.notifications).dispatch ?? false }, auth } };
       await writeJsonObject(paths.global.settings, next); return { data: redactSettings(next), message: "Webhook configured" };
     }
     if (action === "test") {
-      only(parsed, [], []); const settings = await optionalObject(paths.global.settings); const configured = object(settings.webhook); if (configured.enabled !== true) throw new Error("Webhook is disabled");
-      const auth = configured.auth as WebhookAuth; const config: WebhookConfig = { url: String(configured.url), auth };
-      const notifier = createWebhookNotifier({ config, ...(options.fetch ? { fetch: options.fetch } : {}), retryDelaysMs: [0] });
+      only(parsed, [], []); const settings = await optionalObject(paths.global.settings); const parsedSettings = parseWebhookSettings(settings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");
+      const notifier = createWebhookNotifier({ config: parsedSettings.config, ...(options.fetch ? { fetch: options.fetch } : {}), retryDelaysMs: [0] });
       const result = await notifier.notify({ eventId: randomUUID(), timestamp: (options.now ?? (() => new Date()))().toISOString(), scope: "change", runId: "cli-webhook-test", status: "completed", summary: "webhook test", evidenceRefs: [] }); notifier.abandon();
       if (!result.delivered) throw new Error(result.error ?? "Webhook delivery failed"); return { data: result, message: "Webhook delivered" };
     }
     throw new UsageError(`Unknown webhook command: ${action}`);
   }
   async function openspecCheck() {
-    const versionResult = await options.runOpenSpec(["--version"], { cwd: options.cwd });
-    if (versionResult.code !== 0) return { id: "openspec", status: "error", message: "Official OpenSpec CLI missing", action: "Install official @fission-ai/openspec 1.6.0 or newer" };
-    const version = versionResult.stdout.trim(); if (!/^1\.(?:[6-9]|[1-9]\d)\.|^[2-9]\d*\./u.test(version)) return { id: "openspec", status: "error", message: `Unsupported OpenSpec ${version}`, action: "Install official OpenSpec 1.6.0 or newer" };
-    const doctor = await options.runOpenSpec(["doctor", "--json"], { cwd: options.cwd }); if (doctor.code !== 0) return { id: "openspec", status: "error", message: "OpenSpec project unhealthy", action: "Run openspec doctor" };
-    let root = options.cwd; try { const parsed = JSON.parse(doctor.stdout) as { root?: { path?: string; healthy?: boolean } }; if (parsed.root?.healthy !== true || !parsed.root.path) throw new Error(); root = parsed.root.path; } catch { return { id: "openspec", status: "error", message: "Invalid OpenSpec doctor response", action: "Run openspec doctor" }; }
-    try { const skill = await readFile(join(root, ".pi/skills/openspec-apply-change/SKILL.md"), "utf8"); await readFile(join(root, ".pi/prompts/opsx-apply.md"), "utf8"); const generated = /generatedBy:\s*["']?([^\s"']+)/u.exec(skill)?.[1]; if (generated !== version) return { id: "openspec", status: "error", message: "OpenSpec Pi integration stale", action: "Run openspec update" }; } catch (cause) { if (absent(cause)) return { id: "openspec", status: "error", message: "OpenSpec Pi integration missing", action: "Run openspec init --tools pi" }; throw cause; }
-    return { id: "openspec", status: "ok", message: `Official OpenSpec ${version} healthy` };
+    try {
+      const result = await validateOpenSpecInstallation({ run: options.runOpenSpec, readText: (path) => readFile(path, "utf8") }, options.cwd);
+      return { id: "openspec", status: "ok", message: `Official OpenSpec ${result.version} healthy` };
+    } catch (cause) {
+      const message = (cause as Error).message;
+      const action = message.includes("init --tools pi") ? "Run openspec init --tools pi"
+        : message.includes("openspec update") ? "Run openspec update"
+          : message.includes("not healthy") ? "Run openspec doctor"
+            : "Install official @fission-ai/openspec 1.6.0 or newer";
+      return { id: "openspec", status: "error", message, action };
+    }
   }
   async function installationCheck() { const current = await currentState(topology.root, topology.current); const states = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); return current.status === "owned" && states.every((state) => state.status === "owned") ? { id: "installation", status: "ok", message: "Managed symlink topology is owned" } : { id: "installation", status: "error", message: [current, ...states].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Install or repair Horsepower from an official release" }; }
   async function doctor(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []); const checks: Array<Record<string, unknown>> = [];
     try { const data = await slotsData(); checks.push({ id: "configuration", status: "ok", message: `Slots revision ${data.revision}` }); } catch (cause) { checks.push({ id: "configuration", status: "error", message: (cause as Error).message, action: "Run horsepower setup" }); }
-    const settings = await optionalObject(paths.global.settings); const webhookConfig = object(settings.webhook); checks.push(webhookConfig.enabled === true ? { id: "notification", status: "ok", message: `Webhook enabled (${String(object(webhookConfig.auth).mode)})` } : { id: "notification", status: "skipped", message: "Webhook disabled" });
+    const settings = await optionalObject(paths.global.settings);
+    try {
+      const configured = parseWebhookSettings(settings.webhook);
+      checks.push(configured ? { id: "notification", status: "ok", message: `Webhook enabled (${configured.config.auth.mode})` } : { id: "notification", status: "skipped", message: "Webhook disabled" });
+    } catch (cause) {
+      checks.push({ id: "notification", status: "error", message: (cause as Error).message, action: "Run horsepower webhook configure or webhook disable" });
+    }
     checks.push(await openspecCheck()); checks.push(options.models ? { id: "model-registry", status: "ok", message: "Slot models validated" } : { id: "model-registry", status: "skipped", message: "Pi model registry unavailable; validation skipped" }); checks.push(await installationCheck());
     return { data: { checks }, ok: !checks.some((check) => check.status === "error"), exitCode: checks.some((check) => check.status === "error") ? 1 : 0 };
   }
   async function preflight(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["version"], []); const staged = parsed.positionals[0], expected = parsed.values.get("version"); if (!staged || parsed.positionals.length !== 1 || !expected) throw new UsageError("preflight requires STAGED_ROOT --version VERSION");
     if (options.platform !== "linux" && options.platform !== "darwin") throw new Error(`Unsupported platform: ${options.platform}`);
-    const root = resolve(staged); let manifest: JsonObject; try { manifest = await readJsonObject(join(root, "release-manifest.json")); } catch (cause) { throw new Error(`Invalid staged release: ${(cause as Error).message}`); }
+    const root = resolve(staged); const stagedInfo = await lstat(root).catch(() => undefined); if (!stagedInfo?.isDirectory() || stagedInfo.isSymbolicLink()) throw new Error(`Invalid staged release root: ${root}`); let manifest: JsonObject; try { manifest = await readJsonObject(join(root, "release-manifest.json")); } catch (cause) { throw new Error(`Invalid staged release: ${(cause as Error).message}`); }
     if (manifest.version !== expected) throw new Error(`Staged manifest version mismatch: expected ${expected}`); const entries = object(manifest.entryPoints);
     for (const [name, expectedPath] of Object.entries({ cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" })) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); const info = await lstat(join(root, candidate)).catch(() => undefined); if (!info?.isFile() || info.isSymbolicLink()) throw new Error(`Missing staged ${name}: ${candidate}`); }
+    const managedRoot = await managedRootState(topology.root); if (managedRoot.status === "conflict") throw new Error(managedRoot.message ?? "Installation ownership conflict");
     const current = await currentState(topology.root, topology.current); const links = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); const conflict = [current, ...links].find((state) => state.status === "conflict"); if (conflict) throw new Error(conflict.message ?? "Installation ownership conflict");
     return { data: { eligible: true, root, version: expected }, message: "Staged release eligible" };
   }
@@ -219,7 +267,7 @@ export function createCli(options: CliOptions) {
     for (const { link, state } of states) if (state.status === "owned") await rm(link.path); if (current.status === "owned") await rm(topology.current); if (versions.status === "owned") await rm(topology.versions, { recursive: true }); return { data: { preserved: [paths.global.modelSlots, paths.global.settings, join(topology.root, "memory"), join(topology.root, "state"), paths.project.root] }, message: "Horsepower code uninstalled; user data preserved" };
   }
   async function purge(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
-    only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); if (!await options.confirm("Permanently remove Horsepower user data?")) throw new UsageError("Purge canceled"); }
+    only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); const confirmed = await options.confirm("Permanently remove Horsepower user data? Type yes to continue: "); if (confirmed === undefined) throw new UsageError("Purge requires --yes when no controlling terminal is available"); if (!confirmed) return { data: { purged: false }, message: "Purge canceled; no data changed" }; }
     const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); if (current.status !== "absent") throw new Error("Run horsepower uninstall before purge"); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
   }
 
