@@ -13,6 +13,8 @@ import { createHorsepowerRuntime } from "./runtime.js";
 
 interface ExtensionRuntime {
   execute(input: unknown, context: HorsepowerRuntimeContext): Promise<unknown>;
+  beginImplementationCampaign?(input: { changeId: string; projectId: string; taskScopes: string[]; mode: "multi_agent" | "main_agent" }): Promise<unknown>;
+  authorizeImplementationReviewer?(input: { campaignId: string; projectId: string; reviewCampaignId: string; acceptanceScope: string; budget: number }): Promise<unknown>;
 }
 
 interface ExtensionLease {
@@ -107,6 +109,46 @@ export function registerHorsepowerExtension(
     description: "Show safe Horsepower diagnostics",
     handler: async (_args, ctx) => {
       const result = await runtime(ctx).execute({ action: "doctor", cwd: ctx.cwd }, runtimeContext(ctx));
+      ctx.ui.notify(JSON.stringify(result), "info");
+    },
+  });
+  pi.registerCommand("horsepower-campaign", {
+    description: "Choose multi-Agent or main-Agent execution for a scoped implementation campaign",
+    handler: async (_args, ctx) => {
+      const modeChoice = await ctx.ui.select("Choose implementation mode / 选择实施模式", ["多 Agent 团队", "主 Agent 直接执行"]);
+      if (!modeChoice) return;
+      const changeId = (await ctx.ui.input("OpenSpec change ID", "horsepower-alpha1"))?.trim();
+      const scopes = (await ctx.ui.input("Task scopes / 任务范围（逗号分隔）", "4.6,4.7"))?.split(",").map((item) => item.trim()).filter(Boolean);
+      if (!changeId || !scopes?.length) { ctx.ui.notify("Change ID and task scopes are required.", "error"); return; }
+      const active = runtime(ctx);
+      if (!active.beginImplementationCampaign) throw new Error("Implementation campaign runtime is unavailable");
+      const result = await active.beginImplementationCampaign({
+        changeId, projectId: ctx.cwd, taskScopes: scopes,
+        mode: modeChoice === "多 Agent 团队" ? "multi_agent" : "main_agent",
+      }) as { campaignId: string; mode: "multi_agent" | "main_agent"; changeId: string; taskScopes: string[] };
+      pi.sendMessage({
+        customType: "horsepower-campaign",
+        content: `User selected Horsepower implementation campaign ${result.campaignId}: mode=${result.mode}, change=${result.changeId}, scopes=${result.taskScopes.join(",")}.`,
+        display: true,
+        details: result,
+      }, { deliverAs: "nextTurn" });
+      ctx.ui.notify(JSON.stringify(result), "info");
+    },
+  });
+  pi.registerCommand("horsepower-review-authorize", {
+    description: "Authorize a bounded reviewer in a main-Agent implementation campaign",
+    handler: async (_args, ctx) => {
+      const campaignId = (await ctx.ui.input("Implementation campaign ID"))?.trim();
+      const reviewCampaignId = (await ctx.ui.input("Review campaign ID"))?.trim();
+      const acceptanceScope = (await ctx.ui.input("Review acceptance scope"))?.trim();
+      const budgetText = (await ctx.ui.input("Reviewer dispatch budget", "1"))?.trim();
+      const budget = Number(budgetText);
+      if (!campaignId || !reviewCampaignId || !acceptanceScope || !Number.isSafeInteger(budget) || budget <= 0) {
+        ctx.ui.notify("Campaign IDs, scope, and a positive integer budget are required.", "error"); return;
+      }
+      const active = runtime(ctx);
+      if (!active.authorizeImplementationReviewer) throw new Error("Reviewer authorization runtime is unavailable");
+      const result = await active.authorizeImplementationReviewer({ campaignId, projectId: ctx.cwd, reviewCampaignId, acceptanceScope, budget });
       ctx.ui.notify(JSON.stringify(result), "info");
     },
   });

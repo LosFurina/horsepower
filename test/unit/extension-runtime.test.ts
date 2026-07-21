@@ -83,8 +83,10 @@ test("configured dispatch notification uses injected transport and shutdown aban
     },
   });
 
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["notification"], mode: "multi_agent" });
   await runtime.execute({
     action: "create", handoffMode: "inline", changeId: "change-a", name: "w", agent: "coder", modelSlot: "craft",
+    implementationCampaignId: campaign.campaignId, taskScope: "notification", workKind: "implementation",
   }, { captain: true, cwd: project, modelRegistry: modelRegistry as never });
   await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
   await vi.waitFor(() => expect(sleep).toHaveBeenCalledTimes(1));
@@ -251,8 +253,10 @@ test("shutdown waits for an admitted one-shot, terminal notification, then destr
   });
   const ctx = { captain: true, cwd: project, modelRegistry: modelRegistry as never };
 
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["shutdown"], mode: "multi_agent" });
   const execution = runtime.execute({
     action: "single", handoffMode: "inline", changeId: "change-a", name: "task", agent: "coder", modelSlot: "craft", task: "work",
+    implementationCampaignId: campaign.campaignId, taskScope: "shutdown", workKind: "implementation",
   }, ctx);
   await vi.waitFor(() => expect(oneShot.single).toHaveBeenCalledTimes(1));
   const shutdown = runtime.shutdown();
@@ -388,9 +392,11 @@ test("advancing actions use official OpenSpec checks in the active cwd", async (
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
   const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText });
 
-  await runtime.execute({ action: "create", handoffMode: "inline", changeId: "change-a", cwd: "/stale", name: "w", agent: "coder", modelSlot: "craft" }, {
-    captain: true, cwd: project, modelRegistry: modelRegistry as never,
-  });
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["cwd"], mode: "multi_agent" });
+  await runtime.execute({
+    action: "create", handoffMode: "inline", changeId: "change-a", cwd: "/stale", name: "w", agent: "coder", modelSlot: "craft",
+    implementationCampaignId: campaign.campaignId, taskScope: "cwd", workKind: "implementation",
+  }, { captain: true, cwd: project, modelRegistry: modelRegistry as never });
 
   expect(calls.map((call) => call.args[0])).toEqual(["--version", "doctor", "status", "validate"]);
   expect(calls.every((call) => call.cwd === project)).toBe(true);

@@ -6,6 +6,7 @@ import { resolveHorsepowerPaths } from "../config/paths.js";
 import { createHandoffStore } from "../handoffs/store.js";
 import { createRunLifecycle } from "../lifecycle/run-lifecycle.js";
 import { createReviewCampaignManager } from "../lifecycle/review-campaign.js";
+import { createImplementationCampaignManager, type ImplementationMode, type WorkKind } from "../lifecycle/implementation-campaign.js";
 import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary } from "../openspec/boundary.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
@@ -63,6 +64,7 @@ export class HorsepowerRuntime {
   readonly #manager: PersistentWorkerManager;
   readonly #lifecycle: ReturnType<typeof createRunLifecycle>;
   readonly #reviews = createReviewCampaignManager();
+  readonly #implementations = createImplementationCampaignManager();
   readonly #boundary: ReturnType<typeof createOpenSpecBoundary>;
   readonly #notifiers = new Set<ReturnType<typeof createWebhookNotifier>>();
   readonly #operations = new Set<Promise<unknown>>();
@@ -83,6 +85,16 @@ export class HorsepowerRuntime {
     });
     const readText = options.readText ?? ((path: string) => readFile(path, "utf8"));
     this.#boundary = createOpenSpecBoundary({ run: options.runOpenSpec ?? createOpenSpecCliRunner(), readText });
+  }
+
+  async beginImplementationCampaign(input: { changeId: string; projectId: string; taskScopes: string[]; mode: ImplementationMode }) {
+    const projectId = await realpath(resolve(input.projectId)).catch(() => resolve(input.projectId));
+    return this.#implementations.begin({ ...input, projectId });
+  }
+
+  async authorizeImplementationReviewer(input: { campaignId: string; projectId: string; reviewCampaignId: string; acceptanceScope: string; budget: number }) {
+    const projectId = await realpath(resolve(input.projectId)).catch(() => resolve(input.projectId));
+    return this.#implementations.authorizeReviewer({ ...input, projectId });
   }
 
   execute(input: unknown, context: HorsepowerRuntimeContext): Promise<unknown> {
@@ -113,6 +125,19 @@ export class HorsepowerRuntime {
         action: raw.action as never,
         cwd,
         ...(typeof raw.changeId === "string" ? { changeId: raw.changeId } : {}),
+      });
+    }
+    const workProducing = new Set(["single", "parallel", "chain", "create", "send", "steer"]);
+    if (workProducing.has(String(raw.action))) {
+      const campaignId = typeof raw.implementationCampaignId === "string" ? raw.implementationCampaignId : "";
+      const taskScope = typeof raw.taskScope === "string" ? raw.taskScope : "";
+      const workKind = typeof raw.workKind === "string" ? raw.workKind as WorkKind : undefined;
+      if (!campaignId || !taskScope || !workKind) {
+        throw new Error("Work requires a user-selected implementation campaign: choose multi_agent or main_agent with /horsepower-campaign");
+      }
+      this.#implementations.authorizeDispatch({
+        campaignId, changeId: String(raw.changeId), projectId, taskScope, workKind,
+        ...(typeof raw.reviewCampaignId === "string" ? { reviewCampaignId: raw.reviewCampaignId } : {}),
       });
     }
     let slots: ReturnType<typeof createSlotRegistry> | undefined;

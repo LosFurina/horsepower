@@ -7,17 +7,20 @@ interface FakePi {
   tools: Array<Record<string, unknown>>;
   commands: Array<{ name: string; options: Record<string, unknown> }>;
   handlers: Map<string, Array<(event: unknown, ctx: unknown) => unknown>>;
+  messages: unknown[];
   registerTool(tool: Record<string, unknown>): void;
   registerCommand(name: string, options: Record<string, unknown>): void;
   on(event: string, handler: (event: unknown, ctx: unknown) => unknown): void;
+  sendMessage(message: unknown, options?: unknown): void;
 }
 
 function fakePi(): FakePi {
   return {
-    tools: [], commands: [], handlers: new Map(),
+    tools: [], commands: [], handlers: new Map(), messages: [],
     registerTool(tool) { this.tools.push(tool); },
     registerCommand(name, options) { this.commands.push({ name, options }); },
     on(event, handler) { this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]); },
+    sendMessage(message) { this.messages.push(message); },
   };
 }
 
@@ -38,9 +41,38 @@ test("registers only Horsepower-namespaced tools and commands without altering c
 
   expect(pi.tools.map((tool) => tool.name)).toEqual(["other_tool", "horsepower_subagent"]);
   expect(pi.commands.map((command) => command.name)).toEqual([
-    "team", "horsepower-workers", "horsepower-doctor",
+    "team", "horsepower-workers", "horsepower-doctor", "horsepower-campaign", "horsepower-review-authorize",
   ]);
   expect(pi.tools.some((tool) => ["subagent", "team_create"].includes(String(tool.name)))).toBe(false);
+});
+
+test("user commands create implementation mode and bounded reviewer authorization", async () => {
+  const pi = fakePi();
+  const beginImplementationCampaign = vi.fn(async (input) => ({ campaignId: "implementation-1", ...input }));
+  const authorizeImplementationReviewer = vi.fn(async (input) => ({ remaining: input.budget }));
+  const runtime = { execute: vi.fn(), beginImplementationCampaign, authorizeImplementationReviewer };
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, {
+    acquireRuntime: () => ({ value: runtime, cleanup: vi.fn(), abandon: vi.fn() }),
+  });
+  const ctx = context() as ReturnType<typeof context> & { ui: ReturnType<typeof context>["ui"] & { select: ReturnType<typeof vi.fn>; input: ReturnType<typeof vi.fn> } };
+  ctx.ui.select = vi.fn(async () => "主 Agent 直接执行");
+  ctx.ui.input = vi.fn()
+    .mockResolvedValueOnce("horsepower-alpha1")
+    .mockResolvedValueOnce("4.7,4.8");
+  const campaign = pi.commands.find((command) => command.name === "horsepower-campaign")!.options.handler as (args: string, ctx: unknown) => Promise<void>;
+  await campaign("", ctx);
+  expect(beginImplementationCampaign).toHaveBeenCalledWith({ changeId: "horsepower-alpha1", projectId: "/active/project", taskScopes: ["4.7", "4.8"], mode: "main_agent" });
+  expect(pi.messages).toContainEqual(expect.objectContaining({ customType: "horsepower-campaign", details: expect.objectContaining({ campaignId: "implementation-1", mode: "main_agent" }) }));
+
+  ctx.ui.input = vi.fn()
+    .mockResolvedValueOnce("implementation-1")
+    .mockResolvedValueOnce("review-1")
+    .mockResolvedValueOnce("OpenSpec 4.8")
+    .mockResolvedValueOnce("1");
+  const authorize = pi.commands.find((command) => command.name === "horsepower-review-authorize")!.options.handler as (args: string, ctx: unknown) => Promise<void>;
+  await authorize("", ctx);
+  expect(authorizeImplementationReviewer).toHaveBeenCalledWith({ campaignId: "implementation-1", projectId: "/active/project", reviewCampaignId: "review-1", acceptanceScope: "OpenSpec 4.8", budget: 1 });
 });
 
 test("tool passes explicit Captain capability, active cwd, and model registry", async () => {
