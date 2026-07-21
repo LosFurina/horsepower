@@ -237,6 +237,16 @@ Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, 
 
 Later changes may add richer execution governance—coder routing, tester/reviewer orchestration, Coder Guard, standards, personas, and TUI—but those features must continue to leave all planning and historical facts with OpenSpec.
 
+### 17. Review remediation uses reconciliation and shared verification contracts
+
+Enable and disable capture the complete pre-operation state of both Pi integration links. If a mutation fails, Horsepower attempts every inverse operation needed to reconcile both links to that captured state, even when an earlier reconciliation operation fails. The command reports the original operation failure together with every rollback failure; it never masks the initiating error or claims successful restoration when reconciliation is incomplete. This is the strongest truthful all-or-nothing guarantee available for independent filesystem links without pretending that cross-directory symlink operations are atomic.
+
+CLI command metadata owns the handler, supported-platform requirement, and localized completion-summary key in one typed table. Installation-link inspection is explicitly named as a preflight operation. Doctor renders enabled, disabled, partially enabled, conflict, and remediation conclusions through the exhaustive locale catalog while preserving machine status values and commands.
+
+One managed-installation test fixture owns the common release/current/CLI/integration topology setup. A reusable GitHub verification workflow owns the Ubuntu/macOS, Node 22.19.0, locale, `npm run check`, and deterministic release/privacy-scan contract. CI, manual alpha verification, and tagged release call that workflow rather than repeating it. `HORSEPOWER_E2E_LOCALE` is consumed by locale-sensitive E2E tests; an unset value runs both locales locally, while each CI matrix leg proves its selected locale.
+
+Real Pi acceptance invokes `horsepower_subagent`, not only command discovery, against a deterministic local model endpoint and verifies principal conclusions for both `en` and `zh-CN` over unchanged English internal evidence. Installed bundled-CLI acceptance likewise verifies both locales. Release scanning remains mandatory in every CI verification leg before alpha artifacts or tagged assets can be produced.
+
 ## Risks / Trade-offs
 
 - **OpenSpec CLI changes** → Keep interaction CLI-first, test the minimum supported official contract, fail clearly on incompatible behavior, and avoid parsing undocumented internals.
