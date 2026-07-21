@@ -17,6 +17,7 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 - Add optional terminal-state webhook notification at change and dispatch scope, with change notifications enabled by default, dispatch notifications opt-in, HMAC/Bearer/none authentication, redacted payloads, and non-blocking in-process retries.
 - Add an explicit managed text-handoff mode for substantial delegated work, with private brief/report artifacts, bounded attachments, opaque references, retained execution evidence, and no competing OpenSpec facts.
 - Add Captain-defined review campaigns whose finite budget, fixed acceptance scope, and root-cause deduplication prevent reviewer/fixer loops from expanding or renewing themselves.
+- Require an explicit user-selected implementation campaign mode—`multi_agent` or `main_agent`—before work-producing execution, with bounded one-time reviewer authorization in main-Agent mode.
 - Add deterministic `en` and `zh-CN` human-facing output, with project-over-global locale configuration while allowing internal Agent collaboration to remain in English.
 - Add CLI `enable` and `disable` operations that atomically manage only the Pi extension and skill links while preserving the CLI link, installed releases, configuration, state, memory, and handoffs.
 
@@ -40,6 +41,7 @@ Pi needs a model-neutral multi-agent execution engine that can keep explicitly c
 - Creates the Horsepower TypeScript source, tests, bundled resources, Pi extension, CLI, installer, release scripts, documentation, and GitHub workflows.
 - Adds private retained handoff artifacts under Horsepower state; these artifacts support Captain-worker communication but never restore a worker conversation or replace official OpenSpec records.
 - Adds process-lifetime run coordination and webhook delivery state; this runtime evidence does not replace OpenSpec verification or task facts and is not resumed across Pi processes.
+- Adds process-lifetime implementation campaign mode and optional reviewer-authorization evidence; it controls dispatch permission without becoming another task or change fact.
 - Adds an `outputLocale` setting with project-over-global precedence; machine identifiers and structured fields remain locale-independent.
 - Requires Node.js 22.19 or newer, Pi 0.80.10-compatible extension/RPC interfaces, and Fission-AI/OpenSpec 1.6.0 or newer.
 - Installs Horsepower globally under `~/.pi/agent/horsepower`, links Pi resources under `~/.pi/agent/extensions` and `~/.pi/agent/skills`, and links the CLI under `~/.local/bin`.

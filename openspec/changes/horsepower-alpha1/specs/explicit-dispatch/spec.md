@@ -121,6 +121,47 @@ The Captain SHALL classify campaign findings by root cause against the declared 
 - **WHEN** a reviewer proposes a requirement outside the campaign's declared OpenSpec-grounded acceptance scope
 - **THEN** Horsepower records it as out-of-scope evidence and does not authorize another dispatch from that proposal
 
+### Requirement: User-selected implementation campaign mode
+Before the first work-producing action in an implementation campaign, the user SHALL explicitly select `multi_agent` or `main_agent` for one change ID and non-empty task scope. Horsepower SHALL NOT infer, persist as a default, or reuse that choice across scope changes, campaigns, changes, or Pi processes.
+
+#### Scenario: Campaign has no user choice
+- **WHEN** the Captain attempts a work-producing action without a matching active implementation campaign
+- **THEN** Horsepower rejects it before creating a run, worker, handoff, or task evidence and returns the two user choices
+
+#### Scenario: Campaign scope changes
+- **WHEN** a work-producing action falls outside the campaign's declared task scope or belongs to another OpenSpec change
+- **THEN** Horsepower rejects it until the user explicitly starts or switches an implementation campaign for that scope
+
+#### Scenario: Observation or cleanup occurs
+- **WHEN** the Captain or user performs status, list, read, doctor, abort, destroy, or handoff inspection/cleanup
+- **THEN** Horsepower permits the operation without requiring an implementation campaign
+
+### Requirement: Main-Agent execution enforcement
+In `main_agent` mode Horsepower SHALL deny worker creation or advancement by default. It SHALL permit only a separately user-authorized reviewer budget with fixed acceptance scope; that authorization SHALL NOT permit implementers, researchers, testers, fixers, parallel/chain work, automatic continuation, or an execution-mode switch.
+
+#### Scenario: Main Agent attempts ordinary delegation
+- **WHEN** a Captain in `main_agent` mode requests a worker for implementation, research, testing, fixing, parallel, or chain work
+- **THEN** Horsepower rejects the dispatch before consuming execution resources
+
+#### Scenario: User authorizes bounded review
+- **WHEN** the user explicitly grants a positive finite reviewer budget and acceptance scope for the current main-Agent campaign
+- **THEN** Horsepower permits only reviewer dispatches within that authorization and consumes both reviewer authorization and review-campaign budget before worker creation
+
+#### Scenario: Reviewer recommends a fixer
+- **WHEN** an authorized reviewer returns `NOT APPROVED` or recommends corrective delegation
+- **THEN** Horsepower creates no fixer and leaves implementation and fixes with the main Agent
+
+### Requirement: Multi-Agent execution enforcement
+In `multi_agent` mode Horsepower SHALL allow only explicit Captain dispatches and SHALL keep all creation, slot, budget, and acceptance authority with the Captain. Substantive Captain-direct work SHALL require a non-empty recorded reason, while small coordination, OpenSpec bookkeeping, integration, conflict resolution, and verification MAY remain Captain-direct without another user prompt.
+
+#### Scenario: Captain explicitly delegates substantive work
+- **WHEN** an active multi-Agent campaign contains the requested task scope and the Captain submits a valid explicit dispatch
+- **THEN** Horsepower performs only that dispatch under existing slot, handoff, and review-budget rules
+
+#### Scenario: Captain directly performs substantive work
+- **WHEN** the Captain elects not to delegate substantive in-scope work in multi-Agent mode
+- **THEN** Horsepower requires a non-empty reason in campaign evidence without changing the user's mode or prompting again
+
 ### Requirement: Localized Captain-facing conclusions
 Horsepower SHALL render its human-facing tool status, summary, and conclusion text in the effective `outputLocale`, which SHALL be `en` or `zh-CN`. Structured machine fields and internal worker artifacts SHALL remain stable and untranslated.
 

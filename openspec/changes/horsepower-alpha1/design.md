@@ -217,7 +217,21 @@ Alternative rejected: localizing only CLI text. Pi tool conclusions, doctor outp
 
 Alternative rejected: translating all worker communication. Internal English collaboration is efficient and must not destabilize machine evidence or force translation into the execution path.
 
-### 15. Incremental delivery
+### 15. User-selected implementation campaign mode
+
+Before the first work-producing action in an implementation campaign, Horsepower requires an explicit user choice of `multi_agent` or `main_agent`. The choice is bound to a process-lifetime campaign ID, one OpenSpec change ID, and a non-empty declared task scope. Horsepower never selects a default from task complexity, prior campaigns, configuration, or model judgment. Changing scope or change, ending the campaign, switching mode, or restarting Pi requires a new user choice. Observation, cleanup, abort, destroy, doctor, and handoff inspection/cleanup do not require a campaign.
+
+In `main_agent` mode all worker creation and advancement—including implementer, researcher, tester, fixer, reviewer, `parallel`, and `chain` dispatch—is denied by default. A reviewer is permitted only after a separate explicit user authorization that sets a positive finite review budget and acceptance scope. That authorization does not change execution mode, cannot authorize a fixer, cannot be renewed by a worker or verdict, and remains subject to the review-campaign budget rules. Implementation and fixes remain with the Captain unless the user explicitly starts or switches to a `multi_agent` campaign.
+
+In `multi_agent` mode substantive implementation, research, testing, and bounded review work should be explicitly delegated, while the Captain retains decomposition, slot choice, budgets, scope, finding deduplication, acceptance, OpenSpec checkbox updates, integration, verification, and final judgment. Small coordination edits, conflict resolution, verification commands, and mechanical integration may remain with the Captain. If the Captain directly performs substantive work in this mode, Horsepower requires a non-empty recorded reason but does not interrupt the user again.
+
+Implementation campaign mode and review campaign budget are orthogonal: one decides who may execute work; the other bounds review/fix review dispatches. Horsepower stores only process-lifetime authorization evidence and never creates or edits OpenSpec tasks. Worker text cannot create, switch, extend, or end an implementation campaign.
+
+Alternative rejected: a permanent or project default execution mode. Execution risk and user preference are campaign-specific, and an implicit default would restore unauthorized Captain discretion.
+
+Alternative rejected: asking before every OpenSpec task. Binding the choice to an explicit finite task scope preserves user control without repeatedly interrupting one approved campaign.
+
+### 16. Incremental delivery
 
 Alpha 1 delivers slots, agent discovery, one-shot and persistent RPC execution, OpenSpec execution gating, Captain-controlled E2E completion, run lifecycle and optional webhook notification, managed text handoffs, CLI setup/doctor/enable/disable/uninstall, release construction, curl installation, tests, and CI.
 
