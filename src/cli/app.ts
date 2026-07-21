@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, readlink, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { readJsonObject, writeJsonObject, type JsonObject } from "../config/json-store.js";
@@ -38,6 +38,23 @@ async function optionalObject(path: string): Promise<JsonObject> {
   try { return await readJsonObject(path); } catch (cause) { if (absent(cause)) return {}; throw cause; }
 }
 function object(value: unknown): JsonObject { return value !== null && !Array.isArray(value) && typeof value === "object" ? value as JsonObject : {}; }
+function mergeObjects(current: JsonObject, patch: JsonObject): JsonObject {
+  const merged = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    merged[key] = Object.keys(object(current[key])).length > 0 && Object.keys(object(value)).length > 0
+      ? mergeObjects(object(current[key]), object(value))
+      : value;
+  }
+  return merged;
+}
+const credentialField = /(?:auth(?:entication)?|secret|token|authorization|api[-_]?key|credential|password)/iu;
+function withoutCredentials(value: JsonObject): JsonObject {
+  return Object.fromEntries(Object.entries(value).flatMap(([key, nested]) => {
+    if (credentialField.test(key)) return [];
+    if (nested !== null && !Array.isArray(nested) && typeof nested === "object") return [[key, withoutCredentials(nested as JsonObject)]];
+    return [[key, nested]];
+  }));
+}
 function flags(args: readonly string[]): { positionals: string[]; values: Map<string, string>; switches: Set<string> } {
   const positionals: string[] = []; const values = new Map<string, string>(); const switches = new Set<string>();
   const boolean = new Set(["json", "yes", "dispatch", "no-dispatch", "change", "no-change"]);
@@ -77,6 +94,12 @@ async function updateSlot(path: string, id: string, binding: SlotBinding | undef
 function redactSettings(raw: JsonObject): JsonObject {
   return redactCredentials(raw) as JsonObject;
 }
+const releaseEntryPoints = {
+  cli: "bin/horsepower",
+  extension: "pi/extensions/horsepower/index.js",
+  skill: "pi/skills/horsepower/SKILL.md",
+} as const;
+
 function installTopology(home: string) {
   const root = join(home, ".pi", "agent", "horsepower");
   return { root, current: join(root, "current"), versions: join(root, "versions"), links: [
@@ -104,11 +127,44 @@ async function verifyNoSymlinkPath(root: string, candidate: string, finalType: "
   }
 }
 
+async function verifyTrustedPath(trustedRoot: string, candidate: string, allowFinalSymlink = false): Promise<void> {
+  const root = resolve(trustedRoot);
+  const target = resolve(candidate);
+  const pathFromRoot = relative(root, target);
+  if (pathFromRoot === "" || pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+    throw new Error(`Unsafe destructive path: ${target}`);
+  }
+  let current = root;
+  const components = pathFromRoot.split(sep);
+  for (let index = 0; index < components.length; index += 1) {
+    current = join(current, components[index]!);
+    let info;
+    try { info = await lstat(current); } catch (cause) { if (absent(cause)) return; throw cause; }
+    if (info.isSymbolicLink() && !(allowFinalSymlink && index === components.length - 1)) throw new Error(`Refusing symbolic link in destructive path: ${current}`);
+  }
+}
+
 async function readManagedManifest(release: string): Promise<JsonObject> {
   const manifestPath = join(release, "release-manifest.json");
   await verifyNoSymlinkPath(dirname(release), release, "directory");
   await verifyNoSymlinkPath(release, manifestPath, "file");
-  return readJsonObject(manifestPath);
+  const manifest = await readJsonObject(manifestPath);
+  if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid release manifest version");
+  const compatibility = object(manifest.compatibility);
+  if (typeof compatibility.node !== "string" || !compatibility.node || typeof compatibility.pi !== "string" || !compatibility.pi || typeof compatibility.openspec !== "string" || !compatibility.openspec) {
+    throw new Error("Invalid release manifest compatibility");
+  }
+  const entries = object(manifest.entryPoints);
+  const digests = object(manifest.digests);
+  for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) {
+    if (entries[name] !== expectedPath) throw new Error(`Invalid release manifest ${name} entry point`);
+    const digest = digests[expectedPath];
+    if (typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest)) throw new Error(`Invalid release manifest digest: ${expectedPath}`);
+    await verifyNoSymlinkPath(release, join(release, expectedPath), "file");
+    const actual = createHash("sha256").update(await readFile(join(release, expectedPath))).digest("hex");
+    if (actual !== digest) throw new Error(`Release manifest digest mismatch: ${expectedPath}`);
+  }
+  return manifest;
 }
 
 async function managedRootState(root: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
@@ -223,8 +279,8 @@ export function createCli(options: CliOptions) {
     if (action === "disable" || action === "skip") {
       only(parsed, [], []);
       const current = await optionalObject(paths.global.settings);
-      const scrubbed = redactCredentials(object(current.webhook)) as JsonObject;
-      const { url: _url, auth: _auth, notifications: _notifications, scopes: _scopes, ...preserved } = scrubbed;
+      const preserved = withoutCredentials(object(current.webhook));
+      delete preserved.url;
       const next = { ...current, webhook: { ...preserved, enabled: false } };
       await writeJsonObject(paths.global.settings, next);
       return { data: redactSettings(next), message: "Webhook disabled" };
@@ -245,9 +301,19 @@ export function createCli(options: CliOptions) {
       const secret = parsed.values.get("secret"), token = parsed.values.get("token");
       let auth: WebhookAuth; if (mode === "hmac") { if (!secret) throw new UsageError("HMAC authentication requires --secret"); if (token) throw new UsageError("HMAC authentication does not accept --token"); auth = { mode, secret }; }
       else if (mode === "bearer") { if (!token) throw new UsageError("Bearer authentication requires --token"); if (secret) throw new UsageError("Bearer authentication does not accept --secret"); auth = { mode, token }; }
-      else if (mode === "none") { if (secret || token) throw new UsageError("None authentication does not accept --secret or --token"); auth = { mode }; } else throw new UsageError(`Invalid webhook auth mode: ${mode}`);
+      else if (mode === "none") { if (secret || token) throw new UsageError("None authentication does not accept --secret or --token"); auth = { mode }; } else throw new UsageError("Invalid webhook auth mode");
       const current = await optionalObject(paths.global.settings); const previous = object(current.webhook);
-      const next = { ...current, webhook: { ...previous, enabled: true, url, notifications: { change: parsed.switches.has("no-change") ? false : parsed.switches.has("change") ? true : object(previous.notifications).change ?? true, dispatch: parsed.switches.has("dispatch") ? true : parsed.switches.has("no-dispatch") ? false : object(previous.notifications).dispatch ?? false }, auth } };
+      const previousAuth = withoutCredentials(object(previous.auth));
+      const nextWebhook = mergeObjects(previous, {
+        enabled: true,
+        url,
+        notifications: {
+          change: parsed.switches.has("no-change") ? false : parsed.switches.has("change") ? true : object(previous.notifications).change ?? true,
+          dispatch: parsed.switches.has("dispatch") ? true : parsed.switches.has("no-dispatch") ? false : object(previous.notifications).dispatch ?? false,
+        },
+      });
+      nextWebhook.auth = { ...previousAuth, ...auth };
+      const next = { ...current, webhook: nextWebhook };
       await writeJsonObject(paths.global.settings, next); return { data: redactSettings(next), message: "Webhook configured" };
     }
     if (action === "test") {
@@ -293,18 +359,18 @@ export function createCli(options: CliOptions) {
     const root = resolve(staged); const stagedInfo = await lstat(root).catch(() => undefined); if (!stagedInfo?.isDirectory() || stagedInfo.isSymbolicLink()) throw new Error(`Invalid staged release root: ${root}`); let manifest: JsonObject; try { manifest = await readManagedManifest(root); } catch (cause) { throw new Error(`Invalid staged release: ${(cause as Error).message}`); }
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid staged manifest version");
     if (manifest.version !== expected) throw new Error(`Staged manifest version mismatch: expected ${expected}`); const entries = object(manifest.entryPoints);
-    for (const [name, expectedPath] of Object.entries({ cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" })) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); try { await verifyNoSymlinkPath(root, join(root, candidate), "file"); } catch { throw new Error(`Missing staged ${name}: ${candidate}`); } }
+    for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); try { await verifyNoSymlinkPath(root, join(root, candidate), "file"); } catch { throw new Error(`Missing staged ${name}: ${candidate}`); } }
     const managedRoot = await managedRootState(topology.root); if (managedRoot.status === "conflict") throw new Error(managedRoot.message ?? "Installation ownership conflict");
     const current = await currentState(topology.root, topology.current); const links = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); const conflict = [current, ...links].find((state) => state.status === "conflict"); if (conflict) throw new Error(conflict.message ?? "Installation ownership conflict");
     return { data: { eligible: true, root, version: expected }, message: "Staged release eligible" };
   }
   async function uninstall(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
-    only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("uninstall accepts no arguments"); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); const versions = await versionsState(topology.versions); const states = await Promise.all(topology.links.map(async (link) => ({ link, state: await linkState(link.path, link.target) }))); const conflicts = [current, versions, ...states.map(({ state }) => state)].filter((state) => state.status === "conflict"); if (conflicts.length) throw new Error(conflicts.map((state) => state.message).join("; "));
+    only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("uninstall accepts no arguments"); await verifyTrustedPath(options.homeDir, topology.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); const versions = await versionsState(topology.versions); const states = await Promise.all(topology.links.map(async (link) => ({ link, state: await linkState(link.path, link.target) }))); const conflicts = [current, versions, ...states.map(({ state }) => state)].filter((state) => state.status === "conflict"); if (conflicts.length) throw new Error(conflicts.map((state) => state.message).join("; "));
     for (const { link, state } of states) if (state.status === "owned") await rm(link.path); if (current.status === "owned") await rm(topology.current); if (versions.status === "owned") await rm(topology.versions, { recursive: true }); return { data: { preserved: [paths.global.modelSlots, paths.global.settings, join(topology.root, "memory"), join(topology.root, "state"), paths.project.root] }, message: "Horsepower code uninstalled; user data preserved" };
   }
   async function purge(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); const confirmed = await options.confirm("Permanently remove Horsepower user data? Type yes to continue: "); if (confirmed === undefined) throw new UsageError("Purge requires --yes when no controlling terminal is available"); if (!confirmed) return { data: { purged: false }, message: "Purge canceled; no data changed" }; }
-    const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); if (current.status !== "absent") throw new Error("Run horsepower uninstall before purge"); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
+    await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); if (current.status !== "absent") throw new Error("Run horsepower uninstall before purge"); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
   }
 
   return { async run(argv: readonly string[]): Promise<CliResult> {

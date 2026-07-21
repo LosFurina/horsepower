@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -46,6 +47,29 @@ const setupArgs = [
   "--utility", "provider/util", "--utility-thinking", "low", "--json",
 ];
 
+const releaseEntryPoints = {
+  cli: "bin/horsepower",
+  extension: "pi/extensions/horsepower/index.js",
+  skill: "pi/skills/horsepower/SKILL.md",
+};
+
+async function writeRelease(root: string, version: string): Promise<void> {
+  for (const path of Object.values(releaseEntryPoints)) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), `owned:${path}\n`);
+  }
+  const digests = Object.fromEntries(await Promise.all(Object.values(releaseEntryPoints).map(async (path) => [
+    path,
+    createHash("sha256").update(await readFile(join(root, path))).digest("hex"),
+  ])));
+  await writeFile(join(root, "release-manifest.json"), JSON.stringify({
+    version,
+    compatibility: { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0" },
+    entryPoints: releaseEntryPoints,
+    digests,
+  }));
+}
+
 test("strictly parses commands and emits deterministic JSON with stable exit codes", async () => {
   const { run } = await harness();
   expect(await run(["unknown", "--json"])).toEqual({
@@ -67,6 +91,20 @@ test("strictly parses commands and emits deterministic JSON with stable exit cod
     ["--auth", "bearer", "--token", "token-byte", "--secret", "secret-byte"],
   ]) {
     expect((await run(["webhook", "configure", "--url", "https://example.test", ...incompatible, "--json"]))).toMatchObject({ exitCode: 2 });
+  }
+});
+
+test("invalid webhook auth argv never appears in text or JSON diagnostics", async () => {
+  const { run } = await harness();
+  const supplied = "attacker-secret-auth-bytes";
+  for (const argv of [
+    ["webhook", "configure", "--url", "https://example.test", "--auth", supplied],
+    ["webhook", "configure", "--url", "https://example.test", "--auth", supplied, "--json"],
+  ]) {
+    const result = await run(argv);
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout + result.stderr).not.toContain(supplied);
+    expect(result.stderr).toContain("Invalid webhook auth mode");
   }
 });
 
@@ -113,6 +151,47 @@ test("slot set/unset validates through the registry and reports deterministic pr
   expect((await run(["unset", "craft", "--scope", "project", "--json"]))).toMatchObject({ exitCode: 0 });
   expect(JSON.parse((await run(["slots", "--json"])).stdout).data.effective.craft.model).toBe("provider/craft");
   expect((await run(["unset", "utility", "--json"]))).toMatchObject({ exitCode: 2 });
+});
+
+test("webhook configure and disable deep-patch unknown nested settings", async () => {
+  const { homeDir, run } = await harness();
+  await run(setupArgs);
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  await writeFile(settingsPath, JSON.stringify({
+    futureTopLevel: { keep: true },
+    webhook: {
+      future: { metadata: { keep: true } },
+      notifications: { change: false, dispatch: false, futurePolicy: { retries: 7 } },
+      auth: { mode: "none", futureMetadata: { keep: true } },
+      headers: { authorization: "remove-this-credential", futureHeaderMetadata: { keep: true } },
+    },
+  }));
+
+  expect(await run(["webhook", "configure", "--url", "https://example.test/hook", "--auth", "none", "--dispatch", "--json"])).toMatchObject({ exitCode: 0 });
+  const configured = JSON.parse(await readFile(settingsPath, "utf8"));
+  expect(configured).toMatchObject({
+    futureTopLevel: { keep: true },
+    webhook: {
+      future: { metadata: { keep: true } },
+      notifications: { change: false, dispatch: true, futurePolicy: { retries: 7 } },
+      auth: { mode: "none", futureMetadata: { keep: true } },
+      headers: { authorization: "remove-this-credential", futureHeaderMetadata: { keep: true } },
+    },
+  });
+
+  expect(await run(["webhook", "disable", "--json"])).toMatchObject({ exitCode: 0 });
+  const disabled = JSON.parse(await readFile(settingsPath, "utf8"));
+  expect(disabled).toMatchObject({
+    futureTopLevel: { keep: true },
+    webhook: {
+      enabled: false,
+      future: { metadata: { keep: true } },
+      notifications: { change: false, dispatch: true, futurePolicy: { retries: 7 } },
+      headers: { futureHeaderMetadata: { keep: true } },
+    },
+  });
+  expect(disabled.webhook).not.toHaveProperty("auth");
+  expect(JSON.stringify(disabled)).not.toContain("remove-this-credential");
 });
 
 test("CLI webhook settings exactly match runtime parsing and disabled settings remove credentials", async () => {
@@ -298,11 +377,7 @@ test("doctor rejects malformed partial OpenSpec semver", async () => {
 test("staged-release preflight validates manifest, version, layout, and current/link ownership", async () => {
   const { homeDir, root, run } = await harness();
   const staged = join(root, "horsepower");
-  for (const path of ["bin/horsepower", "pi/extensions/horsepower/index.js", "pi/skills/horsepower/SKILL.md"]) {
-    await mkdir(dirname(join(staged, path)), { recursive: true }); await writeFile(join(staged, path), "ok");
-  }
-  const manifest = { version: "0.1.0-alpha.1", entryPoints: { cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" } };
-  await writeFile(join(staged, "release-manifest.json"), JSON.stringify(manifest));
+  await writeRelease(staged, "0.1.0-alpha.1");
   expect(await run(["preflight", staged, "--version", "0.1.0-alpha.1", "--json"])).toMatchObject({ exitCode: 0 });
 
   const linkedStage = join(root, "linked-stage");
@@ -332,17 +407,13 @@ test("preflight rejects symlinked manifests, intermediate directories, and inval
   for (const hostile of ["manifest", "intermediate", "expected-version", "manifest-version"] as const) {
     const { root, run } = await harness();
     const staged = join(root, `staged-${hostile}`);
-    for (const path of ["bin/horsepower", "pi/extensions/horsepower/index.js", "pi/skills/horsepower/SKILL.md"]) {
-      await mkdir(dirname(join(staged, path)), { recursive: true });
-      await writeFile(join(staged, path), "ok");
-    }
-    const manifest = { version: hostile === "manifest-version" ? "01.0.0" : "0.1.0", entryPoints: { cli: "bin/horsepower", extension: "pi/extensions/horsepower/index.js", skill: "pi/skills/horsepower/SKILL.md" } };
+    const manifestVersion = hostile === "manifest-version" ? "01.0.0" : "0.1.0";
+    await writeRelease(staged, manifestVersion);
     if (hostile === "manifest") {
       const external = join(root, "external-manifest.json");
-      await writeFile(external, JSON.stringify(manifest));
+      await writeFile(external, await readFile(join(staged, "release-manifest.json")));
+      await rm(join(staged, "release-manifest.json"));
       await symlink(external, join(staged, "release-manifest.json"));
-    } else {
-      await writeFile(join(staged, "release-manifest.json"), JSON.stringify(manifest));
     }
     if (hostile === "intermediate") {
       const externalBin = join(root, "external-bin");
@@ -351,7 +422,7 @@ test("preflight rejects symlinked manifests, intermediate directories, and inval
       await rm(join(staged, "bin"), { recursive: true });
       await symlink(externalBin, join(staged, "bin"));
     }
-    const expected = hostile === "expected-version" ? "01.0.0" : hostile === "manifest-version" ? "0.1.0" : String(manifest.version);
+    const expected = hostile === "expected-version" ? "01.0.0" : hostile === "manifest-version" ? "0.1.0" : manifestVersion;
     expect(await run(["preflight", staged, "--version", expected, "--json"]), hostile).toMatchObject({ exitCode: hostile === "expected-version" ? 2 : 1 });
   }
 });
@@ -360,11 +431,7 @@ test("safe uninstall removes only owned topology while preserving user data", as
   const { homeDir, cwd, run } = await harness();
   const hp = join(homeDir, ".pi/agent/horsepower");
   const version = join(hp, "versions/v0.1.0-alpha.1");
-  await mkdir(join(version, "pi/extensions/horsepower"), { recursive: true });
-  await mkdir(join(version, "pi/skills/horsepower"), { recursive: true });
-  await mkdir(join(version, "bin"), { recursive: true });
-  await writeFile(join(version, "bin/horsepower"), "x");
-  await writeFile(join(version, "release-manifest.json"), JSON.stringify({ version: "0.1.0-alpha.1" }));
+  await writeRelease(version, "0.1.0-alpha.1");
   await symlink("versions/v0.1.0-alpha.1", join(hp, "current"));
   const links = [[join(homeDir, ".pi/agent/extensions/horsepower"), join(hp, "current/pi/extensions/horsepower")], [join(homeDir, ".pi/agent/skills/horsepower"), join(hp, "current/pi/skills/horsepower")], [join(homeDir, ".local/bin/horsepower"), join(hp, "current/bin/horsepower")]];
   for (const [path, target] of links) { await mkdir(dirname(path!), { recursive: true }); await symlink(target!, path!); }
@@ -378,6 +445,17 @@ test("safe uninstall removes only owned topology while preserving user data", as
   await expect(lstat(join(hp, "versions"))).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(join(hp, "settings.json"), "utf8")).toBe("{}\n");
   expect(await readFile(join(cwd, ".pi/horsepower/model-slots.json"), "utf8")).toBe("{}\n");
+});
+
+test("uninstall refuses an arbitrary version directory with a trivial manifest and preserves it", async () => {
+  const { homeDir, run } = await harness();
+  const release = join(homeDir, ".pi/agent/horsepower/versions/v0.1.0");
+  await mkdir(release, { recursive: true });
+  await writeFile(join(release, "release-manifest.json"), JSON.stringify({ version: "0.1.0" }));
+  await writeFile(join(release, "user-data.txt"), "must remain");
+
+  expect(await run(["uninstall", "--json"])).toMatchObject({ exitCode: 1 });
+  expect(await readFile(join(release, "user-data.txt"), "utf8")).toBe("must remain");
 });
 
 test("uninstall refuses regular, unrelated, and hostile symlink targets without following them", async () => {
@@ -468,6 +546,22 @@ test("uninstall refuses an unowned versions tree and never follows a versions sy
       expect((await run(["uninstall", "--json"])).exitCode).toBe(1);
       expect(await readFile(join(hp, "versions/not-a-managed-release/keep"), "utf8")).toBe("safe");
     }
+  }
+});
+
+test("purge refuses project and global symlinked parent components", async () => {
+  for (const scope of ["project", "global"] as const) {
+    const { homeDir, cwd, root, run } = await harness();
+    const outside = join(root, `outside-${scope}`);
+    await mkdir(join(outside, "horsepower"), { recursive: true });
+    await writeFile(join(outside, "horsepower/keep"), "external data");
+    const parent = scope === "project" ? join(cwd, ".pi") : join(homeDir, ".pi");
+    await mkdir(dirname(parent), { recursive: true });
+    await symlink(outside, parent);
+
+    expect(await run(["purge", "--yes", "--json"]), scope).toMatchObject({ exitCode: 1 });
+    expect(await readFile(join(outside, "horsepower/keep"), "utf8"), scope).toBe("external data");
+    expect(await readlink(parent), scope).toBe(outside);
   }
 });
 
