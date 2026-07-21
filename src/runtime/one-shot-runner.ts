@@ -91,7 +91,7 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
     try {
       const tools = safePiTools(invocation.tools);
       const args = [
-        "--mode", "json", "--no-session",
+        "--mode", "json", "--no-session", "--no-skills",
         "--model", invocation.model,
         "--thinking", invocation.thinking,
         "--append-system-prompt", promptPath,

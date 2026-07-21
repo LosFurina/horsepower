@@ -30,6 +30,7 @@ export function buildPersistentPiLaunch(input: PersistentPiLaunchInput): PiLaunc
   const args = [
     "--mode", "rpc",
     "--no-session",
+    "--no-skills",
     "--model", input.model,
     "--thinking", input.thinking,
     "--append-system-prompt", input.promptFile,

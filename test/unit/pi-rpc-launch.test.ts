@@ -14,6 +14,7 @@ test("builds a shell-free persistent Pi launch and removes delegation tools", as
     args: [
       "--mode", "rpc",
       "--no-session",
+      "--no-skills",
       "--model", "provider/model",
       "--thinking", "high",
       "--append-system-prompt", "/private/prompt.md",
@@ -24,6 +25,27 @@ test("builds a shell-free persistent Pi launch and removes delegation tools", as
       stdio: ["pipe", "pipe", "pipe"],
     },
   });
+});
+
+test("persistent launch disables discovered skills exactly once without adding a skill path", async () => {
+  const { buildPersistentPiLaunch } = await import("../../src/runtime/pi-launch.js");
+  const args = buildPersistentPiLaunch({
+    executable: "pi",
+    model: "provider/model",
+    thinking: "medium",
+    promptFile: "/private/persona.md",
+    tools: ["read", "bash"],
+  }).args;
+
+  expect(args.filter((arg) => arg === "--no-skills")).toHaveLength(1);
+  expect(args).not.toContain("--skill");
+  expect(args).toEqual([
+    "--mode", "rpc", "--no-session", "--no-skills",
+    "--model", "provider/model",
+    "--thinking", "medium",
+    "--append-system-prompt", "/private/persona.md",
+    "--tools", "read,bash",
+  ]);
 });
 
 test("rejects non-canonical tool entries that could smuggle delegation", async () => {

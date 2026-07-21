@@ -64,7 +64,11 @@ test("runs Pi JSON mode with private prompt cleanup and captures text and usage"
     text: "review result",
     usage: { input: 10, output: 5, totalCost: 0.01 },
   });
-  expect(args.slice(0, 3)).toEqual(["--mode", "json", "--no-session"]);
+  expect(args.filter((arg) => arg === "--no-skills")).toHaveLength(1);
+  expect(args).not.toContain("--skill");
+  expect(args.slice(0, 4)).toEqual(["--mode", "json", "--no-session", "--no-skills"]);
+  expect(args.slice(4, 8)).toEqual(["--model", "provider/model", "--thinking", "high"]);
+  expect(args.slice(-3)).toEqual(["--tools", "read", "Review the change"]);
   const promptPath = args[args.indexOf("--append-system-prompt") + 1]!;
   await expect(stat(promptPath)).rejects.toMatchObject({ code: "ENOENT" });
 });
