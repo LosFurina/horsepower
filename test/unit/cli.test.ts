@@ -194,6 +194,33 @@ test("webhook configure and disable deep-patch unknown nested settings", async (
   expect(JSON.stringify(disabled)).not.toContain("remove-this-credential");
 });
 
+test("webhook disable removes credentials nested in unknown arrays while preserving safe metadata", async () => {
+  const { homeDir, run } = await harness();
+  await run(setupArgs);
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const credentialBytes = ["nested-token-bytes", "nested-auth-bytes", "nested-password-bytes"];
+  await writeFile(settingsPath, JSON.stringify({
+    webhook: {
+      enabled: true,
+      url: "https://example.test/hook",
+      unknown: [
+        "safe-label",
+        { safe: "keep", token: credentialBytes[0] },
+        [{ authentication: credentialBytes[1], nested: { password: credentialBytes[2], safe: 7 } }],
+      ],
+    },
+  }));
+
+  expect(await run(["webhook", "disable", "--json"])).toMatchObject({ exitCode: 0 });
+  const persistedBytes = await readFile(settingsPath, "utf8");
+  for (const credential of credentialBytes) expect(persistedBytes).not.toContain(credential);
+  expect(JSON.parse(persistedBytes).webhook.unknown).toEqual([
+    "safe-label",
+    { safe: "keep" },
+    [{ nested: { safe: 7 } }],
+  ]);
+});
+
 test("CLI webhook settings exactly match runtime parsing and disabled settings remove credentials", async () => {
   const secret = "never-print-this";
   const { homeDir, cwd, run } = await harness();
@@ -470,6 +497,50 @@ test("uninstall refuses regular, unrelated, and hostile symlink targets without 
   expect(await readlink(join(hp, "current"))).toBe(outside);
 });
 
+test("doctor reports malformed managed release topology as actionable installation checks", async () => {
+  for (const hostile of ["trivial", "compatibility", "entrypoint", "digest-shape", "digest-mismatch", "symlink"] as const) {
+    const { homeDir, root, run } = await harness();
+    const hp = join(homeDir, ".pi/agent/horsepower");
+    const release = join(hp, "versions/v0.1.0");
+    await writeRelease(release, "0.1.0");
+    const manifestPath = join(release, "release-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    if (hostile === "trivial") await writeFile(manifestPath, JSON.stringify({ version: "0.1.0" }));
+    if (hostile === "compatibility") {
+      manifest.compatibility = { node: "", pi: "0.80.10", openspec: ">=1.6.0" };
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "entrypoint") {
+      manifest.entryPoints.cli = "bin/not-horsepower";
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "digest-shape") {
+      manifest.digests[releaseEntryPoints.cli] = "not-a-sha256";
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "digest-mismatch") {
+      manifest.digests[releaseEntryPoints.cli] = "0".repeat(64);
+      await writeFile(manifestPath, JSON.stringify(manifest));
+    }
+    if (hostile === "symlink") {
+      const external = join(root, "external-cli");
+      await writeFile(external, "external");
+      await rm(join(release, releaseEntryPoints.cli));
+      await symlink(external, join(release, releaseEntryPoints.cli));
+    }
+    await symlink("versions/v0.1.0", join(hp, "current"));
+
+    const result = await run(["doctor", "--json"]);
+    expect(result.stdout, hostile).not.toBe("");
+    expect(result.stderr, hostile).toBe("");
+    expect(result.exitCode, hostile).toBe(1);
+    expect(JSON.parse(result.stdout).data.checks.find((check: { id: string }) => check.id === "installation"), hostile).toMatchObject({
+      status: "error",
+      action: "Install or repair Horsepower from an official release",
+    });
+  }
+});
+
 test("current ownership and uninstall reject an external symlinked manifest", async () => {
   const { homeDir, root, run } = await harness();
   const hp = join(homeDir, ".pi/agent/horsepower");
@@ -517,6 +588,55 @@ test("uninstall removes only a verified direct current release target", async ()
     expect(result.exitCode, deceptive).toBe(1);
     expect(await readlink(join(hp, "current"))).toBe(target);
   }
+});
+
+test("uninstall and purge reject a symlinked home trust root without touching external data", async () => {
+  const root = await temp();
+  const externalHome = join(root, "external-home");
+  const homeDir = join(root, "home-link");
+  const cwd = join(root, "project");
+  await mkdir(join(externalHome, ".pi/agent/horsepower"), { recursive: true });
+  await mkdir(cwd);
+  const marker = join(externalHome, ".pi/agent/horsepower/keep");
+  await writeFile(marker, "external data");
+  await symlink(externalHome, homeDir);
+  const { createCli } = await import("../../src/cli/app.js");
+  const cli = createCli({
+    homeDir,
+    cwd,
+    platform: "linux",
+    models,
+    runOpenSpec: async () => ({ code: 1, stdout: "", stderr: "" }),
+  });
+
+  expect(await cli.run(["uninstall", "--json"])).toMatchObject({ exitCode: 1 });
+  expect(await cli.run(["purge", "--yes", "--json"])).toMatchObject({ exitCode: 1 });
+  expect(await readFile(marker, "utf8")).toBe("external data");
+  expect(await readlink(homeDir)).toBe(externalHome);
+});
+
+test("purge rejects a symlinked project trust root without touching external data", async () => {
+  const root = await temp();
+  const homeDir = join(root, "home");
+  const externalProject = join(root, "external-project");
+  const cwd = join(root, "project-link");
+  await mkdir(homeDir);
+  await mkdir(join(externalProject, ".pi/horsepower"), { recursive: true });
+  const marker = join(externalProject, ".pi/horsepower/keep");
+  await writeFile(marker, "external data");
+  await symlink(externalProject, cwd);
+  const { createCli } = await import("../../src/cli/app.js");
+  const cli = createCli({
+    homeDir,
+    cwd,
+    platform: "linux",
+    models,
+    runOpenSpec: async () => ({ code: 1, stdout: "", stderr: "" }),
+  });
+
+  expect(await cli.run(["purge", "--yes", "--json"])).toMatchObject({ exitCode: 1 });
+  expect(await readFile(marker, "utf8")).toBe("external data");
+  expect(await readlink(cwd)).toBe(externalProject);
 });
 
 test("uninstall and purge refuse a symlinked Horsepower root without following it", async () => {

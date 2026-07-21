@@ -48,12 +48,15 @@ function mergeObjects(current: JsonObject, patch: JsonObject): JsonObject {
   return merged;
 }
 const credentialField = /(?:auth(?:entication)?|secret|token|authorization|api[-_]?key|credential|password)/iu;
+function withoutCredentialValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutCredentialValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as JsonObject).flatMap(([key, nested]) =>
+    credentialField.test(key) ? [] : [[key, withoutCredentialValue(nested)]],
+  ));
+}
 function withoutCredentials(value: JsonObject): JsonObject {
-  return Object.fromEntries(Object.entries(value).flatMap(([key, nested]) => {
-    if (credentialField.test(key)) return [];
-    if (nested !== null && !Array.isArray(nested) && typeof nested === "object") return [[key, withoutCredentials(nested as JsonObject)]];
-    return [[key, nested]];
-  }));
+  return withoutCredentialValue(value) as JsonObject;
 }
 function flags(args: readonly string[]): { positionals: string[]; values: Map<string, string>; switches: Set<string> } {
   const positionals: string[] = []; const values = new Map<string, string>(); const switches = new Set<string>();
@@ -108,22 +111,24 @@ function installTopology(home: string) {
     { path: join(home, ".local", "bin", "horsepower"), target: join(root, "current", "bin", "horsepower") },
   ] };
 }
+class ManagedTopologyError extends Error {}
+
 async function verifyNoSymlinkPath(root: string, candidate: string, finalType: "directory" | "file"): Promise<void> {
   const resolvedRoot = resolve(root);
   const resolvedCandidate = resolve(candidate);
   const pathFromRoot = relative(resolvedRoot, resolvedCandidate);
   if (pathFromRoot === "" || pathFromRoot.startsWith(`..${sep}`) || pathFromRoot === ".." || isAbsolute(pathFromRoot)) {
-    throw new Error(`Unsafe managed path: ${resolvedCandidate}`);
+    throw new ManagedTopologyError(`Unsafe managed path: ${resolvedCandidate}`);
   }
   let current = resolvedRoot;
   const components = pathFromRoot.split(sep);
   for (let index = 0; index < components.length; index += 1) {
     current = join(current, components[index]!);
     const info = await lstat(current);
-    if (info.isSymbolicLink()) throw new Error(`Refusing symbolic link in managed path: ${current}`);
+    if (info.isSymbolicLink()) throw new ManagedTopologyError(`Refusing symbolic link in managed path: ${current}`);
     const final = index === components.length - 1;
-    if ((!final || finalType === "directory") && !info.isDirectory()) throw new Error(`Expected managed directory: ${current}`);
-    if (final && finalType === "file" && !info.isFile()) throw new Error(`Expected managed regular file: ${current}`);
+    if ((!final || finalType === "directory") && !info.isDirectory()) throw new ManagedTopologyError(`Expected managed directory: ${current}`);
+    if (final && finalType === "file" && !info.isFile()) throw new ManagedTopologyError(`Expected managed regular file: ${current}`);
   }
 }
 
@@ -133,6 +138,14 @@ async function verifyTrustedPath(trustedRoot: string, candidate: string, allowFi
   const pathFromRoot = relative(root, target);
   if (pathFromRoot === "" || pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
     throw new Error(`Unsafe destructive path: ${target}`);
+  }
+  try {
+    const rootInfo = await lstat(root);
+    if (rootInfo.isSymbolicLink()) throw new Error(`Refusing symbolic link trust root: ${root}`);
+    if (!rootInfo.isDirectory()) throw new Error(`Refusing non-directory trust root: ${root}`);
+  } catch (cause) {
+    if (absent(cause)) return;
+    throw cause;
   }
   let current = root;
   const components = pathFromRoot.split(sep);
@@ -145,26 +158,34 @@ async function verifyTrustedPath(trustedRoot: string, candidate: string, allowFi
 }
 
 async function readManagedManifest(release: string): Promise<JsonObject> {
-  const manifestPath = join(release, "release-manifest.json");
-  await verifyNoSymlinkPath(dirname(release), release, "directory");
-  await verifyNoSymlinkPath(release, manifestPath, "file");
-  const manifest = await readJsonObject(manifestPath);
-  if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid release manifest version");
-  const compatibility = object(manifest.compatibility);
-  if (typeof compatibility.node !== "string" || !compatibility.node || typeof compatibility.pi !== "string" || !compatibility.pi || typeof compatibility.openspec !== "string" || !compatibility.openspec) {
-    throw new Error("Invalid release manifest compatibility");
+  try {
+    const manifestPath = join(release, "release-manifest.json");
+    await verifyNoSymlinkPath(dirname(release), release, "directory");
+    await verifyNoSymlinkPath(release, manifestPath, "file");
+    const manifest = await readJsonObject(manifestPath);
+    if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new ManagedTopologyError("Invalid release manifest version");
+    const compatibility = object(manifest.compatibility);
+    if (typeof compatibility.node !== "string" || !compatibility.node || typeof compatibility.pi !== "string" || !compatibility.pi || typeof compatibility.openspec !== "string" || !compatibility.openspec) {
+      throw new ManagedTopologyError("Invalid release manifest compatibility");
+    }
+    const entries = object(manifest.entryPoints);
+    const digests = object(manifest.digests);
+    for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) {
+      if (entries[name] !== expectedPath) throw new ManagedTopologyError(`Invalid release manifest ${name} entry point`);
+      const digest = digests[expectedPath];
+      if (typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest)) throw new ManagedTopologyError(`Invalid release manifest digest: ${expectedPath}`);
+      await verifyNoSymlinkPath(release, join(release, expectedPath), "file");
+      const actual = createHash("sha256").update(await readFile(join(release, expectedPath))).digest("hex");
+      if (actual !== digest) throw new ManagedTopologyError(`Release manifest digest mismatch: ${expectedPath}`);
+    }
+    return manifest;
+  } catch (cause) {
+    if (cause instanceof ManagedTopologyError) throw cause;
+    if (absent(cause) || (cause instanceof Error && cause.message.startsWith("Malformed JSON"))) {
+      throw new ManagedTopologyError((cause as Error).message);
+    }
+    throw cause;
   }
-  const entries = object(manifest.entryPoints);
-  const digests = object(manifest.digests);
-  for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) {
-    if (entries[name] !== expectedPath) throw new Error(`Invalid release manifest ${name} entry point`);
-    const digest = digests[expectedPath];
-    if (typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest)) throw new Error(`Invalid release manifest digest: ${expectedPath}`);
-    await verifyNoSymlinkPath(release, join(release, expectedPath), "file");
-    const actual = createHash("sha256").update(await readFile(join(release, expectedPath))).digest("hex");
-    if (actual !== digest) throw new Error(`Release manifest digest mismatch: ${expectedPath}`);
-  }
-  return manifest;
 }
 
 async function managedRootState(root: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
@@ -201,7 +222,7 @@ async function currentState(root: string, current: string): Promise<{ status: "a
       try { await lstat(current); } catch (currentCause) { if (absent(currentCause)) return { status: "absent" }; }
       return { status: "conflict", message: `Refusing dangling current target: ${current}` };
     }
-    if (cause instanceof Error && (cause.message.startsWith("Malformed JSON") || cause.message.includes("managed") || cause.message.includes("symbolic link"))) {
+    if (cause instanceof ManagedTopologyError) {
       return { status: "conflict", message: `Refusing current target with invalid manifest: ${current}` };
     }
     throw cause;
