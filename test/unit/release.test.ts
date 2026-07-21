@@ -83,7 +83,7 @@ test("builds the exact Pi layout with strict manifest digests and canonical mode
   const manifest = JSON.parse(manifestEntry?.content?.toString("utf8") ?? "null");
   expect(manifest).toEqual({
     version: "1.2.3-alpha.1",
-    compatibility: { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0" },
+    compatibility: { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0 <2.0.0" },
     entryPoints: {
       cli: "bin/horsepower",
       extension: "pi/extensions/horsepower/index.js",
@@ -101,6 +101,35 @@ test("builds the exact Pi layout with strict manifest digests and canonical mode
   }
   const packaged = JSON.parse(inspected.entries.find((entry) => entry.path === "horsepower/package.json")!.content!.toString("utf8"));
   expect(packaged).toEqual({ name: "horsepower", version: "1.2.3-alpha.1", private: true, type: "module", engines: { node: ">=22.19.0" } });
+});
+
+test("release manifest compatibility is generated from the shared source contract", async () => {
+  const { supportedCompatibility } = await import("../../src/compatibility.js").catch(() => ({ supportedCompatibility: undefined }));
+  expect(supportedCompatibility).toEqual({ node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0 <2.0.0" });
+  const repositoryRoot = await fixtureRepository();
+  const result = await buildRelease({
+    repositoryRoot,
+    outputDir: join(await temporaryDirectory(), "compatibility"),
+    version: "1.2.3-alpha.1",
+    runBuild: async () => {},
+  });
+
+  expect(result.manifest.compatibility).toEqual(supportedCompatibility);
+});
+
+test("installer bootstrap compatibility declarations cannot drift from source", async () => {
+  const { supportedCompatibility } = await import("../../src/compatibility.js").catch(() => ({ supportedCompatibility: undefined }));
+  if (!supportedCompatibility) throw new Error("shared compatibility source is missing");
+  const installer = await readFile(join(process.cwd(), "install.sh"), "utf8");
+  const declarations = Object.fromEntries(
+    [...installer.matchAll(/^readonly (NODE_COMPATIBILITY|PI_COMPATIBILITY|OPENSPEC_COMPATIBILITY)='([^']+)'$/gmu)]
+      .map((match) => [match[1], match[2]]),
+  );
+  expect(declarations).toEqual({
+    NODE_COMPATIBILITY: supportedCompatibility.node,
+    PI_COMPATIBILITY: supportedCompatibility.pi,
+    OPENSPEC_COMPATIBILITY: supportedCompatibility.openspec,
+  });
 });
 
 test("built release scanner executes with the runtime yaml dependency", async () => {
@@ -255,7 +284,7 @@ test("strict staged validation rejects unknown manifest fields", async () => {
   }
   const manifest = {
     version: "1.2.3-alpha.1",
-    compatibility: { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0" },
+    compatibility: { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0 <2.0.0" },
     entryPoints: {
       cli: "bin/horsepower",
       extension: "pi/extensions/horsepower/index.js",

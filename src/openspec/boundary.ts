@@ -1,3 +1,5 @@
+import { isSupportedOpenSpecVersion, unsupportedOpenSpecMessage } from "../compatibility.js";
+
 export type SafeAction = "status" | "list" | "read" | "abort" | "destroy" | "doctor";
 export type AdvancingAction = "single" | "parallel" | "chain" | "create" | "send" | "steer" | "begin_change" | "report_terminal";
 export type HorsepowerAction = SafeAction | AdvancingAction;
@@ -21,20 +23,6 @@ export interface AuthorizationInput {
 
 const safeActions = new Set<SafeAction>(["status", "list", "read", "abort", "destroy", "doctor"]);
 
-function compareVersion(left: string, right: string): number {
-  const [leftCore, leftPrerelease] = left.split("-", 2);
-  const [rightCore, rightPrerelease] = right.split("-", 2);
-  const a = leftCore!.split(".").map(Number);
-  const b = rightCore!.split(".").map(Number);
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    const difference = (a[index] ?? 0) - (b[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  if (leftPrerelease && !rightPrerelease) return -1;
-  if (!leftPrerelease && rightPrerelease) return 1;
-  return (leftPrerelease ?? "").localeCompare(rightPrerelease ?? "");
-}
-
 export async function validateOpenSpecInstallation(
   options: OpenSpecBoundaryOptions,
   cwd: string,
@@ -46,10 +34,7 @@ export async function validateOpenSpecInstallation(
     );
   }
   const version = versionResult.stdout.trim();
-  const strictSemver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
-  if (!strictSemver.test(version) || compareVersion(version, "1.6.0") < 0) {
-    throw new Error(`OpenSpec 1.6.0 or newer is required; found ${version || "unknown"}`);
-  }
+  if (!isSupportedOpenSpecVersion(version)) throw new Error(unsupportedOpenSpecMessage(version));
   const doctor = await options.run(["doctor", "--json"], { cwd });
   if (doctor.code !== 0) throw new Error("OpenSpec project is not healthy");
   let projectRoot: string;

@@ -5,6 +5,9 @@ VERSION="${HORSEPOWER_VERSION:-0.1.0-alpha.1}"
 LOCALE=""
 NO_SETUP=0
 REPOSITORY="https://github.com/LosFurina/horsepower"
+readonly NODE_COMPATIBILITY='>=22.19.0'
+readonly PI_COMPATIBILITY='0.80.10'
+readonly OPENSPEC_COMPATIBILITY='>=1.6.0 <2.0.0'
 
 usage() {
   printf '%s\n' "Usage: install.sh [--version VERSION] [--locale en|zh-CN] [--no-setup]"
@@ -41,17 +44,21 @@ esac
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
-command -v node >/dev/null 2>&1 || fail "Node.js 22.19.0 or newer is required"
+command -v node >/dev/null 2>&1 || fail "Node.js $NODE_COMPATIBILITY is required"
 node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' \
-  || fail "Node.js 22.19.0 or newer is required"
-command -v openspec >/dev/null 2>&1 || fail "Install official @fission-ai/openspec 1.6.0 or newer: https://github.com/Fission-AI/OpenSpec"
-OPENSPEC_VERSION=$(openspec --version 2>/dev/null | sed -n 's/[^0-9]*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.[0-9][0-9]*.*/\1.\2/p' | head -n 1)
-[ -n "$OPENSPEC_VERSION" ] || fail "Unable to determine official OpenSpec version"
-OPENSPEC_MAJOR=${OPENSPEC_VERSION%%.*}
-OPENSPEC_MINOR=${OPENSPEC_VERSION#*.}
-if [ "$OPENSPEC_MAJOR" -lt 1 ] || { [ "$OPENSPEC_MAJOR" -eq 1 ] && [ "$OPENSPEC_MINOR" -lt 6 ]; }; then
-  fail "OpenSpec 1.6.0 or newer is required"
+  || fail "Node.js $NODE_COMPATIBILITY is required"
+command -v pi >/dev/null 2>&1 || fail "Pi $PI_COMPATIBILITY is required"
+if PI_VERSION=$(pi --version 2>/dev/null); then :; else fail "Pi $PI_COMPATIBILITY is required"; fi
+[ "$PI_VERSION" = "$PI_COMPATIBILITY" ] || fail "Pi $PI_COMPATIBILITY is required; found ${PI_VERSION:-unknown}"
+command -v openspec >/dev/null 2>&1 || fail "Install official @fission-ai/openspec $OPENSPEC_COMPATIBILITY: https://github.com/Fission-AI/OpenSpec"
+if OPENSPEC_VERSION=$(openspec --version 2>/dev/null); then :; else
+  fail "Unable to determine official OpenSpec version; OpenSpec $OPENSPEC_COMPATIBILITY is required"
 fi
+node -e '
+const value = process.argv[1];
+const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+process.exit(match && match[4] === undefined && Number(match[1]) === 1 && Number(match[2]) >= 6 ? 0 : 1);
+' "$OPENSPEC_VERSION" || fail "OpenSpec $OPENSPEC_COMPATIBILITY is required; found ${OPENSPEC_VERSION:-unknown}"
 
 HOME_DIR=${HOME:?HOME is required}
 MANAGED_ROOT="$HOME_DIR/.pi/agent/horsepower"

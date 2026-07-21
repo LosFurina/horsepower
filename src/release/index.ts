@@ -5,13 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { parse as parseYaml } from "yaml";
-import { validateReleaseCompatibility, type ReleaseCompatibility } from "../release-manifest.js";
-
-const compatibility = {
-  node: ">=22.19.0",
-  pi: "0.80.10",
-  openspec: ">=1.6.0",
-} as const satisfies ReleaseCompatibility;
+import { supportedCompatibility, validateReleaseCompatibility, type ReleaseCompatibility } from "../release-manifest.js";
 
 const entryPoints = {
   cli: "bin/horsepower",
@@ -200,7 +194,7 @@ async function stageRelease(repositoryRoot: string, stageRoot: string, version: 
   await writeFile(stagedPackagePath, stableJson(publicPackage), { mode: 0o644 });
   await chmod(stagedPackagePath, 0o644);
   const digests = Object.fromEntries(await Promise.all(criticalFiles.map(async (path) => [path, sha256(await readFile(join(stageRoot, path)))])));
-  const manifest: ReleaseManifest = { version, compatibility: { ...compatibility }, entryPoints: { ...entryPoints }, digests };
+  const manifest: ReleaseManifest = { version, compatibility: { ...supportedCompatibility }, entryPoints: { ...entryPoints }, digests };
   const stagedManifestPath = join(stageRoot, "release-manifest.json");
   await writeFile(stagedManifestPath, stableJson(manifest), { mode: 0o644 });
   await chmod(stagedManifestPath, 0o644);

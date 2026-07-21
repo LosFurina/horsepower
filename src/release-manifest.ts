@@ -1,14 +1,7 @@
-export interface ReleaseCompatibility {
-  node: string;
-  pi: string;
-  openspec: string;
-}
+import { supportedCompatibility, type ReleaseCompatibility } from "./compatibility.js";
 
-const supportedCompatibility = {
-  node: ">=22.19.0",
-  pi: "0.80.10",
-  openspec: ">=1.6.0",
-} as const satisfies ReleaseCompatibility;
+export type { ReleaseCompatibility } from "./compatibility.js";
+export { supportedCompatibility } from "./compatibility.js";
 
 export function validateReleaseCompatibility(value: unknown): ReleaseCompatibility {
   if (value === null || Array.isArray(value) || typeof value !== "object") {

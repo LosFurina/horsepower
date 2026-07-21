@@ -24,12 +24,14 @@ async function fixture(options: { failInstallationDoctor?: boolean } = {}) {
   const bin = join(root, "bin");
   await mkdir(bin, { recursive: true });
   const openspec = join(bin, "openspec");
+  const pi = join(bin, "pi");
   await writeFile(openspec, "#!/bin/sh\nprintf '%s\\n' '1.6.0'\n", { mode: 0o755 });
+  await writeFile(pi, "#!/bin/sh\nprintf '%s\\n' '0.80.10'\n", { mode: 0o755 });
   if (options.failInstallationDoctor) {
     const realNode = process.execPath;
     await writeFile(join(bin, "node"), `#!/bin/sh\ncase \"$*\" in *\"doctor --installation-only\"*) exit 42 ;; esac\nexec ${JSON.stringify(realNode)} \"$@\"\n`, { mode: 0o755 });
   }
-  return { root, home, bin, openspec };
+  return { root, home, bin, openspec, pi };
 }
 
 async function runInstaller(fixturePaths: Awaited<ReturnType<typeof fixture>>, args: string[] = [], baseUrl = `file://${releaseDir}`) {
@@ -131,12 +133,24 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
   expect(settings.webhook).toMatchObject({ auth: { mode: "bearer", token: sampleValue }, notifications: { change: true, dispatch: false } });
 });
 
-test("unsupported OpenSpec is rejected before any managed filesystem mutation", async () => {
+test("incompatible Pi is rejected before release download or managed filesystem mutation", async () => {
   const fixturePaths = await fixture();
-  await writeFile(fixturePaths.openspec, "#!/bin/sh\nprintf '%s\\n' '1.5.9'\n", { mode: 0o755 });
-  await expect(runInstaller(fixturePaths)).rejects.toMatchObject({ stderr: expect.stringContaining("OpenSpec 1.6.0 or newer is required") });
+  await writeFile(fixturePaths.pi, "#!/bin/sh\nprintf '%s\\n' '0.80.11'\n", { mode: 0o755 });
+  await expect(runInstaller(fixturePaths, [], "file:///release-must-not-be-read"))
+    .rejects.toMatchObject({ stderr: expect.stringContaining("Pi 0.80.10 is required") });
   await expect(access(join(fixturePaths.home, ".pi"))).rejects.toThrow();
 });
+
+test.each(["1.5.9", "2.0.0", "1.6.0-beta.1", "OpenSpec 1.6.0", "01.6.0"])(
+  "unsupported OpenSpec %s is rejected before release download or managed filesystem mutation",
+  async (openSpecVersion) => {
+    const fixturePaths = await fixture();
+    await writeFile(fixturePaths.openspec, `#!/bin/sh\nprintf '%s\\n' '${openSpecVersion}'\n`, { mode: 0o755 });
+    await expect(runInstaller(fixturePaths, [], "file:///release-must-not-be-read"))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("OpenSpec >=1.6.0 <2.0.0 is required") });
+    await expect(access(join(fixturePaths.home, ".pi"))).rejects.toThrow();
+  },
+);
 
 test("interactive HMAC webhook setup stores private credentials and dispatch opt-in without echoing secrets", async () => {
   const fixturePaths = await fixture();
