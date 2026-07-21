@@ -2,7 +2,40 @@ import type { WebhookAuth, WebhookNotifierOptions } from "../lifecycle/webhook-n
 import type { JsonObject } from "./json-store.js";
 
 const SECRET = "[REDACTED]";
-const credentialKey = /(?:secret|token|authorization|authentication|api[-_]?key|credential|password)/iu;
+const credentialKeys = new Set([
+  "auth",
+  "authentication",
+  "authorization",
+  "credential",
+  "key",
+  "password",
+  "secret",
+  "token",
+  "apikey",
+  "accesstoken",
+  "refreshtoken",
+  "clientsecret",
+  "authkey",
+  "authsecret",
+  "authtoken",
+  "authenticationkey",
+  "authenticationsecret",
+  "authenticationtoken",
+  "authorizationkey",
+  "authorizationsecret",
+  "authorizationtoken",
+]);
+
+function normalizedCredentialKey(value: string): string {
+  let decoded: string;
+  try { decoded = decodeURIComponent(value.replaceAll("+", " ")); }
+  catch { decoded = value; }
+  return decoded.toLowerCase().replaceAll(/[^a-z0-9]/gu, "");
+}
+
+export function isCredentialKey(value: string): boolean {
+  return credentialKeys.has(normalizedCredentialKey(value));
+}
 
 function isObject(value: unknown): value is JsonObject {
   return value !== null && !Array.isArray(value) && typeof value === "object";
@@ -12,15 +45,6 @@ function settingObject(value: unknown, label: string): JsonObject {
   if (value === undefined) return {};
   if (!isObject(value)) throw new Error(`Invalid Horsepower webhook configuration: ${label} must be an object`);
   return value;
-}
-
-function sensitiveQueryKey(value: string): boolean {
-  let decoded: string;
-  try { decoded = decodeURIComponent(value.replaceAll("+", " ")); }
-  catch { decoded = value; }
-  const compact = decoded.toLowerCase().replaceAll(/[^a-z0-9]/gu, "");
-  return compact === "token" || compact === "secret" || compact === "key" || compact === "apikey"
-    || compact === "accesstoken" || /^auth(?:entication|orization)?(?:token|key|secret)?$/u.test(compact);
 }
 
 function redactUrl(value: string): string {
@@ -33,7 +57,7 @@ function redactUrl(value: string): string {
       parsed.search = `?${parsed.search.slice(1).split("&").map((parameter) => {
         const separator = parameter.indexOf("=");
         const name = separator < 0 ? parameter : parameter.slice(0, separator);
-        return sensitiveQueryKey(name) ? `${name}=${encodeURIComponent(SECRET)}` : parameter;
+        return isCredentialKey(name) ? `${name}=${encodeURIComponent(SECRET)}` : parameter;
       }).join("&")}`;
     }
     return parsed.toString();
@@ -47,9 +71,9 @@ function redactUrls(value: string): string {
 }
 
 export function redactCredentials(value: unknown, key = "", insideAuth = false): unknown {
-  const normalizedKey = key.toLowerCase();
+  const normalizedKey = normalizedCredentialKey(key);
   const authContainer = insideAuth || normalizedKey === "auth" || normalizedKey === "authentication";
-  if (credentialKey.test(key) && normalizedKey !== "auth" && normalizedKey !== "authentication") return SECRET;
+  if (isCredentialKey(key) && normalizedKey !== "auth" && normalizedKey !== "authentication") return SECRET;
   if (Array.isArray(value)) return value.map((item) => redactCredentials(item, "", authContainer));
   if (!isObject(value)) {
     if (authContainer) {

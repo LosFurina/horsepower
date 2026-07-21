@@ -3,7 +3,7 @@ import { lstat, readFile, readdir, readlink, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { readJsonObject, writeJsonObjects, type JsonObject, type JsonWrite } from "../config/json-store.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
-import { parseWebhookSettings, redactCredentials, validateWebhookSettingsShape, validateWebhookUrl } from "../config/webhook.js";
+import { isCredentialKey, parseWebhookSettings, redactCredentials, validateWebhookSettingsShape, validateWebhookUrl } from "../config/webhook.js";
 import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-notifier.js";
 import { validateOpenSpecInstallation } from "../openspec/boundary.js";
 import { validateReleaseCompatibility } from "../release-manifest.js";
@@ -49,12 +49,11 @@ function mergeObjects(current: JsonObject, patch: JsonObject): JsonObject {
   }
   return merged;
 }
-const credentialField = /(?:auth(?:entication)?|secret|token|authorization|api[-_]?key|credential|password)/iu;
 function withoutCredentialValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutCredentialValue);
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value as JsonObject).flatMap(([key, nested]) =>
-    credentialField.test(key) ? [] : [[key, withoutCredentialValue(nested)]],
+    isCredentialKey(key) ? [] : [[key, withoutCredentialValue(nested)]],
   ));
 }
 function withoutCredentials(value: JsonObject): JsonObject {
@@ -427,27 +426,44 @@ export function createCli(options: CliOptions) {
       let auth: WebhookAuth; if (mode === "hmac") { if (!secret) throw new UsageError("HMAC authentication requires --secret"); if (token) throw new UsageError("HMAC authentication does not accept --token"); auth = { mode, secret }; }
       else if (mode === "bearer") { if (!token) throw new UsageError("Bearer authentication requires --token"); if (secret) throw new UsageError("Bearer authentication does not accept --secret"); auth = { mode, token }; }
       else if (mode === "none") { if (secret || token) throw new UsageError("None authentication does not accept --secret or --token"); auth = { mode }; } else throw new UsageError("Invalid webhook auth mode");
-      const current = await trustedOptionalObject(options.homeDir, paths.global.settings); const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings);
+      const globalSettings = await trustedOptionalObject(options.homeDir, paths.global.settings); const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings);
       try {
-        validateWebhookSettingsShape(current.webhook);
+        validateWebhookSettingsShape(globalSettings.webhook);
         validateWebhookSettingsShape(projectSettings.webhook, "project ");
       } catch (cause) { throw new UsageError((cause as Error).message); }
+      const scope = Object.keys(object(projectSettings.webhook)).length > 0 ? "project" : "global";
+      const current = scope === "project" ? projectSettings : globalSettings;
       const previous = object(current.webhook);
+      const preserved = withoutCredentials(previous);
       const previousAuth = withoutCredentials(object(previous.auth));
-      const nextWebhook = mergeObjects(previous, {
+      const effectiveBefore = (() => {
+        try { return parseWebhookSettings(globalSettings.webhook, projectSettings.webhook); }
+        catch { return undefined; }
+      })();
+      const previousNotifications = object(previous.notifications);
+      const requestedNotifications = {
+        change: parsed.switches.has("no-change") ? false : parsed.switches.has("change") ? true : previousNotifications.change ?? effectiveBefore?.notifications.change ?? true,
+        dispatch: parsed.switches.has("dispatch") ? true : parsed.switches.has("no-dispatch") ? false : previousNotifications.dispatch ?? effectiveBefore?.notifications.dispatch ?? false,
+      };
+      const nextWebhook = mergeObjects(preserved, {
         enabled: true,
         url,
-        notifications: {
-          change: parsed.switches.has("no-change") ? false : parsed.switches.has("change") ? true : object(previous.notifications).change ?? true,
-          dispatch: parsed.switches.has("dispatch") ? true : parsed.switches.has("no-dispatch") ? false : object(previous.notifications).dispatch ?? false,
-        },
+        notifications: requestedNotifications,
       });
       nextWebhook.auth = { ...previousAuth, ...auth };
       const next = { ...current, webhook: nextWebhook };
-      try { parseWebhookSettings(next.webhook, projectSettings.webhook); }
-      catch (cause) { throw new UsageError((cause as Error).message); }
-      await writeConfigs([{ path: paths.global.settings, value: next }]);
-      return { data: redactSettings(next), message: "Webhook configured" };
+      const prospectiveGlobal = scope === "global" ? next : globalSettings;
+      const prospectiveProject = scope === "project" ? next : projectSettings;
+      try {
+        const effective = parseWebhookSettings(prospectiveGlobal.webhook, prospectiveProject.webhook);
+        if (!effective || effective.config.url !== url || JSON.stringify(effective.config.auth) !== JSON.stringify(auth)
+          || effective.notifications.change !== requestedNotifications.change
+          || effective.notifications.dispatch !== requestedNotifications.dispatch) {
+          throw new Error("configured webhook does not match the effective settings");
+        }
+      } catch (cause) { throw new UsageError((cause as Error).message); }
+      await writeConfigs([{ path: scope === "project" ? paths.project.settings : paths.global.settings, value: next }]);
+      return { data: redactSettings(next), message: `Webhook configured (${scope})` };
     }
     if (action === "test") {
       only(parsed, [], []); const globalSettings = await trustedOptionalObject(options.homeDir, paths.global.settings); const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings); const parsedSettings = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");

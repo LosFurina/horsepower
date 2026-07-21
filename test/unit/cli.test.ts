@@ -253,14 +253,16 @@ test("webhook configure and disable deep-patch unknown nested settings", async (
   }));
 
   expect(await run(["webhook", "configure", "--url", "https://example.test/hook", "--auth", "none", "--dispatch", "--json"])).toMatchObject({ exitCode: 0 });
-  const configured = JSON.parse(await readFile(settingsPath, "utf8"));
+  const configuredBytes = await readFile(settingsPath, "utf8");
+  expect(configuredBytes).not.toContain("remove-this-credential");
+  const configured = JSON.parse(configuredBytes);
   expect(configured).toMatchObject({
     futureTopLevel: { keep: true },
     webhook: {
       future: { metadata: { keep: true } },
       notifications: { change: false, dispatch: true, futurePolicy: { retries: 7 } },
       auth: { mode: "none", futureMetadata: { keep: true } },
-      headers: { authorization: "remove-this-credential", futureHeaderMetadata: { keep: true } },
+      headers: { futureHeaderMetadata: { keep: true } },
     },
   });
 
@@ -340,33 +342,70 @@ test("CLI webhook settings exactly match runtime parsing and disabled settings r
   expect(disabled).not.toHaveProperty("auth");
 });
 
-test("CLI output redacts sensitive URL query parameters while preserving safe URL structure", async () => {
+test("CLI output redacts every credential-key URL query value while preserving safe parameters", async () => {
   const { homeDir, run } = await harness();
   await run(setupArgs);
-  const receiver = "https://example.test/hooks/team?region=us&ToKeN=one-secret&api_key=two-secret&%61ccess_token=three%20secret&AUTHORIZATION=four-secret&note=keep#delivery";
+  const credentialKeys = [
+    "secret", "ToKeN", "password", "credential", "key", "api_key", "api-key", "apiKey",
+    "%61ccess_token", "access-token", "accessToken", "refresh_token", "refresh-token", "refreshToken",
+    "client_secret", "client-secret", "clientSecret", "authorization", "authentication",
+  ];
+  const secrets = credentialKeys.map((_, index) => `credential-byte-${index}`);
+  const query = ["region=us", ...credentialKeys.map((key, index) => `${key}=${secrets[index]}`), "note=keep"].join("&");
+  const receiver = `https://example.test/hooks/team?${query}#delivery`;
 
   const configured = await run(["webhook", "configure", "--url", receiver, "--auth", "none", "--json"]);
   expect(configured).toMatchObject({ exitCode: 0, stderr: "" });
-  for (const secret of ["one-secret", "two-secret", "three%20secret", "four-secret"]) {
-    expect(configured.stdout).not.toContain(secret);
-  }
+  for (const secret of secrets) expect(configured.stdout).not.toContain(secret);
   expect(configured.stdout).toContain("https://example.test/hooks/team?");
   expect(configured.stdout).toContain("region=us");
   expect(configured.stdout).toContain("note=keep");
   expect(configured.stdout).toContain("#delivery");
-  expect(configured.stdout.match(/REDACTED/gu)).toHaveLength(4);
+  expect(configured.stdout.match(/REDACTED/gu)).toHaveLength(credentialKeys.length);
 
   const persisted = JSON.parse(await readFile(join(homeDir, ".pi/agent/horsepower/settings.json"), "utf8"));
   expect(persisted.webhook.url).toBe(receiver);
 
-  const errorUrl = "https://example.test/hook?key=error-secret&safe=visible";
-  for (const argv of [[errorUrl], [errorUrl, "--json"]]) {
-    const result = await run(argv);
-    expect(result.stderr).not.toContain("error-secret");
-    expect(result.stderr).toContain("https://example.test/hook?");
-    expect(result.stderr).toContain("safe=visible");
-    expect(result.stderr).toContain("REDACTED");
+  for (const [index, key] of credentialKeys.entries()) {
+    const errorUrl = `https://example.test/hook?${key}=${secrets[index]}&safe=visible`;
+    for (const argv of [[errorUrl], [errorUrl, "--json"]]) {
+      const result = await run(argv);
+      expect(result.stderr, key).not.toContain(secrets[index]);
+      expect(result.stderr, key).toContain("https://example.test/hook?");
+      expect(result.stderr, key).toContain("safe=visible");
+      expect(result.stderr, key).toContain("REDACTED");
+    }
   }
+});
+
+test("CLI settings output and disable use the same credential-key classification", async () => {
+  const { homeDir, run } = await harness();
+  await run(setupArgs);
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const credentialKeys = [
+    "secret", "token", "password", "credential", "key", "api_key", "api-key", "apiKey",
+    "access_token", "access-token", "accessToken", "refresh_token", "refresh-token", "refreshToken",
+    "client_secret", "client-secret", "clientSecret", "authorization", "authentication",
+  ];
+  const secrets = credentialKeys.map((_, index) => `field-credential-byte-${index}`);
+  await writeFile(settingsPath, JSON.stringify({
+    webhook: {
+      enabled: true,
+      url: "https://example.test/hook?safe=visible",
+      auth: { mode: "none" },
+      future: Object.fromEntries(credentialKeys.map((key, index) => [key, secrets[index]])),
+      safe: { label: "keep" },
+    },
+  }));
+
+  const shown = await run(["configure", "--json"]);
+  for (const secret of secrets) expect(shown.stdout + shown.stderr).not.toContain(secret);
+  expect(shown.stdout).toContain("keep");
+
+  expect(await run(["webhook", "disable", "--json"])).toMatchObject({ exitCode: 0 });
+  const persisted = await readFile(settingsPath, "utf8");
+  for (const secret of secrets) expect(persisted).not.toContain(secret);
+  expect(JSON.parse(persisted).webhook.safe).toEqual({ label: "keep" });
 });
 
 test("webhook diagnostics recursively redact malformed and future credential fields", async () => {
@@ -457,6 +496,68 @@ test("doctor and webhook test use effective project-over-global webhook settings
     expect(invalid.stdout + invalid.stderr).not.toContain("incompatible-project-token");
     expect(JSON.parse(invalid.stdout).data.checks.find((check: { id: string }) => check.id === "notification")).toMatchObject({ status: "error" });
   }
+});
+
+test.each([
+  ["disabled project override", { enabled: false, unknown: { keep: "disabled-project" } }],
+  ["different project endpoint", {
+    enabled: true,
+    url: "https://old-project.test/hook",
+    auth: { mode: "bearer", token: "stale-project-token" },
+    notifications: { change: false, dispatch: false },
+    unknown: { keep: "project-endpoint" },
+  }],
+] as const)("webhook configure updates the effective layer for %s", async (_label, projectWebhook) => {
+  const requests: Array<{ url: string; authorization: string | null }> = [];
+  const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    requests.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization") });
+    return new Response(null, { status: 204 });
+  });
+  const { homeDir, cwd, run } = await harness({ fetch });
+  await run(setupArgs);
+  const globalPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const projectPath = join(cwd, ".pi/horsepower/settings.json");
+  await mkdir(dirname(projectPath), { recursive: true });
+  const global = {
+    globalSafe: { keep: true },
+    webhook: {
+      enabled: true,
+      url: "https://global.test/hook",
+      auth: { mode: "hmac", secret: "global-secret" },
+      notifications: { change: false, dispatch: false },
+      unknown: { global: true },
+    },
+  };
+  await writeFile(globalPath, JSON.stringify(global));
+  await writeFile(projectPath, JSON.stringify({ projectSafe: { keep: true }, webhook: projectWebhook }));
+
+  const result = await run([
+    "webhook", "configure", "--url", "https://requested.test/hook", "--auth", "bearer",
+    "--token", "requested-token", "--change", "--dispatch", "--json",
+  ]);
+  expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+  expect(await readFile(globalPath, "utf8")).toBe(JSON.stringify(global));
+  const persisted = JSON.parse(await readFile(projectPath, "utf8"));
+  expect(persisted).toMatchObject({
+    projectSafe: { keep: true },
+    webhook: {
+      enabled: true,
+      url: "https://requested.test/hook",
+      auth: { mode: "bearer", token: "requested-token" },
+      notifications: { change: true, dispatch: true },
+      unknown: projectWebhook.unknown,
+    },
+  });
+  expect(JSON.stringify(persisted)).not.toContain("stale-project-token");
+  expect(persisted.webhook.auth).not.toHaveProperty("secret");
+
+  const { webhookOptions } = await import("../../src/extension/index.js");
+  expect(webhookOptions(homeDir, cwd)).toEqual({
+    config: { url: "https://requested.test/hook", auth: { mode: "bearer", token: "requested-token" } },
+    notifications: { change: true, dispatch: true },
+  });
+  expect(await run(["webhook", "test", "--json"])).toMatchObject({ exitCode: 0 });
+  expect(requests).toEqual([{ url: "https://requested.test/hook", authorization: "Bearer requested-token" }]);
 });
 
 test("webhook disable defaults to the effective active project and removes project credentials", async () => {
