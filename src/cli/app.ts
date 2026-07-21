@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile, readdir, readlink, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, readlink, rm, symlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { readJsonObject, writeJsonObjects, type JsonObject, type JsonWrite } from "../config/json-store.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
@@ -25,6 +25,10 @@ export interface CliOptions {
   interactive?: boolean;
   confirm?: (message: string) => Promise<boolean | undefined>;
   writeConfigs?: (entries: readonly JsonWrite[]) => Promise<void>;
+  linkOperations?: {
+    create(target: string, path: string): Promise<void>;
+    remove(path: string): Promise<void>;
+  };
 }
 
 class UsageError extends Error {}
@@ -314,6 +318,7 @@ export function createCli(options: CliOptions) {
   const paths = resolveHorsepowerPaths({ homeDir: options.homeDir, projectDir: options.cwd });
   const topology = installTopology(options.homeDir);
   const writeConfigs = options.writeConfigs ?? writeJsonObjects;
+  const linkOperations = options.linkOperations ?? { create: (target: string, path: string) => symlink(target, path), remove: (path: string) => rm(path) };
   const handoffs = createHandoffStore({ stateRoot: join(paths.global.root, "state") });
 
   function registryData(config: { global: SlotConfiguration; project: SlotConfiguration }) {
@@ -512,15 +517,23 @@ export function createCli(options: CliOptions) {
     }
   }
   async function installationCheck() {
+    let outputLocale: OutputLocale = "en";
+    try { outputLocale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* diagnostics report invalid settings separately */ }
     try {
       await verifyTrustedPath(options.homeDir, topology.root);
       for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true);
       const current = await currentState(topology.root, topology.current);
       const versions = await versionsState(topology.versions);
       const states = await Promise.all(topology.links.map((link) => linkState(link.path, link.target)));
-      return current.status === "owned" && versions.status === "owned" && states.every((state) => state.status === "owned")
-        ? { id: "installation", status: "ok", message: "Managed symlink topology is owned" }
-        : { id: "installation", status: "error", message: [current, versions, ...states].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Install or repair Horsepower from an official release" };
+      const [extension, skill, cli] = states as [typeof states[number], typeof states[number], typeof states[number]];
+      const coreFailure = [current, versions, cli].find((state) => state.status !== "owned");
+      if (coreFailure) return { id: "installation", status: "error", integrationStatus: "conflict", message: coreFailure.message ?? coreFailure.status, action: "Install or repair Horsepower from an official release" };
+      const integrationStatus = extension.status === "owned" && skill.status === "owned" ? "enabled"
+        : extension.status === "absent" && skill.status === "absent" ? "disabled"
+          : extension.status === "conflict" || skill.status === "conflict" ? "conflict" : "partially_enabled";
+      if (integrationStatus === "enabled") return { id: "installation", status: "ok", integrationStatus, message: localizedMessage(outputLocale, "doctor.integrationEnabled") };
+      if (integrationStatus === "disabled") return { id: "installation", status: "ok", integrationStatus, message: localizedMessage(outputLocale, "doctor.integrationDisabled"), action: localizedMessage(outputLocale, "doctor.enableAction") };
+      return { id: "installation", status: "error", integrationStatus, message: [extension, skill].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Repair the conflict, then run horsepower enable or disable" };
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "Unable to inspect the managed installation topology";
       return { id: "installation", status: "error", message, action: "Install or repair Horsepower from an official release" };
@@ -577,6 +590,51 @@ export function createCli(options: CliOptions) {
     const current = await currentState(topology.root, topology.current); const links = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); const conflict = [current, ...links].find((state) => state.status === "conflict"); if (conflict) throw new Error(conflict.message ?? "Installation ownership conflict");
     return { data: { eligible: true, root, version: expected }, message: "Staged release eligible" };
   }
+  async function integrationLinks(): Promise<Array<{ link: (typeof topology.links)[number]; state: Awaited<ReturnType<typeof linkState>> }>> {
+    await verifyTrustedPath(options.homeDir, topology.root);
+    const root = await managedRootState(topology.root);
+    if (root.status === "conflict") throw new Error(root.message);
+    const current = await currentState(topology.root, topology.current);
+    if (current.status !== "owned") throw new Error(current.message ?? "No valid active Horsepower release");
+    const cli = topology.links[2]!;
+    await verifyTrustedPath(options.homeDir, cli.path, true);
+    const cliState = await linkState(cli.path, cli.target);
+    if (cliState.status !== "owned") throw new Error(cliState.message ?? `Horsepower CLI link is not owned: ${cli.path}`);
+    const integration = topology.links.slice(0, 2);
+    for (const link of integration) await verifyTrustedPath(options.homeDir, link.path, true);
+    const states = await Promise.all(integration.map(async (link) => ({ link, state: await linkState(link.path, link.target) })));
+    const conflict = states.find(({ state }) => state.status === "conflict");
+    if (conflict) throw new Error(conflict.state.message ?? `Horsepower integration link conflicts: ${conflict.link.path}`);
+    return states;
+  }
+  async function enable(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
+    only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("enable accepts no arguments");
+    const states = await integrationLinks();
+    const created: typeof states = [];
+    try {
+      for (const item of states) if (item.state.status === "absent") {
+        await mkdir(dirname(item.link.path), { recursive: true });
+        await linkOperations.create(item.link.target, item.link.path);
+        created.push(item);
+      }
+    } catch (cause) {
+      for (const item of created.reverse()) await linkOperations.remove(item.link.path);
+      throw cause;
+    }
+    return { data: { integrationStatus: "enabled", reloadRequired: true }, message: "Horsepower enabled; run /reload or restart Pi" };
+  }
+  async function disable(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
+    only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("disable accepts no arguments");
+    const states = await integrationLinks();
+    const removed: typeof states = [];
+    try {
+      for (const item of states) if (item.state.status === "owned") { await linkOperations.remove(item.link.path); removed.push(item); }
+    } catch (cause) {
+      for (const item of removed.reverse()) await linkOperations.create(item.link.target, item.link.path);
+      throw cause;
+    }
+    return { data: { integrationStatus: "disabled", reloadRequired: true }, message: "Horsepower disabled; run /reload or restart Pi" };
+  }
   async function uninstall(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("uninstall accepts no arguments"); await verifyTrustedPath(options.homeDir, topology.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); const versions = await versionsState(topology.versions); const states = await Promise.all(topology.links.map(async (link) => ({ link, state: await linkState(link.path, link.target) }))); const conflicts = [current, versions, ...states.map(({ state }) => state)].filter((state) => state.status === "conflict"); if (conflicts.length) throw new Error(conflicts.map((state) => state.message).join("; "));
     for (const { link, state } of states) if (state.status === "owned") await rm(link.path); if (current.status === "owned") await rm(topology.current); if (versions.status === "owned") await rm(topology.versions, { recursive: true }); return { data: { preserved: [paths.global.modelSlots, paths.global.settings, join(topology.root, "memory"), join(topology.root, "state"), paths.project.root] }, message: "Horsepower code uninstalled; user data preserved" };
@@ -605,10 +663,10 @@ export function createCli(options: CliOptions) {
       if (jsonCount > 1) throw new UsageError("Duplicate option: --json");
       const normalizedArgv = argv.filter((argument) => argument !== "--json");
       const command = normalizedArgv[0]; if (!command || command.startsWith("--")) throw new UsageError("A command is required"); const parsed = flags([...normalizedArgv.slice(1), ...(machine ? ["--json"] : [])]); machine = parsed.switches.has("json"); let result: CommandResult;
-      const mutatesOrManagesInstallation = command === "setup" || command === "set" || command === "unset" || command === "webhook" || command === "preflight" || command === "uninstall" || command === "purge" || (command === "configure" && parsed.values.size > 0);
+      const mutatesOrManagesInstallation = command === "setup" || command === "set" || command === "unset" || command === "webhook" || command === "preflight" || command === "disable" || command === "enable" || command === "uninstall" || command === "purge" || (command === "configure" && parsed.values.size > 0);
       if (mutatesOrManagesInstallation) requireSupportedPlatform();
       if (command === "setup") result = await setup(parsed); else if (command === "configure") result = await configure(parsed); else if (command === "slots") { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); result = { data: await slotsData() }; }
-      else if (command === "set") result = await setSlot(parsed); else if (command === "unset") result = await unsetSlot(parsed); else if (command === "webhook") result = await webhook(parsed); else if (command === "handoff") result = await handoff(parsed); else if (command === "doctor") result = await doctor(parsed); else if (command === "preflight") result = await preflight(parsed); else if (command === "uninstall") result = await uninstall(parsed); else if (command === "purge") result = await purge(parsed); else throw new UsageError(`Unknown command: ${command}`);
+      else if (command === "set") result = await setSlot(parsed); else if (command === "unset") result = await unsetSlot(parsed); else if (command === "webhook") result = await webhook(parsed); else if (command === "handoff") result = await handoff(parsed); else if (command === "doctor") result = await doctor(parsed); else if (command === "preflight") result = await preflight(parsed); else if (command === "enable") result = await enable(parsed); else if (command === "disable") result = await disable(parsed); else if (command === "uninstall") result = await uninstall(parsed); else if (command === "purge") result = await purge(parsed); else throw new UsageError(`Unknown command: ${command}`);
       try { locale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* doctor and diagnostics retain their structured evidence */ }
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1);
       const summary = locale === "zh-CN"
@@ -616,7 +674,11 @@ export function createCli(options: CliOptions) {
           ? localizedMessage(locale, "doctor.healthy")
           : commandName === "configure" && parsed.values.has("locale") && result.message
             ? result.message
-            : localizedMessage(locale, "cli.commandCompleted", { command: commandName })
+            : commandName === "enable"
+              ? localizedMessage(locale, "cli.enabled")
+              : commandName === "disable"
+                ? localizedMessage(locale, "cli.disabled")
+                : localizedMessage(locale, "cli.commandCompleted", { command: commandName })
         : result.message ?? (ok ? "OK" : "FAILED");
       return machine ? { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" } : { exitCode, stdout: `${summary}\n`, stderr: "" };
     } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(locale === "zh-CN" ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }

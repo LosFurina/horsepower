@@ -72,16 +72,16 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
   const fixturePaths = await fixture();
   const ttyInput = join(fixturePaths.root, "tty-input-bearer");
   const ttyOutput = join(fixturePaths.root, "tty-output-bearer");
-  const token = "installer-bearer-token";
-  await writeFile(ttyInput, `1\nhttps://example.test/hook\nbearer\n${token}\n\n`);
+  const sampleValue = "fixture-bearer-value-123";
+  await writeFile(ttyInput, `1\nhttps://example.test/hook\nbearer\n${sampleValue}\n\n`);
   await writeFile(ttyOutput, "");
   const result = await execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version], {
     cwd: fixturePaths.root,
     env: { ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`, HORSEPOWER_TTY_INPUT: ttyInput, HORSEPOWER_TTY_OUTPUT: ttyOutput },
   });
-  expect(`${await readFile(ttyOutput, "utf8")}${result.stdout}${result.stderr}`).not.toContain(token);
+  expect(`${await readFile(ttyOutput, "utf8")}${result.stdout}${result.stderr}`).not.toContain(sampleValue);
   const settings = JSON.parse(await readFile(join(fixturePaths.home, ".pi", "agent", "horsepower", "settings.json"), "utf8"));
-  expect(settings.webhook).toMatchObject({ auth: { mode: "bearer", token }, notifications: { change: true, dispatch: false } });
+  expect(settings.webhook).toMatchObject({ auth: { mode: "bearer", token: sampleValue }, notifications: { change: true, dispatch: false } });
 });
 
 test("unsupported OpenSpec is rejected before any managed filesystem mutation", async () => {
@@ -95,18 +95,18 @@ test("interactive HMAC webhook setup stores private credentials and dispatch opt
   const fixturePaths = await fixture();
   const ttyInput = join(fixturePaths.root, "tty-input-hmac");
   const ttyOutput = join(fixturePaths.root, "tty-output-hmac");
-  const secret = "installer-hmac-secret";
-  await writeFile(ttyInput, `1\nhttps://example.test/hook\nhmac\n${secret}\ny\n`);
+  const sampleValue = "fixture-hmac-value-1234";
+  await writeFile(ttyInput, `1\nhttps://example.test/hook\nhmac\n${sampleValue}\ny\n`);
   await writeFile(ttyOutput, "");
   const result = await execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version], {
     cwd: fixturePaths.root,
     env: { ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`, HORSEPOWER_TTY_INPUT: ttyInput, HORSEPOWER_TTY_OUTPUT: ttyOutput },
   });
   const output = `${await readFile(ttyOutput, "utf8")}\n${result.stdout}\n${result.stderr}`;
-  expect(output).not.toContain(secret);
+  expect(output).not.toContain(sampleValue);
   const settingsPath = join(fixturePaths.home, ".pi", "agent", "horsepower", "settings.json");
   const settings = JSON.parse(await readFile(settingsPath, "utf8"));
-  expect(settings).toMatchObject({ outputLocale: "en", webhook: { enabled: true, url: "https://example.test/hook", auth: { mode: "hmac", secret }, notifications: { change: true, dispatch: true } } });
+  expect(settings).toMatchObject({ outputLocale: "en", webhook: { enabled: true, url: "https://example.test/hook", auth: { mode: "hmac", secret: sampleValue }, notifications: { change: true, dispatch: true } } });
   expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
 });
 

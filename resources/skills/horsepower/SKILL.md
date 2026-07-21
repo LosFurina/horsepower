@@ -13,6 +13,7 @@ Use `horsepower_subagent` only for work the Captain explicitly chooses to dispat
 - In `multi_agent` mode, delegate substantive work explicitly; the Captain retains scope, budget, finding deduplication, verification, and final judgment.
 - Include the active `implementationCampaignId`, exact `taskScope`, and `workKind` in every work-producing dispatch.
 - Present principal user-facing conclusions in the `outputLocale` returned by Horsepower (`en` or `zh-CN`), even when worker briefs, reports, reviewer discussion, or raw evidence are English. Preserve machine fields, commands, paths, IDs, digests, artifact references, and raw evidence verbatim.
+- `horsepower disable` removes only the Horsepower extension and skill links; `horsepower enable` restores only those links after validating the active release. Both preserve the CLI, versions, configuration, state, and handoffs, and take effect in an existing Pi process only after `/reload` or restart.
 - Name every requested `modelSlot`; Horsepower never selects a model from an agent role.
 - Dispatch only the requested `single`, `parallel`, `chain`, or persistent action.
 - Keep proposal, design, specs, tasks, verification, and archive facts in official OpenSpec artifacts.
