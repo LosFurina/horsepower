@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Readable, Writable } from "node:stream";
+import { capabilityRejectionError } from "./capability-rejection.js";
 
 export interface RpcResponse {
   id: string;
   success: boolean;
   data?: unknown;
-  error?: string;
+  error?: unknown;
 }
 
 export interface RpcTransportStreams {
@@ -68,7 +69,10 @@ export function createRpcTransport(
     if (!request) return;
     pending.delete(response.id);
     if (response.success) request.resolve(response as RpcResponse);
-    else request.reject(new Error(response.error ?? `Pi RPC request failed: ${response.id}`));
+    else request.reject(
+      capabilityRejectionError(response.error) ??
+      new Error(typeof response.error === "string" ? response.error : `Pi RPC request failed: ${response.id}`),
+    );
   }
 
   streams.stdout.on("data", (chunk: Buffer | string) => {

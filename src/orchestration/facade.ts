@@ -26,6 +26,8 @@ export interface OrchestrationOptions {
   assertOpen?: () => void;
   resolveSlot(slot: string): ResolvedSlot;
   validateModel(slot: ResolvedSlot): void;
+  validateCapability?: (slot: ResolvedSlot) => Promise<void>;
+  handleWorkerCapabilityRejection?: (slot: Pick<ResolvedSlot, "model" | "thinking">, cause: unknown) => Error | undefined;
   getAgent(name: string): AgentDefinition | Omit<AgentDefinition, "source" | "scope">;
   createWorker(input: CreateWorkerInput): Promise<{ workerId: string; activeMessageId?: string }>;
   beginChange?: (input: { changeId: string; projectId: string }) => { runId: string };
@@ -131,27 +133,13 @@ function dependency<T>(value: T | undefined, name: string): T {
 }
 
 export function createOrchestration(options: OrchestrationOptions) {
-  function invocation(
-    input: { name: string; agent: string; modelSlot: string; task: string },
-    cwd: string,
-  ): { invocation: OneShotInvocation; slot: ResolvedSlot } {
-    const slot = options.resolveSlot(input.modelSlot);
-    options.validateModel(slot);
-    const agent = options.getAgent(input.agent);
-    return {
-      slot,
-      invocation: {
-        name: input.name,
-        agent: input.agent,
-        modelSlot: input.modelSlot,
-        model: slot.model,
-        thinking: slot.thinking,
-        cwd,
-        prompt: agent.prompt,
-        tools: agent.tools,
-        task: input.task,
-      },
-    };
+  async function validateCapabilities(slots: readonly ResolvedSlot[]): Promise<void> {
+    if (!options.validateCapability) return;
+    for (const slot of slots) await options.validateCapability(slot);
+  }
+
+  function workerRejection(slot: Pick<ResolvedSlot, "model" | "thinking">, cause: unknown): Error | undefined {
+    return options.handleWorkerCapabilityRejection?.(slot, cause);
   }
 
   async function oneShot(
@@ -171,9 +159,24 @@ export function createOrchestration(options: OrchestrationOptions) {
           if (!Array.isArray(input.tasks) || input.tasks.length === 0) throw new Error("$.tasks: required");
           return input.tasks as Array<{ name: string; agent: string; modelSlot: string; task: string }>;
         })();
-    const resolved = rawTasks.map((task) => invocation(task, cwd));
-    let invocations = resolved.map((item) => item.invocation);
-    const slots = resolved.map((item) => item.slot);
+    const slots = rawTasks.map((task) => options.resolveSlot(task.modelSlot));
+    for (const slot of slots) options.validateModel(slot);
+    await validateCapabilities(slots);
+    let invocations = rawTasks.map((task, index): OneShotInvocation => {
+      const slot = slots[index]!;
+      const agent = options.getAgent(task.agent);
+      return {
+        name: task.name,
+        agent: task.agent,
+        modelSlot: task.modelSlot,
+        model: slot.model,
+        thinking: slot.thinking,
+        cwd,
+        prompt: agent.prompt,
+        tools: agent.tools,
+        task: task.task,
+      };
+    });
     const executor = dependency(options.oneShot, "oneShot");
     const run = options.beginDispatch({ changeId, projectId: options.projectId ?? cwd, summary: `${action} ${invocations.length}` });
     const managed = input.handoffMode === "managed";
@@ -198,7 +201,12 @@ export function createOrchestration(options: OrchestrationOptions) {
     } catch (cause) {
       if (managed && options.recordHandoffTerminal) await Promise.allSettled(handoffRunIds.map((runId) => options.recordHandoffTerminal!({ projectPath: options.projectId ?? cwd, runId, status: "failed" })));
       await options.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: `${action} failed` });
-      throw cause;
+      let remediation: Error | undefined;
+      for (const slot of slots) {
+        const rejected = workerRejection(slot, cause);
+        remediation ??= rejected;
+      }
+      throw remediation ?? cause;
     }
   }
 
@@ -306,6 +314,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         const modelSlot = required(rawInput, "modelSlot");
         const slot = options.resolveSlot(modelSlot);
         options.validateModel(slot);
+        await validateCapabilities([slot]);
         const agent = options.getAgent(agentName);
         const run = options.beginDispatch({ changeId: changeId!, projectId: options.projectId ?? cwd, summary: `create ${name}` });
         try {
@@ -348,7 +357,7 @@ export function createOrchestration(options: OrchestrationOptions) {
             status: "failed",
             summary: "create failed",
           });
-          throw cause;
+          throw workerRejection(slot, cause) ?? cause;
         }
       }
 
@@ -391,6 +400,14 @@ export function createOrchestration(options: OrchestrationOptions) {
         } catch (cause) {
           if (managed && handoffRunId && options.recordHandoffTerminal) await options.recordHandoffTerminal({ projectPath: options.projectId ?? cwd, runId: handoffRunId, status: "failed" }).catch(() => undefined);
           await options.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: `${action} failed` });
+          const summary = options.statusWorker?.(workerId);
+          if (summary !== null && typeof summary === "object") {
+            const workerModel = (summary as { model?: unknown }).model;
+            const thinking = (summary as { thinking?: unknown }).thinking;
+            if (typeof workerModel === "string" && typeof thinking === "string") {
+              throw workerRejection({ model: workerModel, thinking: thinking as ResolvedSlot["thinking"] }, cause) ?? cause;
+            }
+          }
           throw cause;
         }
         const messageId = immediate !== null && typeof immediate === "object" &&
@@ -415,6 +432,14 @@ export function createOrchestration(options: OrchestrationOptions) {
               status: status === "canceled" ? "canceled" : "failed",
               summary: status === "canceled" ? `${action} canceled` : `${action} failed`,
             });
+            const summary = options.statusWorker?.(workerId);
+            if (summary !== null && typeof summary === "object") {
+              const workerModel = (summary as { model?: unknown }).model;
+              const thinking = (summary as { thinking?: unknown }).thinking;
+              if (typeof workerModel === "string" && typeof thinking === "string") {
+                throw workerRejection({ model: workerModel, thinking: thinking as ResolvedSlot["thinking"] }, cause) ?? cause;
+              }
+            }
             throw cause;
           }
         };

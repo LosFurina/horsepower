@@ -120,6 +120,166 @@ test("rejects an unknown resolved model before spawning any work", async () => {
   expect(workers).toBe(0);
 });
 
+test.each(["unsupported", "inconclusive"] as const)("gates persistent creation after slot resolution and before run, handoff, prompt, or child side effects on %s", async (status) => {
+  const calls: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => { calls.push("authorize"); },
+    resolveSlot: (slot) => { calls.push("resolve"); return { requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
+    validateModel: () => { calls.push("catalog"); },
+    validateCapability: async () => { calls.push("gate"); throw Object.assign(new Error(status), { status }); },
+    getAgent: () => { calls.push("agent"); return { name: "a", role: "a", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }; },
+    createWorker: async () => { calls.push("child"); return { workerId: "w" }; },
+    beginDispatch: () => { calls.push("run"); return { runId: "run" }; },
+    createHandoff: async () => { calls.push("handoff"); throw new Error("unused"); },
+    reportDispatchTerminal: async () => undefined,
+  });
+
+  await expect(captain(orchestration, {
+    action: "create", handoffMode: "managed", changeId: "c", cwd: "/p", name: "w", agent: "a", modelSlot: "judgment", brief: "work",
+  })).rejects.toThrow(status);
+  expect(calls).toEqual(["authorize", "resolve", "catalog", "gate"]);
+});
+
+test.each(["single", "parallel"] as const)("gates %s one-shot after all slot resolution and before run, handoff, temporary prompt, or child side effects", async (action) => {
+  const calls: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => { calls.push("authorize"); },
+    resolveSlot: (slot) => { calls.push(`resolve:${slot}`); return { requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
+    validateModel: () => { calls.push("catalog"); },
+    validateCapability: async (slot) => { calls.push(`gate:${slot.requestedSlot}`); if (slot.requestedSlot === "craft") throw new Error("unsupported"); },
+    getAgent: (name) => { calls.push(`agent:${name}`); return { name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }; },
+    createWorker: async () => ({ workerId: "unused" }),
+    beginDispatch: () => { calls.push("run"); return { runId: "run" }; },
+    createHandoff: async () => { calls.push("handoff"); throw new Error("unused"); },
+    oneShot: {
+      single: async () => { calls.push("temporary-prompt/child"); return { name: "a", text: "done" }; },
+      parallel: async () => { calls.push("temporary-prompt/child"); return []; },
+      chain: async () => [],
+    },
+    reportDispatchTerminal: async () => undefined,
+  });
+  const input = action === "single"
+    ? { action, handoffMode: "inline", changeId: "c", cwd: "/p", name: "a", agent: "a", modelSlot: "craft", task: "work" }
+    : { action, handoffMode: "managed", changeId: "c", cwd: "/p", tasks: [
+        { name: "a", agent: "a", modelSlot: "judgment", task: "one" },
+        { name: "b", agent: "b", modelSlot: "craft", task: "two" },
+      ] };
+
+  await expect(captain(orchestration, input)).rejects.toThrow("unsupported");
+  expect(calls).not.toContain("run");
+  expect(calls).not.toContain("handoff");
+  expect(calls).not.toContain("temporary-prompt/child");
+  expect(calls.indexOf("resolve:craft")).toBeLessThan(calls.indexOf("gate:craft"));
+});
+
+test("actual worker capability rejection invalidates evidence without fallback or binding mutation", async () => {
+  const configured = { model: "p/m", thinking: "high" as const };
+  const attempts: Array<{ model: string; thinking: string }> = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const rejection = { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" };
+  const invalidated = vi.fn(() => Object.assign(new Error("Model capability rejected; run horsepower setup --interactive"), {
+    code: "MODEL_CAPABILITY_REJECTED", status: "unsupported",
+  }));
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, ...configured, fallbackPath: [slot], revision: "slot-r" }),
+    validateModel: () => undefined,
+    validateCapability: async () => undefined,
+    handleWorkerCapabilityRejection: invalidated,
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async (input) => { attempts.push({ model: input.model, thinking: input.thinking }); throw rejection; },
+    beginDispatch: () => ({ runId: "run" }),
+    reportDispatchTerminal: async () => undefined,
+  });
+
+  const error = await captain(orchestration, {
+    action: "create", handoffMode: "inline", changeId: "c", cwd: "/p", name: "w", agent: "a", modelSlot: "judgment",
+  }).catch((cause: unknown) => cause) as Error & { code?: string };
+
+  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(attempts).toEqual([{ model: "p/m", thinking: "high" }]);
+  expect(invalidated).toHaveBeenCalledTimes(1);
+  expect(configured).toEqual({ model: "p/m", thinking: "high" });
+});
+
+test("parallel worker capability rejection invalidates each matching attempted combination without retry", async () => {
+  const attempts: Array<Array<{ model: string; thinking: string }>> = [];
+  const invalidated = vi.fn((slot: { model: string; thinking: string }, cause: unknown) =>
+    slot.thinking === "high" && (cause as { kind?: unknown }).kind === "capability_rejection"
+      ? Object.assign(new Error("Reconfigure with horsepower setup --interactive"), { code: "MODEL_CAPABILITY_REJECTED", status: "unsupported" })
+      : undefined
+  );
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: `p/${slot}`, thinking: "high", fallbackPath: [slot], revision: "slot-r" }),
+    validateModel: () => undefined, validateCapability: async () => undefined,
+    handleWorkerCapabilityRejection: invalidated,
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: {
+      single: async () => ({ name: "unused", text: "unused" }),
+      parallel: async (inputs) => {
+        attempts.push(inputs.map(({ model, thinking }) => ({ model, thinking })));
+        throw { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" };
+      },
+      chain: async () => [],
+    },
+    beginDispatch: () => ({ runId: "run" }),
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/tmp/${runId}/brief`, reportPath: `/tmp/${runId}/report` }, reference: {} }),
+    recordHandoffTerminal: async () => undefined,
+    reportDispatchTerminal: async () => undefined,
+  });
+
+  const error = await captain(orchestration, {
+    action: "parallel", handoffMode: "managed", changeId: "c", cwd: "/p", tasks: [
+      { name: "one", agent: "a", modelSlot: "judgment", task: "one" },
+      { name: "two", agent: "a", modelSlot: "craft", task: "two" },
+    ],
+  }).catch((cause: unknown) => cause) as Error & { code?: string };
+
+  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(attempts).toEqual([[{ model: "p/judgment", thinking: "high" }, { model: "p/craft", thinking: "high" }]]);
+  expect(invalidated.mock.calls.map(([slot]) => slot.model)).toEqual(["p/judgment", "p/craft"]);
+});
+
+test("one-shot worker capability rejection invalidates evidence without automatic fallback", async () => {
+  const attempts: Array<{ model: string; thinking: string }> = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const invalidated = vi.fn(() => Object.assign(new Error("Reconfigure with horsepower setup --interactive"), {
+    code: "MODEL_CAPABILITY_REJECTED", status: "unsupported",
+  }));
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "xhigh", fallbackPath: [slot], revision: "slot-r" }),
+    validateModel: () => undefined,
+    validateCapability: async () => undefined,
+    handleWorkerCapabilityRejection: invalidated,
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: {
+      single: async (input) => {
+        attempts.push({ model: input.model, thinking: input.thinking });
+        throw { kind: "capability_rejection", parameter: "thinking", rejectedValue: "xhigh", code: "INVALID_THINKING" };
+      },
+      parallel: async () => [],
+      chain: async () => [],
+    },
+    beginDispatch: () => ({ runId: "run" }),
+    reportDispatchTerminal: async () => undefined,
+  });
+
+  const error = await captain(orchestration, {
+    action: "single", handoffMode: "inline", changeId: "c", cwd: "/p", name: "w", agent: "a", modelSlot: "judgment", task: "work",
+  }).catch((cause: unknown) => cause) as Error & { code?: string };
+
+  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(attempts).toEqual([{ model: "p/m", thinking: "xhigh" }]);
+  expect(invalidated).toHaveBeenCalledTimes(1);
+});
+
 test("authorizes and executes exactly one explicitly requested persistent creation", async () => {
   const calls: string[] = [];
   const { createOrchestration } = await import("../../src/orchestration/facade.js").catch(() => ({
@@ -390,6 +550,64 @@ test("maps semantic persistent cancellation to canceled dispatch terminal", asyn
   });
   await new Promise((resolve) => setImmediate(resolve));
   expect(terminal).toEqual(["canceled"]);
+});
+
+test("persistent execution capability rejection invalidates matching evidence without retry", async () => {
+  const sends = vi.fn(async () => {
+    throw { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" };
+  });
+  const invalidated = vi.fn(() => Object.assign(new Error("Reconfigure with horsepower setup --interactive"), {
+    code: "MODEL_CAPABILITY_REJECTED", status: "unsupported",
+  }));
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: () => { throw new Error("unused"); }, validateModel: () => undefined,
+    getAgent: () => { throw new Error("unused"); }, createWorker: async () => ({ workerId: "unused" }),
+    beginDispatch: () => ({ runId: "run-send" }), reportDispatchTerminal: async () => undefined,
+    statusWorker: () => ({ model: "p/m", thinking: "high" }),
+    sendWorker: sends,
+    waitForMessage: async () => ({ status: "completed" }),
+    messageStatus: () => "failed",
+    handleWorkerCapabilityRejection: invalidated,
+  });
+
+  const error = await captain(orchestration, {
+    action: "send", handoffMode: "inline", changeId: "c", cwd: "/p", workerId: "w", message: "work",
+  }).catch((cause: unknown) => cause) as Error & { code?: string };
+
+  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(sends).toHaveBeenCalledTimes(1);
+  expect(invalidated).toHaveBeenCalledWith({ model: "p/m", thinking: "high" }, expect.anything());
+});
+
+test("late persistent execution rejection invalidates evidence during tracked settlement", async () => {
+  const rejection = { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" };
+  const invalidated = vi.fn(() => Object.assign(new Error("Reconfigure with horsepower setup --interactive"), {
+    code: "MODEL_CAPABILITY_REJECTED", status: "unsupported",
+  }));
+  let tracked: Promise<unknown> | undefined;
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: () => { throw new Error("unused"); }, validateModel: () => undefined,
+    getAgent: () => { throw new Error("unused"); }, createWorker: async () => ({ workerId: "unused" }),
+    beginDispatch: () => ({ runId: "run-send" }), reportDispatchTerminal: async () => undefined,
+    statusWorker: () => ({ model: "p/m", thinking: "high" }),
+    sendWorker: async () => ({ messageId: "message-1" }),
+    waitForMessage: async () => { throw rejection; },
+    messageStatus: () => "failed",
+    handleWorkerCapabilityRejection: invalidated,
+    trackSettlement: (settlement) => { tracked = settlement; },
+  });
+
+  await captain(orchestration, {
+    action: "send", handoffMode: "inline", changeId: "c", cwd: "/p", workerId: "w", message: "work",
+  });
+  const error = await tracked!.catch((cause: unknown) => cause) as Error & { code?: string };
+
+  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(invalidated).toHaveBeenCalledWith({ model: "p/m", thinking: "high" }, rejection);
 });
 
 test("settles create and persistent-send dispatch runs without creating extra work", async () => {

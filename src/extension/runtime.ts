@@ -16,7 +16,11 @@ import { createOneShotExecutor } from "../runtime/one-shot.js";
 import { createPiJsonRunner } from "../runtime/one-shot-runner.js";
 import { PersistentWorkerManager } from "../runtime/persistent-manager.js";
 import { createPersistentWorkerStarter } from "../runtime/persistent-worker-connection.js";
+import { createCapabilityEvidenceCache } from "../capabilities/evidence-cache.js";
 import { createPiModelCatalog } from "../capabilities/model-catalog.js";
+import type { ModelCapabilityProbe } from "../runtime/model-capability-probe.js";
+import { createPiCapabilityProbe } from "../runtime/pi-capability-probe.js";
+import { createPreLaunchCapabilityGate } from "../runtime/pre-launch-capability-gate.js";
 import { createSlotRegistry, type SlotConfiguration } from "../slots/registry.js";
 
 export interface HorsepowerRuntimeContext {
@@ -38,6 +42,7 @@ export interface CreateHorsepowerRuntimeOptions {
     notifications?: { change?: boolean; dispatch?: boolean };
   }) | undefined;
   oneShot?: ReturnType<typeof createOneShotExecutor>;
+  capabilityProbe?: ModelCapabilityProbe;
 }
 
 async function optionalJson(path: string, readText: (path: string) => Promise<string>): Promise<Record<string, unknown>> {
@@ -60,6 +65,7 @@ export class HorsepowerRuntime {
   readonly #lifecycle: ReturnType<typeof createRunLifecycle>;
   readonly #reviews = createReviewCampaignManager();
   readonly #implementations = createImplementationCampaignManager();
+  readonly #capabilityGate: ReturnType<typeof createPreLaunchCapabilityGate>;
   readonly #boundary: ReturnType<typeof createOpenSpecBoundary>;
   readonly #notifiers = new Set<ReturnType<typeof createWebhookNotifier>>();
   readonly #operations = new Set<Promise<unknown>>();
@@ -69,6 +75,10 @@ export class HorsepowerRuntime {
   constructor(options: CreateHorsepowerRuntimeOptions) {
     this.#options = options;
     this.#manager = options.manager ?? new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter() });
+    this.#capabilityGate = createPreLaunchCapabilityGate({
+      cache: createCapabilityEvidenceCache(),
+      probe: options.capabilityProbe ?? createPiCapabilityProbe(),
+    });
     const notifier = options.webhook ? createWebhookNotifier(options.webhook) : undefined;
     if (notifier) this.#notifiers.add(notifier);
     this.#lifecycle = createRunLifecycle({
@@ -136,6 +146,7 @@ export class HorsepowerRuntime {
       });
     }
     let slots: ReturnType<typeof createSlotRegistry> | undefined;
+    let piCatalog: ReturnType<typeof createPiModelCatalog> | undefined;
     let catalog: Map<string, AgentDefinition> | undefined;
     if (!safe.has(String(raw.action)) && !lifecycleOnly.has(String(raw.action))) {
       const [globalSlots, projectSlots, agents] = await Promise.all([
@@ -147,7 +158,7 @@ export class HorsepowerRuntime {
           projectDir: paths.project.agents,
         }),
       ]);
-      const piCatalog = createPiModelCatalog(context.modelRegistry);
+      piCatalog = createPiModelCatalog(context.modelRegistry);
       slots = createSlotRegistry({
         global: globalSlots as SlotConfiguration,
         project: projectSlots as SlotConfiguration,
@@ -184,6 +195,22 @@ export class HorsepowerRuntime {
         return slots.resolve(slot);
       },
       validateModel: () => undefined,
+      validateCapability: async (slot) => {
+        if (!piCatalog || piCatalog.status !== "available") {
+          throw new Error("MODEL_CATALOG_UNAVAILABLE: current Pi model catalog cannot be established");
+        }
+        await this.#capabilityGate.ensure(
+          { model: slot.model, thinking: slot.thinking, catalogRevision: piCatalog.revision },
+          piCatalog.models[slot.model]?.thinkingLevels,
+        );
+      },
+      handleWorkerCapabilityRejection: (slot, cause) => {
+        if (!piCatalog || piCatalog.status !== "available") return undefined;
+        return this.#capabilityGate.handleWorkerRejection(
+          { model: slot.model, thinking: slot.thinking, catalogRevision: piCatalog.revision },
+          cause,
+        );
+      },
       getAgent: (name) => {
         const agent = catalog?.get(name);
         if (!agent) throw new Error(`Unknown agent: ${name}`);

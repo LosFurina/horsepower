@@ -93,6 +93,25 @@ test("creates an idle worker after startup state acknowledgement", async () => {
   expect(manager.list()).toHaveLength(1);
 });
 
+test("preserves structured capability rejection from persistent execution events", async () => {
+  const { managerPromise, workers } = setup();
+  const manager = await managerPromise;
+  const created = await manager.create(createInput);
+  workers[0]!.holdPrompts = true;
+  const sent = await manager.send({ workerId: created.workerId, message: "work", wait: false });
+
+  workers[0]!.emit("event", {
+    type: "error",
+    error: { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" },
+  });
+  workers[0]!.emit("event", { type: "agent_end", willRetry: false });
+
+  await expect(manager.waitForMessage(created.workerId, sent.messageId)).rejects.toMatchObject({
+    kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING",
+  });
+  expect(manager.messageStatus(created.workerId, sent.messageId)).toBe("failed");
+});
+
 test("supports an explicit initial message during creation", async () => {
   const { managerPromise, workers } = setup();
   const manager = await managerPromise;

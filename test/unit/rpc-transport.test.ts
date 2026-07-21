@@ -68,6 +68,28 @@ test("does not let request payload override transport-owned id or type", async (
   expect(request.id).not.toBe("forged");
 });
 
+test("preserves structured capability rejection in failed RPC responses", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const written: string[] = [];
+  stdin.setEncoding("utf8");
+  stdin.on("data", (chunk: string) => written.push(chunk));
+  const { createRpcTransport } = await import("../../src/runtime/rpc-transport.js");
+  const transport = createRpcTransport({ stdin, stdout, stderr });
+  const pending = transport.request("get_state");
+  const request = JSON.parse(written.join("").trim());
+  stdout.write(`${JSON.stringify({
+    id: request.id,
+    success: false,
+    error: { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" },
+  })}\n`);
+
+  await expect(pending).rejects.toMatchObject({
+    kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING",
+  });
+});
+
 test("rejects every pending request after malformed stdout", async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();

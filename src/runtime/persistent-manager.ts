@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ThinkingLevel } from "../slots/registry.js";
+import { capabilityRejectionError, type CapabilityRejectionError } from "./capability-rejection.js";
 import { createEventStream, type EventStream, type EventStreamReadOptions, type EventStreamReadResult } from "./event-stream.js";
 
 export type WorkerStatus = "starting" | "idle" | "running" | "failed" | "destroying" | "destroyed";
@@ -53,6 +54,7 @@ interface MessageState {
   status: MessageStatus;
   finalText?: string;
   error?: string;
+  failure?: CapabilityRejectionError;
   abortObserved?: boolean;
   abortRequested?: boolean;
   promise: Promise<MessageState>;
@@ -481,6 +483,17 @@ export class PersistentWorkerManager {
       return;
     }
     const activeId = worker.summary.activeMessageId;
+    if (event.type === "error" && activeId) {
+      const failure = capabilityRejectionError(event.error);
+      if (failure) {
+        const message = worker.messages.get(activeId);
+        if (message) {
+          message.failure = failure;
+          message.error = failure.message;
+        }
+      }
+      return;
+    }
     if (event.type === "message_end" && activeId) {
       const message = worker.messages.get(activeId);
       const value = event.message as { stopReason?: unknown; errorMessage?: unknown } | undefined;
@@ -524,7 +537,7 @@ export class PersistentWorkerManager {
     if (message.error || message.abortRequested) {
       message.status = message.abortObserved || message.abortRequested ? "canceled" : "failed";
       message.error ??= "Worker turn settled after abort";
-      message.reject(new Error(message.error));
+      message.reject(message.failure ?? new Error(message.error));
       this.#append(worker, "turn.failed", activeId, undefined, message.error);
       if (message.status === "canceled") {
         for (const queuedId of worker.queue) {

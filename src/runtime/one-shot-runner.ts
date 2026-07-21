@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { capabilityRejectionError, type CapabilityRejectionError } from "./capability-rejection.js";
 import { safePiTools } from "./pi-launch.js";
 import type { OneShotInvocation, OneShotResult, OneShotUsage } from "./one-shot.js";
 
@@ -111,6 +112,7 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
       let finalText = "";
       let usage: OneShotUsage = {};
       let assistantError: string | undefined;
+      let capabilityRejection: CapabilityRejectionError | undefined;
       let parseError: Error | undefined;
 
       child.stdout.on("data", (chunk: Buffer | string) => {
@@ -132,7 +134,9 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
           }
           if (line) {
             try {
-              const result = assistantResult(JSON.parse(line) as Record<string, unknown>);
+              const event = JSON.parse(line) as Record<string, unknown>;
+              capabilityRejection ??= event.type === "error" ? capabilityRejectionError(event.error) : undefined;
+              const result = assistantResult(event);
               if (result) {
                 if (Buffer.byteLength(result.text, "utf8") > textLimit) {
                   parseError = new Error(`Pi JSON assistant output exceeds ${textLimit} bytes`);
@@ -176,6 +180,7 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
 
       if (parseError) throw parseError;
       if (aborted) throw new Error("One-shot task aborted");
+      if (capabilityRejection) throw capabilityRejection;
       if (assistantError) throw new Error(assistantError);
       if (code !== 0 || signal !== null) {
         throw new Error(`Pi JSON worker failed (code=${code ?? "null"}, signal=${signal ?? "null"}): ${stderr.toString("utf8")}`);

@@ -13,7 +13,10 @@ function fakeManager() {
 }
 
 const modelRegistry = {
-  getAll: () => [{ provider: "provider", id: "model", reasoning: true }],
+  getAll: () => [{
+    provider: "provider", id: "model", reasoning: true,
+    thinkingLevelMap: { off: "off", high: "high" },
+  }],
 };
 
 test("safe actions work without OpenSpec, slot files, or agent discovery", async () => {
@@ -43,6 +46,57 @@ test("advancing actions report official OpenSpec gating before dispatch configur
   }, { captain: true, cwd: "/active/project", modelRegistry: modelRegistry as never }))
     .rejects.toThrow("Official OpenSpec CLI was not found");
   expect(runOpenSpec).toHaveBeenCalledWith(["--version"], { cwd: "/active/project" });
+});
+
+test("shares process-local capability evidence across one-shot and persistent creation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-capability-gate-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const agents = join(root, "agents");
+  await mkdir(join(home, ".pi", "agent", "horsepower"), { recursive: true });
+  await mkdir(agents, { recursive: true });
+  await writeFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), JSON.stringify({ slots: {
+    judgment: { model: "provider/model", thinking: "high" },
+    craft: { model: "provider/model", thinking: "high" },
+    utility: { model: "provider/model", thinking: "off" },
+  } }));
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: []\nstandards: []\n---\nCode only.\n");
+  const manager = fakeManager();
+  manager.create.mockResolvedValue({ workerId: "worker-1" });
+  const oneShot = {
+    single: vi.fn(async (input) => ({ name: input.name, text: "done" })),
+    parallel: vi.fn(), chain: vi.fn(),
+  };
+  const capabilityProbe = { probe: vi.fn(async () => ({ status: "supported" as const, evidence: { code: "accepted" } })) };
+  const runOpenSpec = vi.fn(async (args: readonly string[], options: { cwd: string }) => {
+    if (args[0] === "--version") return { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false };
+    if (args[0] === "doctor") return { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: options.cwd } }), stderr: "", truncated: false };
+    if (args[0] === "status") return { code: 0, stdout: JSON.stringify({ changeName: "change-a", isComplete: true }), stderr: "", truncated: false };
+    return { code: 0, stdout: JSON.stringify({ summary: { totals: { failed: 0 } } }), stderr: "", truncated: false };
+  });
+  const readText = vi.fn(async (path: string) => path.endsWith("SKILL.md")
+    ? "name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: 1.6.0\n"
+    : path.endsWith("opsx-apply.md") ? "Implement tasks from an OpenSpec change" : (await import("node:fs/promises")).readFile(path, "utf8"));
+  const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
+  const runtime = createHorsepowerRuntime({
+    homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText,
+    oneShot: oneShot as never, capabilityProbe,
+  });
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["one", "two"], mode: "multi_agent" });
+  const common = { changeId: "change-a", agent: "coder", modelSlot: "craft", implementationCampaignId: campaign.campaignId, workKind: "implementation" };
+  const context = {
+    captain: true,
+    cwd: project,
+    modelRegistry: { getAll: () => [{ provider: "provider", id: "model", reasoning: true }] } as never,
+  };
+
+  await runtime.execute({ action: "single", handoffMode: "inline", ...common, taskScope: "one", name: "one", task: "work" }, context);
+  await runtime.execute({ action: "create", handoffMode: "inline", ...common, taskScope: "two", name: "two" }, context);
+
+  expect(capabilityProbe.probe).toHaveBeenCalledTimes(1);
+  expect(oneShot.single).toHaveBeenCalledTimes(1);
+  expect(manager.create).toHaveBeenCalledTimes(1);
+  await runtime.shutdown();
 });
 
 test("configured dispatch notification uses injected transport and shutdown abandons retries", async () => {

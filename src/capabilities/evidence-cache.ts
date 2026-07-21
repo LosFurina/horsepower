@@ -61,3 +61,5 @@ export function createCapabilityEvidenceCache(options: CreateCapabilityEvidenceC
     },
   };
 }
+
+export type CapabilityEvidenceCache = ReturnType<typeof createCapabilityEvidenceCache>;

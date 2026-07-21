@@ -73,6 +73,27 @@ test("runs Pi JSON mode with private prompt cleanup and captures text and usage"
   await expect(stat(promptPath)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+test("preserves structured thinking rejection from an actual one-shot worker", async () => {
+  const child = new FakeJsonChild();
+  const { createPiJsonRunner } = await import("../../src/runtime/one-shot-runner.js");
+  const run = createPiJsonRunner({
+    spawnProcess: () => {
+      queueMicrotask(() => {
+        child.stdout.write(`${JSON.stringify({
+          type: "error",
+          error: { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" },
+        })}\n`);
+        child.emit("close", 1, null);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    },
+  });
+
+  await expect(run(invocation)).rejects.toMatchObject({
+    kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING",
+  });
+});
+
 test("rejects assistant errors", async () => {
   const child = new FakeJsonChild();
   const { createPiJsonRunner } = await import("../../src/runtime/one-shot-runner.js");
