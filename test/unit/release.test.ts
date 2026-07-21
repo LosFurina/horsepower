@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { gzipSync } from "node:zlib";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { afterEach, expect, test } from "vitest";
 import {
   buildRelease,
@@ -101,6 +101,15 @@ test("builds the exact Pi layout with strict manifest digests and canonical mode
   }
   const packaged = JSON.parse(inspected.entries.find((entry) => entry.path === "horsepower/package.json")!.content!.toString("utf8"));
   expect(packaged).toEqual({ name: "horsepower", version: "1.2.3-alpha.1", private: true, type: "module", engines: { node: ">=22.19.0" } });
+});
+
+test("built release scanner executes with the runtime yaml dependency", async () => {
+  await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: process.cwd() });
+  const script = `
+    import { scanPublicContent } from ${JSON.stringify(new URL("../../dist/release/release-builder.mjs", import.meta.url).href)};
+    scanPublicContent([{ path: "safe.yaml", content: Buffer.from("recommendedSlots:\\n  - craft\\n") }]);
+  `;
+  await expect(execFileAsync(process.execPath, ["--input-type=module", "--eval", script], { cwd: process.cwd() })).resolves.toMatchObject({ stderr: "" });
 });
 
 test("produces byte-identical archives and a verifiable external checksum", async () => {
@@ -221,6 +230,40 @@ test("archive inspection rejects hostile USTAR name/prefix combinations and malf
   await expect(inspectReleaseArchive(boundary)).rejects.toThrow("Unexpected archive root");
 });
 
+test("archive inspection requires canonical termination, padding, and directory content", async () => {
+  const root = await temporaryDirectory();
+  const valid = join(root, "valid.tar.gz");
+  await writeFile(valid, makeHostileArchive({ name: "horsepower/file", content: Buffer.from("accepted") }));
+  await expect(inspectReleaseArchive(valid)).resolves.toMatchObject({
+    entries: [{ path: "horsepower/file", type: "file", content: Buffer.from("accepted") }],
+  });
+
+  const generatedRoot = await fixtureRepository();
+  const generated = await buildRelease({
+    repositoryRoot: generatedRoot,
+    outputDir: join(root, "generated"),
+    version: "1.2.3-alpha.1",
+    runBuild: async () => {},
+  });
+  await expect(inspectReleaseArchive(generated.archivePath)).resolves.toMatchObject({ entries: expect.any(Array) });
+
+  const hiddenHeader = gunzipSync(makeHostileArchive({ name: "horsepower/hidden" })).subarray(0, 512);
+  const samples = [
+    { name: "one zero block", archive: makeHostileArchive({ name: "horsepower/file", zeroBlocks: 1 }), error: "canonical end" },
+    { name: "appended token", archive: makeHostileArchive({ name: "horsepower/file", tail: Buffer.from("secret") }), error: "trailing data" },
+    { name: "non-zero tail", archive: makeHostileArchive({ name: "horsepower/file", tail: Buffer.from([0, 0, 1]) }), error: "trailing data" },
+    { name: "hidden header", archive: makeHostileArchive({ name: "horsepower/file", tail: hiddenHeader }), error: "trailing data" },
+    { name: "short zero tail", archive: makeHostileArchive({ name: "horsepower/file", zeroBlocks: 1, tail: Buffer.alloc(511) }), error: "canonical end" },
+    { name: "directory payload", archive: makeHostileArchive({ name: "horsepower/dir/", type: "5", mode: 0o755, content: Buffer.from("x") }), error: "Directory archive entry must have size zero" },
+    { name: "non-zero padding", archive: makeHostileArchive({ name: "horsepower/file", content: Buffer.from("x"), nonZeroPadding: true }), error: "archive padding" },
+  ];
+  for (const [index, sample] of samples.entries()) {
+    const archive = join(root, `canonical-${index}.tar.gz`);
+    await writeFile(archive, sample.archive);
+    await expect(inspectReleaseArchive(archive), sample.name).rejects.toThrow(sample.error);
+  }
+});
+
 test("archive validation rejects duplicate, unexpected, missing, and conflicting directory layout", async () => {
   const mutations: Array<{ name: string; error: string; mutate(entries: Awaited<ReturnType<typeof inspectReleaseArchive>>["entries"]): void }> = [
     {
@@ -311,7 +354,54 @@ test("privacy scanner rejects structured bindings, standalone credentials, NUL c
   for (const path of ["resources/personas/executive.md", ".pi/sessions/2026.jsonl", "state/transcripts/run.ndjson", "implementation-plan.md"]) {
     expect(() => scanPublicContent([{ path, content: Buffer.from("otherwise harmless") }]), path).toThrow(/Forbidden public content/u);
   }
-  expect(() => scanPublicContent([{ path: "resources/agents/coder.md", content: Buffer.from("role: Implement changes\nrecommendedSlots: [craft]\n") }])).not.toThrow();
+  const structuredBindings = [
+    ["multiline JSON", "binding.json", `{
+      "runtime": {
+        "models": [
+          "private-model-v9"
+        ]
+      }
+    }`],
+    ["YAML sequence", "binding.yaml", `runtime:
+  providers:
+    - secret-cloud
+`],
+    ["nested YAML map", "binding.yml", `runtime:
+  "models":
+    judgment:
+      name: private-model-v9
+`],
+    ["Markdown frontmatter", "agent.md", `---
+runtime:
+  provider:
+    name: secret-cloud
+---
+Provider-neutral instructions.
+`],
+  ] as const;
+  for (const [label, path, content] of structuredBindings) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from(content) }]), label).toThrow(/Forbidden public content/u);
+  }
+
+  const safeSemanticSlots = [
+    ["resources/agents/coder.md", `---
+role: Implement changes
+recommendedSlots:
+  - craft
+---
+Select models and providers through semantic slots.
+`],
+    ["docs/model-neutral.md", "Models and providers are selected through recommended semantic slots, never concrete bindings.\n"],
+    ["config.yaml", `recommendedSlots:
+  judgment:
+    - craft
+slotPolicy:
+  description: Select a model through a semantic slot.
+`],
+  ] as const;
+  for (const [path, content] of safeSemanticSlots) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from(content) }]), path).not.toThrow();
+  }
   expect(() => scanPublicContent([{ path: "bin/horsepower", content: Buffer.from("return {\n  model: binding.model,\n  provider: resolved.provider,\n};\n") }])).not.toThrow();
 });
 
@@ -323,8 +413,22 @@ function makeHostileArchive(options: {
   mode?: number;
   sizeField?: string;
   corruptChecksum?: boolean;
+  content?: Buffer;
+  nonZeroPadding?: boolean;
+  zeroBlocks?: number;
+  tail?: Buffer;
 }): Buffer {
-  const { name, prefix = "", type = "0", link = "", mode = 0o644, sizeField = "00000000000\0" } = options;
+  const {
+    name,
+    prefix = "",
+    type = "0",
+    link = "",
+    mode = 0o644,
+    content = Buffer.alloc(0),
+    sizeField = `${content.length.toString(8).padStart(11, "0")}\0`,
+    zeroBlocks = 2,
+    tail = Buffer.alloc(0),
+  } = options;
   const header = Buffer.alloc(512);
   Buffer.from(name).copy(header, 0, 0, 100);
   header.write(`${mode.toString(8).padStart(7, "0")}\0`, 100, 8, "ascii");
@@ -341,5 +445,7 @@ function makeHostileArchive(options: {
   const sum = header.reduce((total, byte) => total + byte, 0);
   header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
   if (options.corruptChecksum === true) header[0] = (header[0] ?? 0) ^ 1;
-  return gzipSync(Buffer.concat([header, Buffer.alloc(1024)]), { level: 9 });
+  const padding = Buffer.alloc((512 - (content.length % 512)) % 512);
+  if (options.nonZeroPadding === true && padding.length > 0) padding[0] = 1;
+  return gzipSync(Buffer.concat([header, content, padding, Buffer.alloc(zeroBlocks * 512), tail]), { level: 9 });
 }

@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { gzipSync, gunzipSync } from "node:zlib";
+import { parse as parseYaml } from "yaml";
 import { validateReleaseCompatibility, type ReleaseCompatibility } from "../release-manifest.js";
 
 const compatibility = {
@@ -392,9 +393,17 @@ export async function inspectReleaseArchive(path: string): Promise<{ entries: Ar
   const tar = gunzipSync(await readFile(path));
   const entries: ArchiveEntry[] = [];
   let offset = 0;
-  while (offset + 512 <= tar.length) {
+  while (true) {
+    if (offset + 512 > tar.length) throw new Error("Archive is missing its canonical end");
     const header = tar.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) break;
+    if (header.every((byte) => byte === 0)) {
+      const secondEndBlock = offset + 1024;
+      if (secondEndBlock > tar.length || !tar.subarray(offset + 512, secondEndBlock).every((byte) => byte === 0)) {
+        throw new Error("Archive is missing its canonical end");
+      }
+      if (!tar.subarray(secondEndBlock).every((byte) => byte === 0)) throw new Error("Archive contains non-zero trailing data");
+      break;
+    }
     const storedChecksum = tarOctal(header, 148, 8, "header checksum");
     const checksumHeader = Buffer.from(header);
     checksumHeader.fill(0x20, 148, 156);
@@ -416,9 +425,13 @@ export async function inspectReleaseArchive(path: string): Promise<{ entries: Ar
     if (typeFlag === "1" || typeFlag === "2") throw new Error(`Archive links are not allowed: ${name}`);
     if (typeFlag !== "0" && typeFlag !== "5") throw new Error(`Unsupported archive entry type ${typeFlag}: ${name}`);
     const size = tarOctal(header, 124, 12, "size");
+    if (typeFlag === "5" && size !== 0) throw new Error(`Directory archive entry must have size zero: ${canonicalPath}`);
     const contentStart = offset + 512;
     if (size > tar.length - contentStart) throw new Error(`Invalid archive size: ${canonicalPath}`);
     const contentEnd = contentStart + size;
+    const paddedEnd = contentStart + Math.ceil(size / 512) * 512;
+    if (paddedEnd > tar.length) throw new Error(`Invalid archive size: ${canonicalPath}`);
+    if (!tar.subarray(contentEnd, paddedEnd).every((byte) => byte === 0)) throw new Error(`Non-zero archive padding: ${canonicalPath}`);
     const mode = tarOctal(header, 100, 8, "mode");
     const uid = tarOctal(header, 108, 8, "uid");
     const gid = tarOctal(header, 116, 8, "gid");
@@ -435,7 +448,7 @@ export async function inspectReleaseArchive(path: string): Promise<{ entries: Ar
       mtime,
       content: typeFlag === "0" ? Buffer.from(tar.subarray(contentStart, contentEnd)) : Buffer.alloc(0),
     });
-    offset = contentStart + Math.ceil(size / 512) * 512;
+    offset = paddedEnd;
   }
   return { entries };
 }
@@ -485,10 +498,49 @@ const forbiddenPathPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: "competing-plan", pattern: /(?:implementation|generated|external)[-_ ]plan\.md\b/iu },
 ];
 
-const structuredBindingPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
-  { id: "provider-mapping", pattern: /(?:^|[{,\n]\s*)["']?(?:provider|providers|providerMapping)["']?\s*[:=]\s*(?:\[[^\]\n]+\]|\{[^}\n]+\}|["'][^"'\n]+["']|[a-z0-9_-]+(?:\/[a-z0-9._-]+)?)(?=\s*(?:[,}\]]|$))/imu },
-  { id: "concrete-model", pattern: /(?:^|[{,\n]\s*)["']?(?:model|models|modelId|modelName)["']?\s*[:=]\s*(?:\[[^\]\n]+\]|\{[^}\n]+\}|["'][^"'\n]+["']|[a-z0-9_-]+(?:\/[a-z0-9._-]+)?)(?=\s*(?:[,}\]]|$))/imu },
-];
+const structuredBindingKeys = new Map<string, string>([
+  ["provider", "provider-mapping"],
+  ["providers", "provider-mapping"],
+  ["providermapping", "provider-mapping"],
+  ["model", "concrete-model"],
+  ["models", "concrete-model"],
+  ["modelid", "concrete-model"],
+  ["modelname", "concrete-model"],
+]);
+
+function findStructuredBinding(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findStructuredBinding(item);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (value === null || typeof value !== "object") return undefined;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    const id = structuredBindingKeys.get(key.toLowerCase());
+    if (id && nested !== null && (!(typeof nested === "string") || nested.trim().length > 0)) return id;
+    const found = findStructuredBinding(nested);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function structuredDocument(path: string, text: string): unknown | undefined {
+  const trimmed = text.trimStart();
+  try {
+    if (/\.json$/iu.test(path) || trimmed.startsWith("{") || trimmed.startsWith("[")) return JSON.parse(text) as unknown;
+    if (/\.ya?ml$/iu.test(path)) return parseYaml(text) as unknown;
+    if (/\.md$/iu.test(path) && /^---\r?\n/u.test(text)) {
+      const end = text.indexOf("\n---", 4);
+      if (end < 0) throw new Error("unterminated frontmatter");
+      return parseYaml(text.slice(text.indexOf("\n") + 1, end)) as unknown;
+    }
+    return undefined;
+  } catch {
+    throw new Error(`Forbidden public content (malformed-structured-content) in ${path}`);
+  }
+}
 
 const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: "credential", pattern: /(?:api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*["']?(?=[A-Za-z0-9_./+=-]{24,})(?=[A-Za-z0-9_./+=-]*\d)[A-Za-z0-9_./+=-]+|authorization\s*[:=]\s*["']?(?:bearer|basic)\s+[A-Za-z0-9_./+=-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
@@ -504,9 +556,8 @@ export function scanPublicContent(contents: readonly PublicContent[]): void {
     }
     const text = item.content.toString("utf8").replaceAll("\0", "\n");
     if (/\.(?:json|ya?ml|md)$/iu.test(item.path)) {
-      for (const forbidden of structuredBindingPatterns) {
-        if (forbidden.pattern.test(text)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);
-      }
+      const binding = findStructuredBinding(structuredDocument(item.path, text));
+      if (binding) throw new Error(`Forbidden public content (${binding}) in ${item.path}`);
     }
     for (const forbidden of forbiddenPatterns) {
       const definesPrivacyPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";

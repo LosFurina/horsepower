@@ -38,6 +38,7 @@ await build({
   platform: "node",
   format: "esm",
   target: "node22",
+  external: ["yaml"],
 });
 
 await chmod("dist/cli/horsepower.js", 0o755);
