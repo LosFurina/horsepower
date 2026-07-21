@@ -28,6 +28,9 @@ export interface CreateHorsepowerRuntimeOptions {
   webhook?: WebhookNotifierOptions & {
     notifications?: { change?: boolean; dispatch?: boolean };
   };
+  resolveWebhook?: (cwd: string) => (WebhookNotifierOptions & {
+    notifications?: { change?: boolean; dispatch?: boolean };
+  }) | undefined;
 }
 
 async function optionalJson(path: string, readText: (path: string) => Promise<string>): Promise<Record<string, unknown>> {
@@ -56,15 +59,20 @@ export class HorsepowerRuntime {
   readonly #manager: PersistentWorkerManager;
   readonly #lifecycle: ReturnType<typeof createRunLifecycle>;
   readonly #boundary: ReturnType<typeof createOpenSpecBoundary>;
+  readonly #notifiers = new Set<ReturnType<typeof createWebhookNotifier>>();
   #shutdown?: Promise<void>;
 
   constructor(options: CreateHorsepowerRuntimeOptions) {
     this.#options = options;
     this.#manager = options.manager ?? new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter() });
     const notifier = options.webhook ? createWebhookNotifier(options.webhook) : undefined;
+    if (notifier) this.#notifiers.add(notifier);
     this.#lifecycle = createRunLifecycle({
       ...(options.webhook?.notifications ? { notifications: options.webhook.notifications } : {}),
-      ...(notifier ? { notify: (event) => notifier.notify(event), stopNotifications: () => notifier.abandon() } : {}),
+      ...(notifier ? { notify: (event) => notifier.notify(event) } : {}),
+      stopNotifications: () => {
+        for (const active of this.#notifiers) active.abandon();
+      },
     });
     const readText = options.readText ?? ((path: string) => readFile(path, "utf8"));
     this.#boundary = createOpenSpecBoundary({ run: options.runOpenSpec ?? createOpenSpecCliRunner(), readText });
@@ -105,6 +113,24 @@ export class HorsepowerRuntime {
       catalog = new Map(agents.map((agent) => [agent.name, agent]));
     }
     const oneShot = createOneShotExecutor({ run: createPiJsonRunner() });
+    const bindNotification = (scope: "change" | "dispatch") => {
+      const webhook = this.#options.resolveWebhook?.(cwd);
+      if (!webhook) return undefined;
+      const enabled = webhook.notifications?.[scope] ?? (scope === "change");
+      if (!enabled) return { enabled: false };
+      return {
+        enabled: true,
+        notify: async (event: Parameters<ReturnType<typeof createWebhookNotifier>["notify"]>[0]) => {
+          const active = createWebhookNotifier(webhook);
+          this.#notifiers.add(active);
+          try {
+            return await active.notify(event);
+          } finally {
+            this.#notifiers.delete(active);
+          }
+        },
+      };
+    };
     const orchestration = createOrchestration({
       authorize: async () => undefined,
       resolveSlot: (slot) => {
@@ -118,8 +144,8 @@ export class HorsepowerRuntime {
         return agent;
       },
       createWorker: (worker) => this.#manager.create(worker),
-      beginChange: (change) => this.#lifecycle.beginChange(change),
-      beginDispatch: (dispatch) => this.#lifecycle.beginDispatch(dispatch),
+      beginChange: (change) => this.#lifecycle.beginChange(change, bindNotification("change")),
+      beginDispatch: (dispatch) => this.#lifecycle.beginDispatch(dispatch, bindNotification("dispatch")),
       oneShot,
       sendWorker: (send) => this.#manager.send(send as never),
       waitForMessage: (workerId, messageId) => this.#manager.waitForMessage(workerId, messageId),

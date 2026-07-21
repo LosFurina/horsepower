@@ -112,7 +112,7 @@ function abandonGeneration<T extends GlobalRuntimeValue>(
   duringExit = false,
 ): void {
   const owner = current(host);
-  const ownsPendingCleanup = duringExit && owner === undefined && record.cleanup !== undefined;
+  const ownsPendingCleanup = duringExit && record.cleanup !== undefined;
   if ((owner !== record && !ownsPendingCleanup) || record.abandoned || (record.cleanup && !duringExit)) return;
   record.abandoned = true;
   if (owner === record) delete host[RUNTIME_SYMBOL];

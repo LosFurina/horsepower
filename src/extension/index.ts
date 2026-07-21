@@ -120,17 +120,26 @@ export function registerHorsepowerExtension(
 }
 
 function readSettings(path: string): Record<string, unknown> {
+  let text: string;
   try {
-    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-    return value !== null && !Array.isArray(value) && typeof value === "object"
-      ? value as Record<string, unknown>
-      : {};
-  } catch {
-    return {};
+    text = readFileSync(path, "utf8");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new Error(`Unable to read Horsepower settings: ${path}`);
+  }
+  try {
+    const value: unknown = JSON.parse(text);
+    if (value === null || Array.isArray(value) || typeof value !== "object") {
+      throw new Error(`Horsepower settings must be a JSON object: ${path}`);
+    }
+    return value as Record<string, unknown>;
+  } catch (cause) {
+    if (cause instanceof SyntaxError) throw new Error(`Malformed Horsepower settings JSON: ${path}`);
+    throw cause;
   }
 }
 
-function webhookOptions(homeDir: string, projectDir: string): CreateHorsepowerRuntimeOptions["webhook"] {
+export function webhookOptions(homeDir: string, projectDir: string): CreateHorsepowerRuntimeOptions["webhook"] {
   const paths = resolveHorsepowerPaths({ homeDir, projectDir });
   const global = readSettings(paths.global.settings).webhook;
   const project = readSettings(paths.project.settings).webhook;
@@ -138,14 +147,17 @@ function webhookOptions(homeDir: string, projectDir: string): CreateHorsepowerRu
     ...(global !== null && !Array.isArray(global) && typeof global === "object" ? global : {}),
     ...(project !== null && !Array.isArray(project) && typeof project === "object" ? project : {}),
   } as Record<string, unknown>;
-  if (typeof merged.url !== "string" || !merged.url) return undefined;
+  if (Object.keys(merged).length === 0) return undefined;
+  if (typeof merged.url !== "string" || !merged.url) throw new Error("Invalid Horsepower webhook configuration: url is required");
   const auth = merged.auth;
-  if (auth === null || Array.isArray(auth) || typeof auth !== "object") return undefined;
+  if (auth === null || Array.isArray(auth) || typeof auth !== "object") {
+    throw new Error("Invalid Horsepower webhook configuration: auth is required");
+  }
   const rawAuth = auth as Record<string, unknown>;
   const validAuth = rawAuth.mode === "none" ||
     (rawAuth.mode === "hmac" && typeof rawAuth.secret === "string" && rawAuth.secret.length > 0) ||
     (rawAuth.mode === "bearer" && typeof rawAuth.token === "string" && rawAuth.token.length > 0);
-  if (!validAuth) return undefined;
+  if (!validAuth) throw new Error("Invalid Horsepower webhook configuration: auth credentials are missing or invalid");
   const notifications = merged.notifications;
   const rawNotifications = notifications !== null && !Array.isArray(notifications) && typeof notifications === "object"
     ? notifications as Record<string, unknown>
@@ -163,15 +175,12 @@ function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
   const homeDir = homedir();
   const bundledAgentsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "resources", "agents");
   return acquireGlobalRuntime({
-    create: () => {
-      const webhook = ctx ? webhookOptions(homeDir, ctx.cwd) : undefined;
-      return createHorsepowerRuntime({
-        homeDir,
-        bundledAgentsDir,
-        readText: (path) => readFile(path, "utf8"),
-        ...(webhook ? { webhook } : {}),
-      });
-    },
+    create: () => createHorsepowerRuntime({
+      homeDir,
+      bundledAgentsDir,
+      readText: (path) => readFile(path, "utf8"),
+      resolveWebhook: (cwd) => webhookOptions(homeDir, cwd),
+    }),
   });
 }
 

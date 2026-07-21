@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, test, vi } from "vitest";
 
 interface FakePi {
@@ -124,6 +127,23 @@ test("bounds LLM-facing tool content by UTF-8 bytes and lines while retaining de
   expect(lines.content[0]!.text.split("\n")).toHaveLength(2_000);
   expect(lines.content[0]!.text).toContain("omitted");
   expect(lines.details).toEqual(lineResult);
+});
+
+test("malformed webhook settings are observable without exposing credential contents", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-settings-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const globalDir = join(home, ".pi", "agent", "horsepower");
+  await mkdir(globalDir, { recursive: true });
+  await writeFile(join(globalDir, "settings.json"), "{\"webhook\": {\"token\": \"do-not-print\"");
+  const { webhookOptions } = await import("../../src/extension/index.js");
+
+  expect(() => webhookOptions(home, project)).toThrow(`Malformed Horsepower settings JSON: ${join(globalDir, "settings.json")}`);
+  try {
+    webhookOptions(home, project);
+  } catch (cause) {
+    expect(String(cause)).not.toContain("do-not-print");
+  }
 });
 
 test("new resume and fork preserve runtime while reload and quit cleanup idempotently", async () => {

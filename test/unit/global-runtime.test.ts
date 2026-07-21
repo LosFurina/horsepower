@@ -105,8 +105,8 @@ test("exit during deferred signal cleanup abandons the still-owned generation", 
   await new Promise((resolve) => setImmediate(resolve));
 });
 
-test("exit during stale deferred cleanup does not abandon a replacement", async () => {
-  const { acquireGlobalRuntime, replaceGlobalRuntimeForTest } = await import("../../src/runtime/global-runtime.js");
+test("exit during stale deferred cleanup abandons the pending generation without touching its replacement", async () => {
+  const { acquireGlobalRuntime, replaceGlobalRuntimeForTest, RUNTIME_SYMBOL } = await import("../../src/runtime/global-runtime.js");
   const host: Record<PropertyKey, unknown> = {};
   const handlers = new Map<string, () => void>();
   const events = {
@@ -122,13 +122,16 @@ test("exit during stale deferred cleanup does not abandon a replacement", async 
   handlers.get("SIGTERM")!();
   const exit = handlers.get("exit")!;
   const replacement = { shutdown: vi.fn(async () => undefined), abandon: vi.fn() };
-  replaceGlobalRuntimeForTest(host, replacement);
+  const replacementRecord = replaceGlobalRuntimeForTest(host, replacement).record;
+  exit();
   exit();
 
-  expect(oldValue.abandon).not.toHaveBeenCalled();
+  expect(oldValue.abandon).toHaveBeenCalledTimes(1);
   expect(replacement.abandon).not.toHaveBeenCalled();
+  expect(host[RUNTIME_SYMBOL]).toBe(replacementRecord);
   stopped.resolve();
   await new Promise((resolve) => setImmediate(resolve));
+  expect(host[RUNTIME_SYMBOL]).toBe(replacementRecord);
 });
 
 test("synchronous exit backstop abandons only its live generation", async () => {

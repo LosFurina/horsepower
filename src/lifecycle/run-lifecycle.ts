@@ -22,6 +22,11 @@ export interface RunRecord {
   delivery?: WebhookDeliveryResult;
 }
 
+export interface RunNotificationBinding {
+  enabled: boolean;
+  notify?: (event: TerminalWebhookEvent) => Promise<WebhookDeliveryResult>;
+}
+
 export interface RunLifecycleOptions {
   notifications?: { change?: boolean; dispatch?: boolean };
   notify?: (event: TerminalWebhookEvent) => Promise<WebhookDeliveryResult>;
@@ -54,6 +59,7 @@ function webhookText(value: string, limit: number): string {
 export function createRunLifecycle(options: RunLifecycleOptions) {
   const runs = new Map<string, RunRecord>();
   const deliveries = new Map<string, Promise<WebhookDeliveryResult>>();
+  const notificationBindings = new Map<string, RunNotificationBinding>();
   const notifications = {
     change: options.notifications?.change ?? true,
     dispatch: options.notifications?.dispatch ?? false,
@@ -61,7 +67,11 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
   const now = options.now ?? (() => new Date());
   const makeId = options.makeId ?? ((prefix: string) => `${prefix}-${crypto.randomUUID()}`);
 
-  function begin(scope: TerminalScope, input: { changeId: string; summary?: string }): RunRecord {
+  function begin(
+    scope: TerminalScope,
+    input: { changeId: string; summary?: string },
+    notification?: RunNotificationBinding,
+  ): RunRecord {
     const runId = makeId("run");
     const run: RunRecord = {
       runId,
@@ -72,6 +82,7 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
       ...(input.summary === undefined ? {} : { summary: input.summary }),
     };
     runs.set(runId, run);
+    if (notification) notificationBindings.set(runId, notification);
     return structuredClone(run);
   }
 
@@ -105,7 +116,12 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
     run.stoppedAt = stoppedAt;
     if (verification) run.verification = verification;
 
-    if (notifications[scope] && options.notify) {
+    const notification = notificationBindings.get(run.runId) ?? {
+      enabled: notifications[scope],
+      ...(options.notify ? { notify: options.notify } : {}),
+    };
+    notificationBindings.delete(run.runId);
+    if (notification.enabled && notification.notify) {
       let payload: TerminalWebhookEvent;
       try {
         payload = {
@@ -132,7 +148,7 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
         };
       }
       const delivery = Promise.resolve()
-        .then(() => options.notify!(payload))
+        .then(() => notification.notify!(payload))
         .catch((): WebhookDeliveryResult => ({
           delivered: false,
           attempts: 0,
@@ -149,8 +165,12 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
   }
 
   return {
-    beginChange(input: { changeId: string }) { return begin("change", input); },
-    beginDispatch(input: { changeId: string; summary?: string }) { return begin("dispatch", input); },
+    beginChange(input: { changeId: string }, notification?: RunNotificationBinding) {
+      return begin("change", input, notification);
+    },
+    beginDispatch(input: { changeId: string; summary?: string }, notification?: RunNotificationBinding) {
+      return begin("dispatch", input, notification);
+    },
     reportChangeTerminal(report: ChangeTerminalReport) { return terminal("change", report); },
     reportDispatchTerminal(report: DispatchTerminalReport) { return terminal("dispatch", report); },
     async waitForDelivery(runId: string): Promise<WebhookDeliveryResult> {

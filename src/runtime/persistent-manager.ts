@@ -112,7 +112,9 @@ export class PersistentWorkerManager {
   readonly #eventByteLimit: number;
   readonly #gracefulShutdownMs: number;
   readonly #now: () => number;
+  readonly #creationSettlements = new Set<Promise<void>>();
   #creating = 0;
+  #shuttingDown = false;
 
   constructor(options: PersistentWorkerManagerOptions) {
     this.#startWorker = options.startWorker;
@@ -123,6 +125,7 @@ export class PersistentWorkerManager {
   }
 
   async create(input: WorkerLaunchInput): Promise<WorkerSummary> {
+    if (this.#shuttingDown) throw new Error("Persistent worker manager is shutting down");
     if ([...this.#workers.values()].some((worker) => worker.summary.name === input.name)) {
       throw new Error(`Persistent worker name already exists: ${input.name}`);
     }
@@ -131,41 +134,43 @@ export class PersistentWorkerManager {
     }
 
     this.#creating += 1;
-    let connection: WorkerConnection;
+    let settleCreation!: () => void;
+    const creationSettlement = new Promise<void>((resolve) => { settleCreation = resolve; });
+    this.#creationSettlements.add(creationSettlement);
+    let connection: WorkerConnection | undefined;
+    let workerId: string | undefined;
     try {
       connection = await this.#startWorker(input);
-    } finally {
-      this.#creating -= 1;
-    }
-    const workerId = `${input.agent}-${randomUUID()}`;
-    const now = this.#now();
-    const state: WorkerState = {
-      summary: {
-        workerId,
-        name: input.name,
-        agent: input.agent,
-        modelSlot: input.modelSlot,
-        model: input.model,
-        thinking: input.thinking,
-        cwd: input.cwd,
-        status: "starting",
-        queuedMessageIds: [],
-        createdAt: now,
-        lastActivityAt: now,
-      },
-      connection,
-      events: createEventStream({ byteLimit: this.#eventByteLimit }),
-      messages: new Map(),
-      queue: [],
-      destroyRequested: false,
-      exited: false,
-    };
-    this.#workers.set(workerId, state);
-    connection.on("event", (event) => this.#processEvent(state, event));
-    connection.on("exit", (code, signal) => this.#processExit(state, code, signal));
+      if (this.#shuttingDown) throw new Error("Persistent worker manager is shutting down");
+      workerId = `${input.agent}-${randomUUID()}`;
+      const now = this.#now();
+      const state: WorkerState = {
+        summary: {
+          workerId,
+          name: input.name,
+          agent: input.agent,
+          modelSlot: input.modelSlot,
+          model: input.model,
+          thinking: input.thinking,
+          cwd: input.cwd,
+          status: "starting",
+          queuedMessageIds: [],
+          createdAt: now,
+          lastActivityAt: now,
+        },
+        connection,
+        events: createEventStream({ byteLimit: this.#eventByteLimit }),
+        messages: new Map(),
+        queue: [],
+        destroyRequested: false,
+        exited: false,
+      };
+      this.#workers.set(workerId, state);
+      connection.on("event", (event) => this.#processEvent(state, event));
+      connection.on("exit", (code, signal) => this.#processExit(state, code, signal));
 
-    try {
       await connection.request("get_state");
+      if (this.#shuttingDown) throw new Error("Persistent worker manager is shutting down");
       if (state.summary.status === "failed") {
         throw new Error(state.summary.error ?? "Persistent worker exited during startup");
       }
@@ -176,10 +181,16 @@ export class PersistentWorkerManager {
       }
       return this.status(workerId);
     } catch (cause) {
-      this.#workers.delete(workerId);
-      connection.kill("SIGKILL");
-      await connection.cleanup().catch(() => undefined);
+      if (workerId) this.#workers.delete(workerId);
+      if (connection) {
+        connection.kill("SIGKILL");
+        await connection.cleanup().catch(() => undefined);
+      }
       throw cause;
+    } finally {
+      this.#creating -= 1;
+      this.#creationSettlements.delete(creationSettlement);
+      settleCreation();
     }
   }
 
@@ -361,6 +372,8 @@ export class PersistentWorkerManager {
   }
 
   async destroyAll(force = false): Promise<void> {
+    this.#shuttingDown = true;
+    await Promise.all([...this.#creationSettlements]);
     const results = await Promise.allSettled(
       [...this.#workers.keys()].map((workerId) => this.destroy(workerId, force)),
     );
@@ -371,6 +384,7 @@ export class PersistentWorkerManager {
   }
 
   abandonAll(): void {
+    this.#shuttingDown = true;
     const error = new Error("Persistent worker abandoned during synchronous host exit");
     for (const [workerId, worker] of this.#workers) {
       worker.destroyRequested = true;

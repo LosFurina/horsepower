@@ -540,3 +540,41 @@ test("synchronous abandonment kills workers and removes them without claiming gr
   await new Promise((resolve) => setImmediate(resolve));
   expect(workers[0]!.cleaned).toBe(true);
 });
+
+test("destroyAll invalidates a deferred worker creation and cleans the child", async () => {
+  const { PersistentWorkerManager } = await import("../../src/runtime/persistent-manager.js");
+  let resolveStart!: (worker: FakeWorker) => void;
+  const started = new Promise<FakeWorker>((resolve) => { resolveStart = resolve; });
+  const manager = new PersistentWorkerManager({ startWorker: async () => started });
+  const creating = manager.create(createInput);
+
+  const destroying = manager.destroyAll();
+  const worker = new FakeWorker();
+  resolveStart(worker);
+
+  await expect(creating).rejects.toThrow("shutting down");
+  await expect(destroying).resolves.toBeUndefined();
+  expect(worker.signals).toEqual(["SIGKILL"]);
+  expect(worker.cleaned).toBe(true);
+  expect(manager.list()).toEqual([]);
+  await expect(manager.create({ ...createInput, name: "after-shutdown" })).rejects.toThrow("shutting down");
+});
+
+test("abandonAll invalidates a deferred worker creation and asynchronously cleans the child", async () => {
+  const { PersistentWorkerManager } = await import("../../src/runtime/persistent-manager.js");
+  let resolveStart!: (worker: FakeWorker) => void;
+  const started = new Promise<FakeWorker>((resolve) => { resolveStart = resolve; });
+  const manager = new PersistentWorkerManager({ startWorker: async () => started });
+  const creating = manager.create(createInput);
+
+  manager.abandonAll();
+  const worker = new FakeWorker();
+  resolveStart(worker);
+
+  await expect(creating).rejects.toThrow("shutting down");
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(worker.signals).toEqual(["SIGKILL"]);
+  expect(worker.cleaned).toBe(true);
+  expect(manager.list()).toEqual([]);
+  await expect(manager.create({ ...createInput, name: "after-abandon" })).rejects.toThrow("shutting down");
+});
