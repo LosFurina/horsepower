@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { validateReleaseCompatibility, type ReleaseCompatibility } from "../release-manifest.js";
 
@@ -57,14 +59,30 @@ export interface ReleaseBuildResult {
 export interface ReleaseBuilderDependencies {
   scan(contents: readonly PublicContent[]): void;
   inspectArchive(path: string): Promise<{ entries: ArchiveEntry[] }>;
+  listTrackedFiles(repositoryRoot: string): Promise<string[]>;
+}
+
+const execFileAsync = promisify(execFile);
+
+async function gitTrackedFiles(repositoryRoot: string): Promise<string[]> {
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z"], {
+    cwd: repositoryRoot,
+    encoding: "buffer",
+    shell: false,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  return stdout.toString("utf8").split("\0").filter(Boolean).sort(comparePath);
 }
 
 export function createReleaseBuilder(dependencies: Partial<ReleaseBuilderDependencies> = {}) {
-  const scan = dependencies.scan ?? scanPublicContent;
-  const inspectArchive = dependencies.inspectArchive ?? inspectReleaseArchive;
+  const resolved: ReleaseBuilderDependencies = {
+    scan: dependencies.scan ?? scanPublicContent,
+    inspectArchive: dependencies.inspectArchive ?? inspectReleaseArchive,
+    listTrackedFiles: dependencies.listTrackedFiles ?? gitTrackedFiles,
+  };
   return {
     async build(options: BuildReleaseOptions): Promise<ReleaseBuildResult> {
-      return buildReleaseWith({ scan, inspectArchive }, options);
+      return buildReleaseWith(resolved, options);
     },
   };
 }
@@ -126,10 +144,18 @@ async function regularFiles(root: string): Promise<string[]> {
   return result;
 }
 
+function isStrictSemVer(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u.exec(value);
+  if (!match) return false;
+  return match[4]?.split(".").every((identifier) => !/^\d+$/u.test(identifier) || identifier === "0" || !identifier.startsWith("0")) ?? true;
+}
+
 async function stageRelease(repositoryRoot: string, stageRoot: string, version: string): Promise<{ allowedFiles: string[]; manifest: ReleaseManifest }> {
   const packagePath = join(repositoryRoot, "package.json");
   const packageJson = JSON.parse(await readFile(packagePath, "utf8")) as Record<string, unknown>;
-  if (packageJson.version !== version) throw new Error(`Release version ${version} does not match package version ${String(packageJson.version)}`);
+  if (!isStrictSemVer(packageJson.version)) throw new Error(`Invalid package version: ${String(packageJson.version)}`);
+  if (packageJson.version !== version) throw new Error(`Release version ${version} does not match package version ${packageJson.version}`);
   if (packageJson.private !== true) throw new Error("Release package metadata must be private");
 
   const copies: Array<{ source: string; target: string; executable?: boolean }> = [
@@ -164,26 +190,35 @@ async function stageRelease(repositoryRoot: string, stageRoot: string, version: 
   return { allowedFiles, manifest };
 }
 
-async function repositoryPublicContents(repositoryRoot: string): Promise<PublicContent[]> {
-  const paths = [
-    "package.json",
-    "LICENSE",
-    "dist/cli/horsepower.js",
-    "dist/extension/index.js",
-    ...(await regularFiles(join(repositoryRoot, "resources", "agents"))).map((path) => `resources/agents/${path}`),
-    ...(await regularFiles(join(repositoryRoot, "resources", "skills", "horsepower"))).map((path) => `resources/skills/horsepower/${path}`),
-  ].sort(comparePath);
-  return Promise.all(paths.map(async (path) => ({ path, content: await readFile(join(repositoryRoot, path)) })));
+const trackedPublicRoots = [".github/", "docs/", "openspec/", "resources/", "scripts/", "src/", "test/", "tests/"] as const;
+const trackedPublicFiles = new Set([
+  ".gitignore", "LICENSE", "LICENSE.md", "README", "README.md", "README.zh-CN.md",
+  "package.json", "package-lock.json", "npm-shrinkwrap.json", "tsconfig.json", "vitest.config.ts",
+  "install.sh",
+]);
+const excludedTrackedRoots = [".pi/prompts/", ".pi/skills/"] as const;
+
+function classifyTrackedPath(path: string): "public" | "excluded" {
+  assertSafeRelativePath(path, "Tracked repository path");
+  if (excludedTrackedRoots.some((prefix) => path.startsWith(prefix))) return "excluded";
+  if (trackedPublicFiles.has(path) || trackedPublicRoots.some((prefix) => path.startsWith(prefix))) return "public";
+  throw new Error(`Unclassified tracked repository file: ${path}`);
+}
+
+async function repositoryPublicContents(repositoryRoot: string, listTrackedFiles: ReleaseBuilderDependencies["listTrackedFiles"]): Promise<PublicContent[]> {
+  const tracked = await listTrackedFiles(repositoryRoot);
+  const paths = tracked.filter((path) => classifyTrackedPath(path) === "public");
+  const built = ["dist/cli/horsepower.js", "dist/extension/index.js"];
+  return Promise.all([...new Set([...paths, ...built])].sort(comparePath)
+    .map(async (path) => ({ path, content: await readFile(join(repositoryRoot, path)) })));
 }
 
 async function buildReleaseWith(dependencies: ReleaseBuilderDependencies, options: BuildReleaseOptions): Promise<ReleaseBuildResult> {
   const repositoryRoot = resolve(options.repositoryRoot);
   const outputDir = resolve(options.outputDir);
-  if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(options.version)) {
-    throw new Error(`Invalid release version: ${options.version}`);
-  }
+  if (!isStrictSemVer(options.version)) throw new Error(`Invalid release version: ${options.version}`);
   await options.runBuild();
-  dependencies.scan(await repositoryPublicContents(repositoryRoot));
+  dependencies.scan(await repositoryPublicContents(repositoryRoot, dependencies.listTrackedFiles));
   const archiveName = `horsepower-v${options.version}.tar.gz`;
   const outputNames = new Set([archiveName, `${archiveName}.sha256`]);
   try {
@@ -200,7 +235,7 @@ async function buildReleaseWith(dependencies: ReleaseBuilderDependencies, option
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
     await mkdir(outputDir, { recursive: true, mode: 0o755 });
   }
-  const workDir = join(dirname(outputDir), `.horsepower-release-${process.pid}`);
+  const workDir = await mkdtemp(join(dirname(outputDir), `.horsepower-release-${process.pid}-`));
   const stageRoot = join(workDir, "horsepower");
   try {
     const { allowedFiles, manifest } = await stageRelease(repositoryRoot, stageRoot, options.version);
@@ -210,7 +245,7 @@ async function buildReleaseWith(dependencies: ReleaseBuilderDependencies, option
     await writeFile(archivePath, await createArchive(stageRoot));
     const inspected = await dependencies.inspectArchive(archivePath);
     validateArchiveEntries(inspected.entries, allowedFiles);
-    dependencies.scan(inspected.entries.filter((entry) => entry.type === "file"));
+    dependencies.scan(inspected.entries);
     verifyArchiveManifest(inspected.entries, manifest);
     const archive = await readFile(archivePath);
     const checksum = sha256(archive);
@@ -277,13 +312,19 @@ async function validateManifest(root: string, version: string): Promise<ReleaseM
   return manifest;
 }
 
-function tarString(buffer: Buffer, offset: number, length: number): string {
-  const end = buffer.indexOf(0, offset);
-  return buffer.subarray(offset, end >= offset && end < offset + length ? end : offset + length).toString("utf8");
+function tarField(buffer: Buffer, offset: number, length: number, label: string): string {
+  const field = buffer.subarray(offset, offset + length);
+  const nul = field.indexOf(0);
+  if (nul >= 0 && field.subarray(nul + 1).some((byte) => byte !== 0)) throw new Error(`Invalid archive ${label}`);
+  return field.subarray(0, nul < 0 ? field.length : nul).toString("utf8");
 }
-function tarOctal(buffer: Buffer, offset: number, length: number): number {
-  const value = tarString(buffer, offset, length).trim();
-  return value === "" ? 0 : Number.parseInt(value, 8);
+function tarOctal(buffer: Buffer, offset: number, length: number, label: string): number {
+  const raw = buffer.subarray(offset, offset + length).toString("ascii");
+  if (!/^[0-7]+(?:\0[ ]*|[ ]*)$/u.test(raw)) throw new Error(`Invalid archive ${label}`);
+  const value = raw.replace(/\0.*$/u, "").trim();
+  const result = Number.parseInt(value, 8);
+  if (!Number.isSafeInteger(result)) throw new Error(`Invalid archive ${label}`);
+  return result;
 }
 function writeTarString(header: Buffer, value: string, offset: number, length: number): void {
   const bytes = Buffer.from(value);
@@ -354,26 +395,34 @@ export async function inspectReleaseArchive(path: string): Promise<{ entries: Ar
   while (offset + 512 <= tar.length) {
     const header = tar.subarray(offset, offset + 512);
     if (header.every((byte) => byte === 0)) break;
-    const storedChecksum = tarOctal(header, 148, 8);
+    const storedChecksum = tarOctal(header, 148, 8, "header checksum");
     const checksumHeader = Buffer.from(header);
     checksumHeader.fill(0x20, 148, 156);
     if (checksumHeader.reduce((total, byte) => total + byte, 0) !== storedChecksum) throw new Error("Invalid archive header checksum");
-    const name = tarString(header, 0, 100);
-    if (isAbsolute(name) || name.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(name)) throw new Error(`Archive path must be relative: ${name}`);
-    const normalized = name.replaceAll("\\", "/").replace(/\/$/u, "");
-    if (normalized.split("/").some((component) => component === ".." || component === "")) throw new Error(`Archive path traversal: ${name}`);
-    if (normalized !== "horsepower" && !normalized.startsWith("horsepower/")) throw new Error(`Unexpected archive root: ${name}`);
-    const typeFlag = tarString(header, 156, 1) || "0";
+    const name = tarField(header, 0, 100, "USTAR name");
+    const prefix = tarField(header, 345, 155, "USTAR prefix");
+    const typeFlag = tarField(header, 156, 1, "type") || "0";
+    if (name.length === 0 || prefix.endsWith("/")) throw new Error("Invalid archive USTAR path");
+    for (const [component, allowTrailingSlash] of [[name, typeFlag === "5"], [prefix, false]] as const) {
+      if (component.length === 0) continue;
+      if (isAbsolute(component) || component.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(component)) throw new Error(`Archive path must be relative: ${component}`);
+      const parts = component.replaceAll("\\", "/").split("/");
+      if (allowTrailingSlash && parts.at(-1) === "") parts.pop();
+      if (parts.some((part) => part === ".." || part === "")) throw new Error(`Archive path traversal: ${component}`);
+    }
+    const canonicalPath = prefix.length > 0 ? `${prefix}/${name}` : name;
+    const normalized = canonicalPath.replaceAll("\\", "/").replace(/\/$/u, "");
+    if (normalized !== "horsepower" && !normalized.startsWith("horsepower/")) throw new Error(`Unexpected archive root: ${canonicalPath}`);
     if (typeFlag === "1" || typeFlag === "2") throw new Error(`Archive links are not allowed: ${name}`);
     if (typeFlag !== "0" && typeFlag !== "5") throw new Error(`Unsupported archive entry type ${typeFlag}: ${name}`);
-    const size = tarOctal(header, 124, 12);
+    const size = tarOctal(header, 124, 12, "size");
     const contentStart = offset + 512;
+    if (size > tar.length - contentStart) throw new Error(`Invalid archive size: ${canonicalPath}`);
     const contentEnd = contentStart + size;
-    if (contentEnd > tar.length) throw new Error(`Truncated archive entry: ${name}`);
-    const mode = tarOctal(header, 100, 8);
-    const uid = tarOctal(header, 108, 8);
-    const gid = tarOctal(header, 116, 8);
-    const mtime = tarOctal(header, 136, 12);
+    const mode = tarOctal(header, 100, 8, "mode");
+    const uid = tarOctal(header, 108, 8, "uid");
+    const gid = tarOctal(header, 116, 8, "gid");
+    const mtime = tarOctal(header, 136, 12, "mtime");
     const expectedModes = typeFlag === "5" ? [0o755] : [0o644, 0o755];
     if (!expectedModes.includes(mode)) throw new Error(`Unsafe archive mode for ${name}: ${mode.toString(8)}`);
     if (uid !== 0 || gid !== 0 || mtime !== fixedMtimeSeconds) throw new Error(`Non-canonical archive metadata: ${name}`);
@@ -391,10 +440,25 @@ export async function inspectReleaseArchive(path: string): Promise<{ entries: Ar
   return { entries };
 }
 
+function expectedArchivePaths(allowedFiles: readonly string[]): string[] {
+  const expected = new Set(["horsepower"]);
+  for (const path of allowedFiles) {
+    const fullPath = `horsepower/${path}`;
+    expected.add(fullPath);
+    const components = fullPath.split("/");
+    for (let index = 1; index < components.length; index += 1) expected.add(components.slice(0, index).join("/"));
+  }
+  return [...expected].sort(comparePath);
+}
+
 function validateArchiveEntries(entries: readonly ArchiveEntry[], allowedFiles: readonly string[]): void {
-  const files = entries.filter((entry) => entry.type === "file");
-  const expected = allowedFiles.map((path) => `horsepower/${path}`).sort();
-  if (JSON.stringify(files.map(({ path }) => path).sort()) !== JSON.stringify(expected)) throw new Error("Archive file allowlist mismatch");
+  const actualPaths = entries.map(({ path }) => path).sort(comparePath);
+  const expectedPaths = expectedArchivePaths(allowedFiles);
+  if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) throw new Error("Archive entry layout mismatch");
+  const expectedFiles = new Set(allowedFiles.map((path) => `horsepower/${path}`));
+  for (const entry of entries) {
+    if ((entry.type === "file") !== expectedFiles.has(entry.path)) throw new Error(`Archive path/type conflict: ${entry.path}`);
+  }
   for (const entry of entries) {
     if (entry.uid !== 0 || entry.gid !== 0 || entry.mtime !== fixedMtimeSeconds) throw new Error(`Non-canonical archive metadata: ${entry.path}`);
     const relativePath = entry.path === "horsepower" ? "" : entry.path.slice("horsepower/".length);
@@ -415,23 +479,39 @@ function verifyArchiveManifest(entries: readonly ArchiveEntry[], expected: Relea
   }
 }
 
+const forbiddenPathPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
+  { id: "private-agent", pattern: /(?:^|[/\\])(?:personas?|private-agents?|\.pi[/\\]agents?)(?:[/\\]|$)/iu },
+  { id: "session-history", pattern: /(?:^|[/\\])(?:sessions?|history|transcripts?)(?:[/\\]|\.(?:jsonl?|ndjson)\b)/iu },
+  { id: "competing-plan", pattern: /(?:implementation|generated|external)[-_ ]plan\.md\b/iu },
+];
+
+const structuredBindingPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
+  { id: "provider-mapping", pattern: /(?:^|[{,\n]\s*)["']?(?:provider|providers|providerMapping)["']?\s*[:=]\s*(?:\[[^\]\n]+\]|\{[^}\n]+\}|["'][^"'\n]+["']|[a-z0-9_-]+(?:\/[a-z0-9._-]+)?)(?=\s*(?:[,}\]]|$))/imu },
+  { id: "concrete-model", pattern: /(?:^|[{,\n]\s*)["']?(?:model|models|modelId|modelName)["']?\s*[:=]\s*(?:\[[^\]\n]+\]|\{[^}\n]+\}|["'][^"'\n]+["']|[a-z0-9_-]+(?:\/[a-z0-9._-]+)?)(?=\s*(?:[,}\]]|$))/imu },
+];
+
 const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
-  { id: "private-agent", pattern: /(?:^|[/\\])(?:personas?|private-agents?|\.pi[/\\]agents?)(?:[/\\]|$)/imu },
-  { id: "provider-mapping", pattern: /^\s*(?:provider|providers|providerMapping)\s*[:=]\s*(?:["'][^"'\n]+["']|[a-z0-9_-]+(?:\/[a-z0-9._-]+)?)\s*(?:[,}]|$)/imu },
-  { id: "concrete-model", pattern: /^\s*(?:model|modelId|modelName)\s*[:=]\s*(?:["'][^"'\n]+["']|[a-z0-9_-]+(?:\/[a-z0-9._-]+)?)\s*(?:[,}]|$)/imu },
-  { id: "credential", pattern: /(?:api[_-]?key|access[_-]?token|client[_-]?secret|authorization)\s*[:=]\s*["']?(?:bearer\s+)?[A-Za-z0-9_./+=-]{16,}/imu },
+  { id: "credential", pattern: /(?:api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*["']?(?=[A-Za-z0-9_./+=-]{24,})(?=[A-Za-z0-9_./+=-]*\d)[A-Za-z0-9_./+=-]+|authorization\s*[:=]\s*["']?(?:bearer|basic)\s+[A-Za-z0-9_./+=-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
   { id: "machine-path", pattern: /(?:^|[\s"'`(])(?:\/Users\/[^/\s]+\/|\/home\/[^/\s]+\/|[A-Za-z]:\\Users\\[^\\\s]+\\)/mu },
-  { id: "session-history", pattern: /(?:^|[/\\])(?:sessions?|history)(?:[/\\]|\.(?:jsonl?|ndjson)\b)/imu },
-  { id: "competing-plan", pattern: /(?:implementation|generated|external)[-_ ]plan\.md\b/imu },
   { id: "legacy-workflow", pattern: /\b(?:AgentFlow|Superpowers)\b/mu },
 ];
 
 export function scanPublicContent(contents: readonly PublicContent[]): void {
   for (const item of contents) {
     assertSafeRelativePath(item.path, "Public content path");
-    if (item.content.includes(0)) continue;
-    const text = `${item.path}\n${item.content.toString("utf8")}`;
+    for (const forbidden of forbiddenPathPatterns) {
+      if (forbidden.pattern.test(item.path)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);
+    }
+    const text = item.content.toString("utf8").replaceAll("\0", "\n");
+    if (/\.(?:json|ya?ml|md)$/iu.test(item.path)) {
+      for (const forbidden of structuredBindingPatterns) {
+        if (forbidden.pattern.test(text)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);
+      }
+    }
     for (const forbidden of forbiddenPatterns) {
+      const definesPrivacyPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";
+      const isApprovedPlanningHistory = item.path.startsWith("openspec/");
+      if (forbidden.id === "legacy-workflow" && (definesPrivacyPolicy || isApprovedPlanningHistory)) continue;
       if (forbidden.pattern.test(text)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);
     }
   }

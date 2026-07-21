@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { afterEach, expect, test } from "vitest";
 import {
@@ -11,6 +13,7 @@ import {
   validateStagedRelease,
 } from "../../src/release/index.js";
 
+const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
 
 async function temporaryDirectory(): Promise<string> {
@@ -40,6 +43,17 @@ async function fixtureRepository(): Promise<string> {
   await writeFile(join(root, "dist", "extension", "index.js"), "export default function horsepower() {}\n");
   await writeFile(join(root, "resources", "agents", "coder.md"), "---\nname: coder\nrole: Implement scoped changes\nrecommendedSlots: [craft]\ntools: [read, edit]\nstandards: [correctness]\n---\nImplement directly.\n");
   await writeFile(join(root, "resources", "skills", "horsepower", "SKILL.md"), "---\nname: horsepower\ndescription: Explicitly dispatch Horsepower workers.\n---\nUse `horsepower_subagent` only when explicit execution is useful.\n");
+  await Promise.all([
+    mkdir(join(root, "src"), { recursive: true }),
+    mkdir(join(root, "test", "fixtures"), { recursive: true }),
+    mkdir(join(root, "docs"), { recursive: true }),
+  ]);
+  await writeFile(join(root, "src", "public.ts"), "export const semanticSlot = 'craft';\n");
+  await writeFile(join(root, "test", "fixtures", "public.txt"), "model-neutral fixture\n");
+  await writeFile(join(root, "docs", "release.md"), "Public release documentation.\n");
+  await writeFile(join(root, ".gitignore"), "dist/\n");
+  await execFileAsync("git", ["init", "-q"], { cwd: root });
+  await execFileAsync("git", ["add", "."], { cwd: root });
   return root;
 }
 
@@ -116,10 +130,45 @@ test("refuses to clear unrelated output content", async () => {
   expect(await readFile(join(outputDir, "keep.txt"), "utf8")).toBe("owned by someone else");
 });
 
-test("requires the requested, package, and manifest versions to agree", async () => {
+test("requires strict SemVer and requested/package version agreement", async () => {
   const repositoryRoot = await fixtureRepository();
   await expect(buildRelease({ repositoryRoot, outputDir: join(await temporaryDirectory(), "out"), version: "1.2.4", runBuild: async () => {} }))
     .rejects.toThrow("Release version 1.2.4 does not match package version 1.2.3-alpha.1");
+  for (const version of ["01.2.3", "1.2.3-", "1.2.3-alpha..1", "1.2.3-01", "1.2.3+build..1"]) {
+    await expect(buildRelease({ repositoryRoot, outputDir: join(await temporaryDirectory(), version.replaceAll("/", "_")), version, runBuild: async () => {} }))
+      .rejects.toThrow(`Invalid release version: ${version}`);
+  }
+  await writeFile(join(repositoryRoot, "package.json"), JSON.stringify({
+    name: "horsepower", version: "01.2.3", private: true, type: "module", engines: { node: ">=22.19.0" },
+  }));
+  await expect(buildRelease({ repositoryRoot, outputDir: join(await temporaryDirectory(), "invalid-package"), version: "1.2.3", runBuild: async () => {} }))
+    .rejects.toThrow("Invalid package version: 01.2.3");
+});
+
+test("scans tracked source, documentation, tests, and rejects unclassified tracked files", async () => {
+  const repositoryRoot = await fixtureRepository();
+  const trackedLeaks = ["src/public.ts", "docs/release.md", "test/fixtures/public.txt"];
+  for (const [index, path] of trackedLeaks.entries()) {
+    const original = await readFile(join(repositoryRoot, path));
+    await writeFile(join(repositoryRoot, path), `credential ${["ghp", ""].join("_")}${"a".repeat(36)}\n`);
+    await expect(buildRelease({ repositoryRoot, outputDir: join(await temporaryDirectory(), `leak-${index}`), version: "1.2.3-alpha.1", runBuild: async () => {} }), path)
+      .rejects.toThrow(new RegExp(`Forbidden public content \\(credential\\).*${path.replaceAll("/", "\\/")}`, "u"));
+    await writeFile(join(repositoryRoot, path), original);
+  }
+
+  await writeFile(join(repositoryRoot, "mystery.private"), "not classified\n");
+  await execFileAsync("git", ["add", "mystery.private"], { cwd: repositoryRoot });
+  await expect(buildRelease({ repositoryRoot, outputDir: join(await temporaryDirectory(), "unknown"), version: "1.2.3-alpha.1", runBuild: async () => {} }))
+    .rejects.toThrow("Unclassified tracked repository file: mystery.private");
+});
+
+test("concurrent builds use isolated staging and remain deterministic", async () => {
+  const repositoryRoot = await fixtureRepository();
+  const outputParent = await temporaryDirectory();
+  const outputs = await Promise.all(Array.from({ length: 4 }, async (_, index) =>
+    buildRelease({ repositoryRoot, outputDir: join(outputParent, `concurrent-${index}`), version: "1.2.3-alpha.1", runBuild: async () => {} })));
+  const archives = await Promise.all(outputs.map(({ archivePath }) => readFile(archivePath)));
+  for (const archive of archives.slice(1)) expect(archive).toEqual(archives[0]);
 });
 
 test("strict staged validation rejects unexpected paths, links, and unsafe modes", async () => {
@@ -144,19 +193,72 @@ test("strict staged validation rejects unexpected paths, links, and unsafe modes
   void repositoryRoot;
 });
 
-test("archive inspection rejects traversal, absolute names, unsafe links, and special entries", async () => {
+test("archive inspection rejects hostile USTAR name/prefix combinations and malformed headers", async () => {
   const root = await temporaryDirectory();
   const samples = [
-    { name: "../escape", type: "0", error: "Archive path traversal" },
-    { name: "/absolute", type: "0", error: "Archive path must be relative" },
+    { name: "../escape", error: "Archive path traversal" },
+    { name: "/absolute", error: "Archive path must be relative" },
+    { name: "file", prefix: "../horsepower", error: "Archive path traversal" },
+    { name: "../file", prefix: "horsepower", error: "Archive path traversal" },
+    { name: "file", prefix: "/horsepower", error: "Archive path must be relative" },
+    { name: "", prefix: "horsepower", error: "Invalid archive USTAR path" },
+    { name: "horsepower/file\0ignored", error: "Invalid archive USTAR name" },
+    { name: "file", prefix: "horsepower\0ignored", error: "Invalid archive USTAR prefix" },
     { name: "horsepower/link", type: "2", link: "../../escape", error: "Archive links are not allowed" },
     { name: "horsepower/device", type: "3", error: "Unsupported archive entry type" },
-    { name: "horsepower/unsafe", type: "0", mode: 0o777, error: "Unsafe archive mode" },
+    { name: "horsepower/unsafe", mode: 0o777, error: "Unsafe archive mode" },
+    { name: "horsepower/file", sizeField: "77777777777\0", error: "Invalid archive size" },
+    { name: "horsepower/file", corruptChecksum: true, error: "Invalid archive header checksum" },
   ];
   for (const [index, sample] of samples.entries()) {
     const archive = join(root, `${index}.tar.gz`);
-    await writeFile(archive, makeHostileArchive(sample.name, sample.type, sample.link, sample.mode));
-    await expect(inspectReleaseArchive(archive)).rejects.toThrow(sample.error);
+    await writeFile(archive, makeHostileArchive(sample));
+    await expect(inspectReleaseArchive(archive), JSON.stringify(sample)).rejects.toThrow(sample.error);
+  }
+
+  const boundary = join(root, "boundary.tar.gz");
+  await writeFile(boundary, makeHostileArchive({ name: `horsepower/${"n".repeat(89)}`, prefix: "p".repeat(155) }));
+  await expect(inspectReleaseArchive(boundary)).rejects.toThrow("Unexpected archive root");
+});
+
+test("archive validation rejects duplicate, unexpected, missing, and conflicting directory layout", async () => {
+  const mutations: Array<{ name: string; error: string; mutate(entries: Awaited<ReturnType<typeof inspectReleaseArchive>>["entries"]): void }> = [
+    {
+      name: "duplicate entry",
+      error: "Archive entry layout mismatch",
+      mutate(entries) { entries.push({ ...entries.find((entry) => entry.path === "horsepower/bin")! }); },
+    },
+    {
+      name: "unexpected private directory",
+      error: "Archive entry layout mismatch",
+      mutate(entries) { entries.push({ path: "horsepower/personas", type: "directory", mode: 0o755, uid: 0, gid: 0, mtime: 0, content: Buffer.alloc(0) }); },
+    },
+    {
+      name: "missing directory",
+      error: "Archive entry layout mismatch",
+      mutate(entries) { entries.splice(entries.findIndex((entry) => entry.path === "horsepower/bin"), 1); },
+    },
+    {
+      name: "path/type conflict",
+      error: "Archive path/type conflict",
+      mutate(entries) { entries.find((entry) => entry.path === "horsepower/bin")!.type = "file"; },
+    },
+  ];
+  for (const mutation of mutations) {
+    const repositoryRoot = await fixtureRepository();
+    const builder = (await import("../../src/release/index.js")).createReleaseBuilder({
+      async inspectArchive(path) {
+        const inspected = await inspectReleaseArchive(path);
+        mutation.mutate(inspected.entries);
+        return inspected;
+      },
+    });
+    await expect(builder.build({
+      repositoryRoot,
+      outputDir: join(await temporaryDirectory(), mutation.name.replaceAll(" ", "-")),
+      version: "1.2.3-alpha.1",
+      runBuild: async () => {},
+    }), mutation.name).rejects.toThrow(mutation.error);
   }
 });
 
@@ -175,41 +277,69 @@ test("injects scanning at repository, stage, and archive boundaries", async () =
   expect(scans[2]).toContain("horsepower/release-manifest.json");
 });
 
-test("privacy scanner rejects seeded private data while accepting model-neutral resources", () => {
+test("privacy scanner rejects structured bindings, standalone credentials, NUL content, and private artifacts", () => {
+  const githubToken = `${["ghp", ""].join("_")}${"a".repeat(36)}`;
+  const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"private"}').toString("base64url")}.${"a".repeat(32)}`;
+  const authorization = ["Author", "ization"].join("");
   const forbidden = [
-    ["private agent", "resources/personas/executive.md"],
     ["provider mapping", "provider: secret-cloud"],
+    ["quoted provider", `{"provider": "secret-cloud"}`],
+    ["provider array", `providers: ["secret-cloud"]`],
     ["concrete model", "model: private-model-v9"],
-    ["credential", "api_key = 'synthetic-api-token'"],
-    ["token", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz"],
-    ["machine path", "/Users/alice/work/private"],
-    ["home path", "/home/alice/.config/private"],
-    ["session", ".pi/sessions/2026.jsonl"],
-    ["competing plan", "implementation-plan.md"],
+    ["quoted model", `{"modelId": "private-model-v9"}`],
+    ["model array", `models: ["private-model-v9"]`],
+    ["credential", `${["api", "key"].join("_")} = '${"a".repeat(24)}1'`],
+    ["token", `${authorization}: Bearer ${"a".repeat(26)}`],
+    ["standalone github", githubToken],
+    ["standalone openai", `${["s", "k"].join("")}-${"a".repeat(32)}`],
+    ["standalone slack", `${["xox", "b"].join("")}-${"1".repeat(12)}-${"a".repeat(24)}`],
+    ["standalone google", `${["AI", "za"].join("")}${"A".repeat(35)}`],
+    ["standalone jwt", jwt],
+    ["private key", `-----${["BE", "GIN"].join("")} PRIVATE KEY-----`],
+    ["cloud token", `${["AK", "IA"].join("")}${"A".repeat(16)}`],
+    ["nul credential", `safe\0${githubToken}`],
+    ["encoded basic secret", `${authorization}: Basic ${Buffer.from("user:long-private-password").toString("base64")}`],
+    ["machine path", ["", "Users", "alice", "work", "private"].join("/")],
+    ["home path", ["", "home", "alice", ".config", "private"].join("/")],
     ["legacy reference", "AgentFlow runtime"],
     ["forbidden workflow", "Superpowers process"],
   ] as const;
   for (const [label, content] of forbidden) {
-    expect(() => scanPublicContent([{ path: `${label}.txt`, content: Buffer.from(content) }])).toThrow(/Forbidden public content/u);
+    const extension = /provider|model/u.test(label) ? "yaml" : "txt";
+    expect(() => scanPublicContent([{ path: `${label}.${extension}`, content: Buffer.from(content) }]), label).toThrow(/Forbidden public content/u);
+  }
+  for (const path of ["resources/personas/executive.md", ".pi/sessions/2026.jsonl", "state/transcripts/run.ndjson", "implementation-plan.md"]) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from("otherwise harmless") }]), path).toThrow(/Forbidden public content/u);
   }
   expect(() => scanPublicContent([{ path: "resources/agents/coder.md", content: Buffer.from("role: Implement changes\nrecommendedSlots: [craft]\n") }])).not.toThrow();
   expect(() => scanPublicContent([{ path: "bin/horsepower", content: Buffer.from("return {\n  model: binding.model,\n  provider: resolved.provider,\n};\n") }])).not.toThrow();
 });
 
-function makeHostileArchive(name: string, type: string, link = "", mode = 0o644): Buffer {
+function makeHostileArchive(options: {
+  name: string;
+  prefix?: string;
+  type?: string;
+  link?: string;
+  mode?: number;
+  sizeField?: string;
+  corruptChecksum?: boolean;
+}): Buffer {
+  const { name, prefix = "", type = "0", link = "", mode = 0o644, sizeField = "00000000000\0" } = options;
   const header = Buffer.alloc(512);
-  header.write(name, 0, 100, "utf8");
+  Buffer.from(name).copy(header, 0, 0, 100);
   header.write(`${mode.toString(8).padStart(7, "0")}\0`, 100, 8, "ascii");
   header.write("0000000\0", 108, 8, "ascii");
   header.write("0000000\0", 116, 8, "ascii");
-  header.write("00000000000\0", 124, 12, "ascii");
+  header.write(sizeField, 124, 12, "ascii");
   header.write("00000000000\0", 136, 12, "ascii");
   header.fill(0x20, 148, 156);
   header.write(type, 156, 1, "ascii");
   header.write(link, 157, 100, "utf8");
   header.write("ustar\0", 257, 6, "ascii");
   header.write("00", 263, 2, "ascii");
+  Buffer.from(prefix).copy(header, 345, 0, 155);
   const sum = header.reduce((total, byte) => total + byte, 0);
   header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+  if (options.corruptChecksum === true) header[0] = (header[0] ?? 0) ^ 1;
   return gzipSync(Buffer.concat([header, Buffer.alloc(1024)]), { level: 9 });
 }

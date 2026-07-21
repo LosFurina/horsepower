@@ -118,11 +118,13 @@ test("hashes credential-bearing summary, evidence, and identifiers at the notifi
     .resolves.toMatchObject({ delivered: true });
   await expect(notifier.notify({ ...event, evidenceRefs: ["Authorization: Bearer leaked"] }))
     .resolves.toMatchObject({ delivered: true });
-  await expect(notifier.notify({ ...event, changeId: "synthetic-github-token" }))
+  const githubToken = `${["ghp", ""].join("_")}1234567890abcdefghijklmnop`;
+  await expect(notifier.notify({ ...event, changeId: githubToken }))
     .resolves.toMatchObject({ delivered: true });
   await expect(notifier.notify({ ...event, timestamp: "api_key=sk-live-leaked" }))
     .resolves.toMatchObject({ delivered: false, attempts: 0 });
-  expect(bodies.join("\n")).not.toMatch(/sk-live-secret|Bearer leaked|ghp_1234567890/u);
+  expect(bodies.join("\n")).not.toContain(githubToken);
+  expect(bodies.join("\n")).not.toMatch(/sk-live-secret|Bearer leaked/u);
 });
 
 test("rejects unknown, malformed, and scope-incompatible event fields", async () => {
