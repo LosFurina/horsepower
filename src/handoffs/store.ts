@@ -18,7 +18,7 @@ export interface ArtifactReference {
 }
 interface ArtifactRecord { path: string; sha256: string; bytes: number; mediaType: string; producer: HandoffProducer }
 interface HandoffManifest {
-  version: 1; projectId: string; runId: string; brief: ArtifactRecord; report: ArtifactRecord | null;
+  version: 1; projectId: string; runId: string; revision: number; brief: ArtifactRecord; report: ArtifactRecord | null;
   attachments: ArtifactRecord[]; terminal: { status: "completed" | "failed" | "canceled"; reportPresent: boolean } | null;
 }
 export interface CreateHandoffStoreOptions { stateRoot: string }
@@ -76,8 +76,9 @@ function artifactValue(value: unknown): ArtifactRecord {
 function parseManifest(raw: Buffer, expectedProject: string, expectedRun: string): HandoffManifest {
   let value: unknown; try { value = JSON.parse(decodeText(raw, "manifest")); } catch (cause) { if (cause instanceof SyntaxError) throw new Error("Malformed handoff manifest"); throw cause; }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid handoff manifest");
-  const record = value as Record<string, unknown>; exactKeys(record, ["version", "projectId", "runId", "brief", "report", "attachments", "terminal"], "root");
+  const record = value as Record<string, unknown>; exactKeys(record, ["version", "projectId", "runId", "revision", "brief", "report", "attachments", "terminal"], "root");
   if (record.version !== 1 || record.projectId !== expectedProject || record.runId !== expectedRun) throw new Error("Handoff manifest ownership mismatch");
+  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) throw new Error("Invalid handoff revision");
   if (!Array.isArray(record.attachments) || record.attachments.length > 16) throw new Error("Invalid handoff attachments");
   let terminal: HandoffManifest["terminal"] = null;
   if (record.terminal !== null) {
@@ -89,7 +90,7 @@ function parseManifest(raw: Buffer, expectedProject: string, expectedRun: string
   const report = record.report === null ? null : artifactValue(record.report);
   if (terminal && terminal.reportPresent !== (report !== null)) throw new Error("Handoff manifest report presence mismatch");
   if (terminal?.status === "completed" && !report) throw new Error("Completed handoff requires report metadata");
-  return { version: 1, projectId: expectedProject, runId: expectedRun, brief: artifactValue(record.brief), report, attachments: record.attachments.map(artifactValue), terminal };
+  return { version: 1, projectId: expectedProject, runId: expectedRun, revision: record.revision, brief: artifactValue(record.brief), report, attachments: record.attachments.map(artifactValue), terminal };
 }
 
 export function createHandoffStore(options: CreateHandoffStoreOptions) {
@@ -168,13 +169,31 @@ export function createHandoffStore(options: CreateHandoffStoreOptions) {
       try { await mkdir(p.runRoot, { mode: 0o700 }); } catch (cause) { if ((cause as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Handoff run already exists: ${input.runId}`); throw cause; }
       await chmod(p.runRoot, 0o700);
       const briefRecord = artifact("brief.md", brief, "text/markdown; charset=utf-8", input.producer);
-      const manifest: HandoffManifest = { version: 1, projectId: p.projectId, runId: input.runId, brief: briefRecord, report: null, attachments: [], terminal: null };
+      const manifest: HandoffManifest = { version: 1, projectId: p.projectId, runId: input.runId, revision: 0, brief: briefRecord, report: null, attachments: [], terminal: null };
       try { await atomic(join(p.runRoot, "brief.md"), brief); await writeManifest(p.manifest, manifest); }
       catch (cause) { await rm(p.runRoot, { recursive: true, force: true }); throw cause; }
       return { reference: { projectId: p.projectId, runId: input.runId }, worker: { briefPath: join(p.runRoot, "brief.md"), reportPath: join(p.runRoot, "report.md") } };
     },
-    async validateReport(input: { projectPath: string; runId: string; producer: HandoffProducer }): Promise<ArtifactReference> {
-      const { manifest, p } = await readOwned(input.projectPath, input.runId); const data = await readRegular(join(p.runRoot, "report.md"), "Managed report", ONE_MIB); const text = decodeText(data, "Managed report");
+    async prepareMessage(input: { projectPath: string; runId: string; brief: string; producer: HandoffProducer }) {
+      const { manifest, p } = await readOwned(input.projectPath, input.runId);
+      const brief = encodeText(input.brief, "Handoff brief");
+      const next: HandoffManifest = {
+        ...manifest,
+        revision: manifest.revision + 1,
+        brief: artifact("brief.md", brief, "text/markdown; charset=utf-8", input.producer),
+        report: null,
+        terminal: null,
+      };
+      if (total(next) > RUN_LIMIT) throw new Error("Handoff run exceeds 20 MiB");
+      await atomic(join(p.runRoot, "brief.md"), brief);
+      await rm(join(p.runRoot, "report.md"), { force: true });
+      await writeManifest(p.manifest, next);
+      return { worker: { briefPath: join(p.runRoot, "brief.md"), reportPath: join(p.runRoot, "report.md") }, reportRevision: next.revision };
+    },
+    async validateReport(input: { projectPath: string; runId: string; producer: HandoffProducer; expectedRevision?: number }): Promise<ArtifactReference> {
+      const { manifest, p } = await readOwned(input.projectPath, input.runId);
+      if (input.expectedRevision !== undefined && manifest.revision !== input.expectedRevision) throw new Error("Managed report revision mismatch");
+      const data = await readRegular(join(p.runRoot, "report.md"), "Managed report", ONE_MIB); const text = decodeText(data, "Managed report");
       manifest.report = artifact("report.md", data, "text/markdown; charset=utf-8", input.producer); manifest.terminal = { status: "completed", reportPresent: true };
       if (total(manifest) > RUN_LIMIT) throw new Error("Handoff run exceeds 20 MiB"); await writeManifest(p.manifest, manifest);
       return { projectId: p.projectId, runId: input.runId, artifactId: "report", sha256: manifest.report.sha256, bytes: data.length, mediaType: manifest.report.mediaType, summary: summary(text) };
@@ -182,6 +201,7 @@ export function createHandoffStore(options: CreateHandoffStoreOptions) {
     async addAttachment(input: { projectPath: string; runId: string; name: string; content: string | Uint8Array; mediaType: string; producer: HandoffProducer }): Promise<ArtifactReference> {
       validId(input.name, "attachment name"); if (input.name === MANIFEST || input.name === "brief.md" || input.name === "report.md") throw new Error("Reserved attachment name");
       const { manifest, p } = await readOwned(input.projectPath, input.runId);
+      if (manifest.attachments.some((item) => item.path === input.name)) throw new Error(`Handoff attachment already exists: ${input.name}`);
       const data = typeof input.content === "string" ? Buffer.from(input.content, "utf8") : Buffer.from(input.content); if (data.length > TEN_MIB) throw new Error("Handoff attachment exceeds 10 MiB");
       if (manifest.attachments.length >= 16) throw new Error("Handoff permits at most 16 attachments");
       if (!input.mediaType) throw new Error("Attachment media type is required"); const record = artifact(input.name, data, input.mediaType, input.producer); const next = { ...manifest, attachments: [...manifest.attachments, record] };
@@ -189,8 +209,18 @@ export function createHandoffStore(options: CreateHandoffStoreOptions) {
       try { await writeManifest(p.manifest, next); } catch (cause) { await rm(join(p.runRoot, input.name), { force: true }); throw cause; }
       return { projectId: p.projectId, runId: input.runId, artifactId: input.name, sha256: record.sha256, bytes: data.length, mediaType: input.mediaType, summary: input.name };
     },
-    async recordTerminal(input: { projectPath: string; runId: string; status: "failed" | "canceled" }) {
-      const { manifest, p } = await readOwned(input.projectPath, input.runId); manifest.terminal = { status: input.status, reportPresent: manifest.report !== null }; await writeManifest(p.manifest, manifest);
+    async recordTerminal(input: { projectPath: string; runId: string; status: "failed" | "canceled"; producer?: HandoffProducer }) {
+      const { manifest, p } = await readOwned(input.projectPath, input.runId);
+      try {
+        const data = await readRegular(join(p.runRoot, "report.md"), "Managed report", ONE_MIB);
+        decodeText(data, "Managed report");
+        manifest.report = artifact("report.md", data, "text/markdown; charset=utf-8", input.producer ?? { kind: "worker", id: "unknown" });
+      } catch (cause) {
+        if (!(cause as Error).message.includes("is missing")) throw cause;
+        manifest.report = null;
+      }
+      manifest.terminal = { status: input.status, reportPresent: manifest.report !== null };
+      await writeManifest(p.manifest, manifest);
     },
     async inspect(input: { projectPath: string; runId: string }) {
       const { manifest, p } = await readOwned(input.projectPath, input.runId); await validateArtifacts(p, manifest);

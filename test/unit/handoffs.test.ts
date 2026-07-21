@@ -72,6 +72,25 @@ test("bounds attachments and total run size, and records truthful terminal absen
   await expect(store.addAttachment({ projectPath: project, runId: "total", name: "second.bin", content: Buffer.alloc(10 * 1024 * 1024), mediaType: "application/octet-stream", producer })).rejects.toThrow("20 MiB");
 });
 
+test("records a worker-written report truthfully when failure happens before validation", async () => {
+  const { store, project } = await fixture();
+  const created = await store.create({ projectPath: project, runId: "failed-report", brief: "brief", producer });
+  await writeFile(created.worker.reportPath, "partial evidence", { mode: 0o600 });
+  await store.recordTerminal({ projectPath: project, runId: "failed-report", status: "failed", producer: { kind: "worker", id: "w" } });
+  expect(await store.inspect({ projectPath: project, runId: "failed-report" })).toMatchObject({
+    terminal: { status: "failed", reportPresent: true },
+    report: { path: "report.md", producer: { kind: "worker", id: "w" } },
+  });
+});
+
+test("rejects duplicate attachment names without corrupting the run", async () => {
+  const { store, project } = await fixture();
+  await store.create({ projectPath: project, runId: "duplicates", brief: "brief", producer });
+  await store.addAttachment({ projectPath: project, runId: "duplicates", name: "same.txt", content: "first", mediaType: "text/plain", producer });
+  await expect(store.addAttachment({ projectPath: project, runId: "duplicates", name: "same.txt", content: "second", mediaType: "text/plain", producer })).rejects.toThrow("already exists");
+  expect(await store.inspect({ projectPath: project, runId: "duplicates" })).toMatchObject({ attachments: [{ path: "same.txt", bytes: 5 }] });
+});
+
 test("lists, inspects and cleans only verified terminal owned runs", async () => {
   const { root, store, project } = await fixture();
   await store.create({ projectPath: project, runId: "running", brief: "brief", producer });

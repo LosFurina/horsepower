@@ -46,8 +46,9 @@ export interface OrchestrationOptions {
   projectId?: string;
   trackSettlement?: (settlement: Promise<unknown>) => void;
   createHandoff?: (input: { projectPath: string; runId: string; brief: string; producer: { kind: "captain"; id: string } }) => Promise<{ worker: { briefPath: string; reportPath: string }; reference: unknown }>;
-  validateHandoffReport?: (input: { projectPath: string; runId: string; producer: { kind: "worker"; id: string } }) => Promise<unknown>;
-  recordHandoffTerminal?: (input: { projectPath: string; runId: string; status: "failed" | "canceled" }) => Promise<unknown>;
+  prepareHandoffMessage?: (input: { projectPath: string; runId: string; brief: string; producer: { kind: "captain"; id: string } }) => Promise<{ worker: { briefPath: string; reportPath: string }; reportRevision: number }>;
+  validateHandoffReport?: (input: { projectPath: string; runId: string; producer: { kind: "worker"; id: string }; expectedRevision?: number }) => Promise<unknown>;
+  recordHandoffTerminal?: (input: { projectPath: string; runId: string; status: "failed" | "canceled"; producer?: { kind: "worker"; id: string } }) => Promise<unknown>;
 }
 
 function required(input: Record<string, unknown>, field: string): string {
@@ -310,6 +311,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         const run = options.beginDispatch({ changeId: changeId!, projectId: options.projectId ?? cwd, summary: `${action} ${workerId}` });
         const managed = action === "send" && handoffMode === "managed";
         let handoffRunId: string | undefined;
+        let reportRevision: number | undefined;
         let dispatchMessage = message;
         let immediate: unknown;
         try {
@@ -318,6 +320,9 @@ export function createOrchestration(options: OrchestrationOptions) {
               const worker = dependency(options.statusWorker, "statusWorker")(workerId) as { handoffMode?: unknown; handoffRunId?: unknown };
               if (worker.handoffMode !== "managed" || typeof worker.handoffRunId !== "string") throw new Error(`Persistent worker ${workerId} has no managed handoff association`);
               handoffRunId = worker.handoffRunId;
+              const workspace = await dependency(options.prepareHandoffMessage, "prepareHandoffMessage")({ projectPath: options.projectId ?? cwd, runId: handoffRunId, brief: message, producer: { kind: "captain", id: "captain" } });
+              reportRevision = workspace.reportRevision;
+              dispatchMessage = `Read your assigned brief at ${workspace.worker.briefPath}. Write the completed report to ${workspace.worker.reportPath}.`;
             } else {
               handoffRunId = run.runId;
               const workspace = await dependency(options.createHandoff, "createHandoff")({ projectPath: options.projectId ?? cwd, runId: handoffRunId, brief: message, producer: { kind: "captain", id: "captain" } });
@@ -348,12 +353,12 @@ export function createOrchestration(options: OrchestrationOptions) {
         const settle = async () => {
           try {
             const completed = await waitForMessage(workerId, messageId);
-            const evidence = managed && handoffRunId ? await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: handoffRunId, producer: { kind: "worker", id: workerId } }) : undefined;
+            const evidence = managed && handoffRunId ? await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: handoffRunId, producer: { kind: "worker", id: workerId }, ...(reportRevision === undefined ? {} : { expectedRevision: reportRevision }) }) : undefined;
             await options.reportDispatchTerminal({ runId: run.runId, status: "completed", summary: `${action} completed`, ...(evidence ? { evidenceRefs: [JSON.stringify(evidence)] } : {}) });
-            return evidence ? { result: completed, handoff: evidence } : completed;
+            return evidence ? { handoff: evidence } : completed;
           } catch (cause) {
             const status = messageStatus(workerId, messageId);
-            if (managed && handoffRunId && options.recordHandoffTerminal) await options.recordHandoffTerminal({ projectPath: options.projectId ?? cwd, runId: handoffRunId, status: status === "canceled" ? "canceled" : "failed" }).catch(() => undefined);
+            if (managed && handoffRunId && options.recordHandoffTerminal) await options.recordHandoffTerminal({ projectPath: options.projectId ?? cwd, runId: handoffRunId, status: status === "canceled" ? "canceled" : "failed", producer: { kind: "worker", id: workerId } }).catch(() => undefined);
             await options.reportDispatchTerminal({
               runId: run.runId,
               status: status === "canceled" ? "canceled" : "failed",
@@ -377,14 +382,14 @@ export function createOrchestration(options: OrchestrationOptions) {
             });
             if ("timedOut" in waited) {
               void settlement.catch(() => undefined);
-              return { runId: run.runId, result: immediate, timedOut: true };
+              return { runId: run.runId, result: managed ? { messageId } : immediate, timedOut: true };
             }
             return { runId: run.runId, result: waited.result };
           }
           return { runId: run.runId, result: await settlement };
         }
         void settlement.catch(() => undefined);
-        return { runId: run.runId, result: immediate };
+        return { runId: run.runId, result: managed ? { messageId } : immediate };
       }
 
       throw new Error(`Unsupported orchestration action: ${action}`);

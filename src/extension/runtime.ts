@@ -183,6 +183,7 @@ export class HorsepowerRuntime {
       identityForRun: (runId) => this.#lifecycle.identity(runId),
       projectId,
       createHandoff: (input) => handoffs.create(input),
+      prepareHandoffMessage: (input) => handoffs.prepareMessage(input),
       validateHandoffReport: (input) => handoffs.validateReport(input),
       recordHandoffTerminal: (input) => handoffs.recordTerminal(input),
       trackSettlement: (settlement) => { this.#track(settlement); },
