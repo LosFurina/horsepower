@@ -133,6 +133,40 @@ test("configure transactionally updates selected global bindings", async () => {
   expect((await run(["configure", "--craft", "project/craft", "--json"])).exitCode).toBe(2);
 });
 
+test("slot mutations validate prospective effective state before one target write", async () => {
+  const writes: Array<readonly { path: string; value: Record<string, unknown> }[]> = [];
+  const { homeDir, cwd, run } = await harness({
+    writeConfigs: async (entries: readonly { path: string; value: Record<string, unknown> }[]) => {
+      writes.push(entries);
+      const { writeJsonObjects } = await import("../../src/config/json-store.js");
+      await writeJsonObjects(entries);
+    },
+  });
+  await run(setupArgs);
+  writes.length = 0;
+  const globalPath = join(homeDir, ".pi/agent/horsepower/model-slots.json");
+  const projectPath = join(cwd, ".pi/horsepower/model-slots.json");
+  await mkdir(dirname(projectPath), { recursive: true });
+  await writeFile(projectPath, JSON.stringify({ slots: { craft: { fallback: "missing" } } }));
+  const before = await readFile(globalPath);
+
+  for (const argv of [
+    ["set", "vision", "--fallback", "utility", "--json"],
+    ["unset", "utility", "--json"],
+    ["configure", "--craft", "project/craft", "--craft-thinking", "max", "--json"],
+  ]) {
+    expect(await run(argv), argv[0]).toMatchObject({ exitCode: 2 });
+    expect(await readFile(globalPath), argv[0]).toEqual(before);
+  }
+  expect(writes).toEqual([]);
+
+  await writeFile(projectPath, JSON.stringify({ slots: {} }));
+  expect(await run(["set", "vision", "--fallback", "utility", "--json"])).toMatchObject({ exitCode: 0 });
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toHaveLength(1);
+  expect(writes[0]![0]!.path).toBe(globalPath);
+});
+
 test("slot set/unset validates through the registry and reports deterministic precedence/revision", async () => {
   const { run } = await harness();
   await run(setupArgs);
@@ -151,6 +185,52 @@ test("slot set/unset validates through the registry and reports deterministic pr
   expect((await run(["unset", "craft", "--scope", "project", "--json"]))).toMatchObject({ exitCode: 0 });
   expect(JSON.parse((await run(["slots", "--json"])).stdout).data.effective.craft.model).toBe("provider/craft");
   expect((await run(["unset", "utility", "--json"]))).toMatchObject({ exitCode: 2 });
+});
+
+test("webhook configure validates the complete prospective runtime settings before writing", async () => {
+  const writes: Array<readonly { path: string; value: Record<string, unknown> }[]> = [];
+  const { homeDir, run } = await harness({ writeConfigs: async (entries: readonly { path: string; value: Record<string, unknown> }[]) => { writes.push(entries); } });
+  const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  await mkdir(dirname(settingsPath), { recursive: true });
+  for (const [knownInvalid, expected] of [
+    [{ notifications: { change: "invalid", dispatch: false, future: { keep: true } } }, "notifications.change must be boolean"],
+    [{ enabled: "invalid", notifications: { change: true } }, "enabled must be boolean"],
+  ] as const) {
+    const bytes = Buffer.from(JSON.stringify({
+      futureTopLevel: { keep: true },
+      webhook: {
+        enabled: true,
+        url: "https://old.example/hook",
+        auth: { mode: "none", future: { keep: true } },
+        ...knownInvalid,
+      },
+    }));
+    await writeFile(settingsPath, bytes);
+
+    const result = await run(["webhook", "configure", "--url", "https://new.example/hook", "--auth", "none", "--json"]);
+    expect(result).toMatchObject({ exitCode: 2, stdout: "" });
+    expect(result.stderr).toContain(expected);
+    expect(await readFile(settingsPath)).toEqual(bytes);
+    expect(writes).toEqual([]);
+  }
+});
+
+test("webhook configure and runtime parser accept only HTTPS or local HTTP", async () => {
+  const { homeDir, run } = await harness();
+  const { parseWebhookSettings } = await import("../../src/config/webhook.js");
+  for (const url of [
+    "ftp://localhost/hook",
+    "file://localhost/hook",
+    "ws://localhost/hook",
+    "ftp://127.0.0.1/hook",
+  ]) {
+    expect(await run(["webhook", "configure", "--url", url, "--auth", "none", "--json"]), url).toMatchObject({ exitCode: 2 });
+    expect(() => parseWebhookSettings({ enabled: true, url, auth: { mode: "none" } }), url).toThrow("HTTPS or local HTTP");
+  }
+  for (const url of ["http://localhost/hook", "http://127.0.0.1/hook", "https://example.test/hook"]) {
+    expect(await run(["webhook", "configure", "--url", url, "--auth", "none", "--json"]), url).toMatchObject({ exitCode: 0 });
+  }
+  expect(JSON.parse(await readFile(join(homeDir, ".pi/agent/horsepower/settings.json"), "utf8")).webhook.url).toBe("https://example.test/hook");
 });
 
 test("webhook configure and disable deep-patch unknown nested settings", async () => {
@@ -359,6 +439,44 @@ test("webhook test sends HMAC and Bearer authentication headers", async () => {
   expect(new Headers(requests[1]!.headers).get("authorization")).toBe("Bearer bearer-value");
 });
 
+test("setup validates all existing config and settings before any write", async () => {
+  for (const invalid of ["malformed-settings", "settings-directory", "settings-symlink", "project-slots"] as const) {
+    const writes: Array<readonly { path: string; value: Record<string, unknown> }[]> = [];
+    const { homeDir, cwd, root, run } = await harness({ writeConfigs: async (entries: readonly { path: string; value: Record<string, unknown> }[]) => { writes.push(entries); } });
+    const slotsPath = join(homeDir, ".pi/agent/horsepower/model-slots.json");
+    const settingsPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+    await mkdir(dirname(slotsPath), { recursive: true });
+    const originalSlots = Buffer.from('{"future":{"keep":true}}\n');
+    await writeFile(slotsPath, originalSlots);
+    if (invalid === "malformed-settings") await writeFile(settingsPath, '{"webhook":');
+    if (invalid === "settings-directory") await mkdir(settingsPath);
+    if (invalid === "settings-symlink") {
+      const external = join(root, "external-settings.json");
+      await writeFile(external, "{}\n");
+      await symlink(external, settingsPath);
+    }
+    if (invalid === "project-slots") {
+      const projectSlots = join(cwd, ".pi/horsepower/model-slots.json");
+      await mkdir(dirname(projectSlots), { recursive: true });
+      await writeFile(projectSlots, JSON.stringify({ slots: { craft: { fallback: "missing" } } }));
+    }
+
+    expect(await run(setupArgs), invalid).toMatchObject({ exitCode: 2 });
+    expect(await readFile(slotsPath), invalid).toEqual(originalSlots);
+    expect(writes, invalid).toEqual([]);
+  }
+});
+
+test("setup commits both initialized files in one configuration transaction", async () => {
+  const writes: Array<readonly { path: string; value: Record<string, unknown> }[]> = [];
+  const { run } = await harness({
+    writeConfigs: async (entries: readonly { path: string; value: Record<string, unknown> }[]) => { writes.push(entries); },
+  });
+  expect(await run(setupArgs)).toMatchObject({ exitCode: 0 });
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toHaveLength(2);
+});
+
 test("doctor reports configuration, notifications, OpenSpec, skipped models, and ownership actionably", async () => {
   const { run } = await harness({ models: undefined, runOpenSpec: async (args: readonly string[]) => args[0] === "--version"
     ? { code: 127, stdout: "", stderr: "not found" }
@@ -503,6 +621,26 @@ test("preflight rejects symlinked manifests, intermediate directories, and inval
     }
     const expected = hostile === "expected-version" ? "01.0.0" : hostile === "manifest-version" ? "0.1.0" : manifestVersion;
     expect(await run(["preflight", staged, "--version", expected, "--json"]), hostile).toMatchObject({ exitCode: hostile === "expected-version" ? 2 : 1 });
+  }
+});
+
+test("preflight rejects every symlinked stable-link parent component", async () => {
+  for (const parent of [".local", ".local/bin", ".pi", ".pi/agent", ".pi/agent/extensions", ".pi/agent/skills"] as const) {
+    const { homeDir, root, run } = await harness();
+    const staged = join(root, `staged-${parent.replaceAll("/", "-")}`);
+    await writeRelease(staged, "0.1.0");
+    const external = join(root, `external-${parent.replaceAll("/", "-")}`);
+    await mkdir(external, { recursive: true });
+    const marker = join(external, "keep");
+    await writeFile(marker, "external data");
+    const link = join(homeDir, parent);
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(external, link);
+
+    const result = await run(["preflight", staged, "--version", "0.1.0", "--json"]);
+    expect(result, parent).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(await readFile(marker, "utf8"), parent).toBe("external data");
+    expect(await readlink(link), parent).toBe(external);
   }
 });
 

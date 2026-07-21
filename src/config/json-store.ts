@@ -52,26 +52,77 @@ function rejectUndefined(value: unknown, seen = new Set<object>()): void {
   for (const nested of Object.values(value)) rejectUndefined(nested, seen);
 }
 
-export async function writeJsonObject(path: string, value: JsonObject): Promise<void> {
-  const directory = dirname(path);
-  const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
-  await ensurePrivateDirectory(directory);
+export interface JsonWrite {
+  path: string;
+  value: JsonObject;
+}
 
-  let committed = false;
+async function stageJsonWrite(entry: JsonWrite): Promise<string> {
+  rejectUndefined(entry.value);
+  const temporaryPath = join(dirname(entry.path), `.${basename(entry.path)}.${randomUUID()}.tmp`);
   try {
     const file = await open(temporaryPath, "wx", 0o600);
     try {
       await file.chmod(0o600);
-      await file.writeFile(`${JSON.stringify(value, undefined, 2)}\n`, "utf8");
+      await file.writeFile(`${JSON.stringify(entry.value, undefined, 2)}\n`, "utf8");
       await file.sync();
     } finally {
       await file.close();
     }
-    await rename(temporaryPath, path);
-    committed = true;
-  } finally {
-    if (!committed) await rm(temporaryPath, { force: true });
+    return temporaryPath;
+  } catch (cause) {
+    await rm(temporaryPath, { force: true });
+    throw cause;
   }
+}
+
+export async function writeJsonObjects(entries: readonly JsonWrite[]): Promise<void> {
+  if (entries.length === 0) return;
+  const directory = dirname(entries[0]!.path);
+  if (entries.some((entry) => dirname(entry.path) !== directory)) {
+    throw new Error("Configuration transaction paths must share a directory");
+  }
+  if (new Set(entries.map((entry) => entry.path)).size !== entries.length) {
+    throw new Error("Configuration transaction paths must be unique");
+  }
+  for (const entry of entries) rejectUndefined(entry.value);
+  await ensurePrivateDirectory(directory);
+
+  const staged: Array<{ entry: JsonWrite; temporaryPath: string; backupPath: string; hadOriginal: boolean }> = [];
+  try {
+    for (const entry of entries) {
+      const temporaryPath = await stageJsonWrite(entry);
+      let hadOriginal = true;
+      try { await lstat(entry.path); } catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") hadOriginal = false; else throw cause; }
+      staged.push({ entry, temporaryPath, backupPath: join(directory, `.${basename(entry.path)}.${randomUUID()}.bak`), hadOriginal });
+    }
+
+    let installed = 0;
+    try {
+      for (const item of staged) if (item.hadOriginal) await rename(item.entry.path, item.backupPath);
+      for (const item of staged) {
+        await rename(item.temporaryPath, item.entry.path);
+        installed += 1;
+      }
+      for (const item of staged) if (item.hadOriginal) await rm(item.backupPath, { force: true });
+    } catch (cause) {
+      for (const item of staged.slice(0, installed).reverse()) await rm(item.entry.path, { force: true });
+      for (const item of staged) {
+        if (!item.hadOriginal) continue;
+        try { await rename(item.backupPath, item.entry.path); } catch { /* preserve the original failure */ }
+      }
+      throw cause;
+    }
+  } finally {
+    await Promise.all(staged.flatMap((item) => [
+      rm(item.temporaryPath, { force: true }),
+      rm(item.backupPath, { force: true }),
+    ]));
+  }
+}
+
+export async function writeJsonObject(path: string, value: JsonObject): Promise<void> {
+  await writeJsonObjects([{ path, value }]);
 }
 
 function isJsonObject(value: unknown): value is JsonObject {

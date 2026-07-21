@@ -41,14 +41,55 @@ export function redactCredentials(value: unknown, key = "", insideAuth = false):
   ]));
 }
 
+export function validateWebhookUrl(value: string): URL {
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error("Invalid Horsepower webhook configuration: url is invalid"); }
+  if (parsed.username || parsed.password) {
+    throw new Error("Invalid Horsepower webhook configuration: url must not contain credentials");
+  }
+  const localHttp = parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
+  if (parsed.protocol !== "https:" && !localHttp) {
+    throw new Error("Invalid Horsepower webhook configuration: url must use HTTPS or local HTTP");
+  }
+  return parsed;
+}
+
 export interface ParsedWebhook {
   config: WebhookNotifierOptions["config"];
   notifications: { change?: boolean; dispatch?: boolean };
 }
 
+function validateWebhookShape(value: JsonObject, label: string): void {
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+    throw new Error(`Invalid Horsepower webhook configuration: ${label}enabled must be boolean`);
+  }
+  const notifications = settingObject(value.notifications, `${label}notifications`);
+  if (notifications.change !== undefined && typeof notifications.change !== "boolean") {
+    throw new Error(`Invalid Horsepower webhook configuration: ${label}notifications.change must be boolean`);
+  }
+  if (notifications.dispatch !== undefined && typeof notifications.dispatch !== "boolean") {
+    throw new Error(`Invalid Horsepower webhook configuration: ${label}notifications.dispatch must be boolean`);
+  }
+  if (value.auth !== undefined) parseWebhookAuth(value.auth);
+}
+
+function parseWebhookAuth(authValue: unknown): WebhookAuth {
+  if (!isObject(authValue)) throw new Error("Invalid Horsepower webhook configuration: auth is required");
+  if (authValue.mode === "none" && authValue.secret === undefined && authValue.token === undefined) return { mode: "none" };
+  if (authValue.mode === "hmac" && typeof authValue.secret === "string" && authValue.secret.length > 0 && authValue.token === undefined) return { mode: "hmac", secret: authValue.secret };
+  if (authValue.mode === "bearer" && typeof authValue.token === "string" && authValue.token.length > 0 && authValue.secret === undefined) return { mode: "bearer", token: authValue.token };
+  throw new Error("Invalid Horsepower webhook configuration: auth credentials are missing, invalid, or incompatible");
+}
+
+export function validateWebhookSettingsShape(value: unknown, label = ""): void {
+  validateWebhookShape(settingObject(value, `${label}webhook`), label);
+}
+
 export function parseWebhookSettings(globalValue: unknown, projectValue?: unknown): ParsedWebhook | undefined {
   const global = settingObject(globalValue, "webhook");
   const project = settingObject(projectValue, "project webhook");
+  validateWebhookShape(global, "");
+  validateWebhookShape(project, "project ");
   if (project.enabled === false || (project.enabled === undefined && global.enabled === false)) return undefined;
   if (Object.keys(global).length === 0 && Object.keys(project).length === 0) return undefined;
 
@@ -63,21 +104,8 @@ export function parseWebhookSettings(globalValue: unknown, projectValue?: unknow
   if (typeof merged.url !== "string" || !merged.url) {
     throw new Error("Invalid Horsepower webhook configuration: url is required");
   }
-  let parsedUrl: URL;
-  try { parsedUrl = new URL(merged.url); } catch { throw new Error("Invalid Horsepower webhook configuration: url is invalid"); }
-  if (parsedUrl.username || parsedUrl.password) {
-    throw new Error("Invalid Horsepower webhook configuration: url must not contain credentials");
-  }
-  if (parsedUrl.protocol !== "https:" && parsedUrl.hostname !== "localhost" && parsedUrl.hostname !== "127.0.0.1") {
-    throw new Error("Invalid Horsepower webhook configuration: url must use HTTPS");
-  }
-  const authValue = merged.auth;
-  if (!isObject(authValue)) throw new Error("Invalid Horsepower webhook configuration: auth is required");
-  let auth: WebhookAuth;
-  if (authValue.mode === "none" && authValue.secret === undefined && authValue.token === undefined) auth = { mode: "none" };
-  else if (authValue.mode === "hmac" && typeof authValue.secret === "string" && authValue.secret.length > 0 && authValue.token === undefined) auth = { mode: "hmac", secret: authValue.secret };
-  else if (authValue.mode === "bearer" && typeof authValue.token === "string" && authValue.token.length > 0 && authValue.secret === undefined) auth = { mode: "bearer", token: authValue.token };
-  else throw new Error("Invalid Horsepower webhook configuration: auth credentials are missing, invalid, or incompatible");
+  validateWebhookUrl(merged.url);
+  const auth = parseWebhookAuth(merged.auth);
 
   const notifications = settingObject(merged.notifications, "notifications");
   if (notifications.change !== undefined && typeof notifications.change !== "boolean") {

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, readlink, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
-import { readJsonObject, writeJsonObject, type JsonObject } from "../config/json-store.js";
+import { readJsonObject, writeJsonObjects, type JsonObject, type JsonWrite } from "../config/json-store.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
-import { parseWebhookSettings, redactCredentials } from "../config/webhook.js";
+import { parseWebhookSettings, redactCredentials, validateWebhookSettingsShape, validateWebhookUrl } from "../config/webhook.js";
 import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-notifier.js";
 import { validateOpenSpecInstallation } from "../openspec/boundary.js";
 import { createSlotRegistry, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
@@ -21,6 +21,7 @@ export interface CliOptions {
   now?: () => Date;
   interactive?: boolean;
   confirm?: (message: string) => Promise<boolean | undefined>;
+  writeConfigs?: (entries: readonly JsonWrite[]) => Promise<void>;
 }
 
 class UsageError extends Error {}
@@ -89,10 +90,21 @@ function scopePath(scope: string | undefined, paths: ReturnType<typeof resolveHo
 async function configurations(paths: ReturnType<typeof resolveHorsepowerPaths>): Promise<{ global: SlotConfiguration; project: SlotConfiguration }> {
   return { global: await optionalObject(paths.global.modelSlots), project: await optionalObject(paths.project.modelSlots) };
 }
-async function updateSlot(path: string, id: string, binding: SlotBinding | undefined): Promise<JsonObject> {
-  const current = await optionalObject(path); const slots = { ...object(current.slots) };
+async function existingConfiguration(path: string): Promise<JsonObject> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new Error(`Configuration file must not be a symbolic link: ${path}`);
+    if (!info.isFile()) throw new Error(`Configuration path is not a regular file: ${path}`);
+    return await readJsonObject(path);
+  } catch (cause) {
+    if (absent(cause)) return {};
+    throw cause;
+  }
+}
+function withSlot(current: JsonObject, id: string, binding: SlotBinding | undefined): JsonObject {
+  const slots = { ...object(current.slots) };
   if (binding) slots[id] = binding; else delete slots[id];
-  const next = { ...current, slots }; await writeJsonObject(path, next); return next;
+  return { ...current, slots };
 }
 function redactSettings(raw: JsonObject): JsonObject {
   return redactCredentials(raw) as JsonObject;
@@ -258,11 +270,15 @@ async function versionsState(versions: string): Promise<{ status: "absent" | "ow
 export function createCli(options: CliOptions) {
   const paths = resolveHorsepowerPaths({ homeDir: options.homeDir, projectDir: options.cwd });
   const topology = installTopology(options.homeDir);
+  const writeConfigs = options.writeConfigs ?? writeJsonObjects;
 
-  async function slotsData() {
-    const config = await configurations(paths); const registry = createSlotRegistry({ ...config, ...(options.models ? { models: options.models } : {}) });
+  function registryData(config: { global: SlotConfiguration; project: SlotConfiguration }) {
+    const registry = createSlotRegistry({ ...config, ...(options.models ? { models: options.models } : {}) });
     const resolved = Object.fromEntries(Object.keys(registry.effective).sort().map((id) => [id, registry.resolve(id)]));
     return { effective: registry.effective, resolved, revision: registry.revision };
+  }
+  async function slotsData() {
+    return registryData(await configurations(paths));
   }
   async function setup(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"], []);
@@ -273,11 +289,22 @@ export function createCli(options: CliOptions) {
       if (!model || !thinking) throw new UsageError(`setup requires --${id} and --${id}-thinking`);
       slots[id] = { model, thinking: thinking as ThinkingLevel };
     }
-    try { createSlotRegistry({ global: { slots }, ...(options.models ? { models: options.models } : {}) }); }
-    catch (cause) { throw new UsageError((cause as Error).message); }
-    const current = await optionalObject(paths.global.modelSlots); await writeJsonObject(paths.global.modelSlots, { ...current, slots: { ...object(current.slots), ...slots } });
-    const settings = await optionalObject(paths.global.settings); await writeJsonObject(paths.global.settings, settings);
-    return { data: await slotsData(), message: "Horsepower configured" };
+    try {
+      const [globalSlots, projectSlots, settings, projectSettings] = await Promise.all([
+        existingConfiguration(paths.global.modelSlots),
+        existingConfiguration(paths.project.modelSlots),
+        existingConfiguration(paths.global.settings),
+        existingConfiguration(paths.project.settings),
+      ]);
+      const nextGlobal = { ...globalSlots, slots: { ...object(globalSlots.slots), ...slots } };
+      const data = registryData({ global: nextGlobal as SlotConfiguration, project: projectSlots });
+      parseWebhookSettings(settings.webhook, projectSettings.webhook);
+      await writeConfigs([
+        { path: paths.global.modelSlots, value: nextGlobal },
+        { path: paths.global.settings, value: settings },
+      ]);
+      return { data, message: "Horsepower configured" };
+    } catch (cause) { throw new UsageError((cause as Error).message); }
   }
   async function setSlot(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["model", "thinking", "fallback", "scope"], []); const id = parsed.positionals[0];
@@ -286,14 +313,30 @@ export function createCli(options: CliOptions) {
     if (parsed.values.has("fallback")) { if (parsed.values.has("model") || parsed.values.has("thinking")) throw new UsageError("Choose --fallback or --model/--thinking"); binding = { fallback: parsed.values.get("fallback")! }; }
     else { const model = parsed.values.get("model"), thinking = parsed.values.get("thinking"); if (!model || !thinking) throw new UsageError("set requires --model and --thinking"); binding = { model, thinking: thinking as ThinkingLevel }; }
     if (!slotId.test(id)) throw new UsageError(`Invalid model slot ID: ${id}`);
-    const path = scopePath(parsed.values.get("scope"), paths); const before = await optionalObject(path); await updateSlot(path, id, binding);
-    try { return { data: await slotsData(), message: `Set ${id}` }; } catch (cause) { await writeJsonObject(path, before); throw new UsageError((cause as Error).message); }
+    const scope = parsed.values.get("scope");
+    const path = scopePath(scope, paths);
+    try {
+      const config = await configurations(paths);
+      const next = withSlot(scope === "project" ? config.project as JsonObject : config.global as JsonObject, id, binding);
+      const prospective = scope === "project" ? { global: config.global, project: next } : { global: next, project: config.project };
+      const data = registryData(prospective);
+      await writeConfigs([{ path, value: next }]);
+      return { data, message: `Set ${id}` };
+    } catch (cause) { throw new UsageError((cause as Error).message); }
   }
   async function unsetSlot(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, ["scope"], []); const id = parsed.positionals[0]; if (!id || parsed.positionals.length !== 1) throw new UsageError("unset requires one slot ID");
     if (!slotId.test(id)) throw new UsageError(`Invalid model slot ID: ${id}`);
-    const path = scopePath(parsed.values.get("scope"), paths); const before = await optionalObject(path); await updateSlot(path, id, undefined);
-    try { return { data: await slotsData(), message: `Unset ${id}` }; } catch (cause) { await writeJsonObject(path, before); throw new UsageError((cause as Error).message); }
+    const scope = parsed.values.get("scope");
+    const path = scopePath(scope, paths);
+    try {
+      const config = await configurations(paths);
+      const next = withSlot(scope === "project" ? config.project as JsonObject : config.global as JsonObject, id, undefined);
+      const prospective = scope === "project" ? { global: config.global, project: next } : { global: next, project: config.project };
+      const data = registryData(prospective);
+      await writeConfigs([{ path, value: next }]);
+      return { data, message: `Unset ${id}` };
+    } catch (cause) { throw new UsageError((cause as Error).message); }
   }
   async function configure(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     const values = ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"];
@@ -305,8 +348,13 @@ export function createCli(options: CliOptions) {
       if ((model && !thinking) || (!model && thinking)) throw new UsageError(`configure requires --${id} and --${id}-thinking together`);
       if (model && thinking) slots[id] = { model, thinking };
     }
-    const before = current; await writeJsonObject(paths.global.modelSlots, { ...current, slots });
-    try { return { data: await slotsData(), message: "Horsepower configuration updated" }; } catch (cause) { await writeJsonObject(paths.global.modelSlots, before); throw new UsageError((cause as Error).message); }
+    try {
+      const project = await optionalObject(paths.project.modelSlots);
+      const next = { ...current, slots };
+      const data = registryData({ global: next as SlotConfiguration, project });
+      await writeConfigs([{ path: paths.global.modelSlots, value: next }]);
+      return { data, message: "Horsepower configuration updated" };
+    } catch (cause) { throw new UsageError((cause as Error).message); }
   }
   async function webhook(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     const action = parsed.positionals[0]; if (!action || parsed.positionals.length !== 1) throw new UsageError("webhook requires configure, skip, disable, or test");
@@ -316,7 +364,7 @@ export function createCli(options: CliOptions) {
       const preserved = withoutCredentials(object(current.webhook));
       delete preserved.url;
       const next = { ...current, webhook: { ...preserved, enabled: false } };
-      await writeJsonObject(paths.global.settings, next);
+      await writeConfigs([{ path: paths.global.settings, value: next }]);
       return { data: redactSettings(next), message: "Webhook disabled" };
     }
     if (action === "configure") {
@@ -324,19 +372,18 @@ export function createCli(options: CliOptions) {
       if (parsed.switches.has("change") && parsed.switches.has("no-change")) throw new UsageError("Choose --change or --no-change");
       if (parsed.switches.has("dispatch") && parsed.switches.has("no-dispatch")) throw new UsageError("Choose --dispatch or --no-dispatch");
       const url = parsed.values.get("url"), mode = parsed.values.get("auth"); if (!url || !mode) throw new UsageError("webhook configure requires --url and --auth");
-      try {
-        const parsedUrl = new URL(url);
-        if (parsedUrl.username || parsedUrl.password) throw new UsageError("Webhook URL must not contain credentials");
-        if (parsedUrl.protocol !== "https:" && parsedUrl.hostname !== "localhost" && parsedUrl.hostname !== "127.0.0.1") throw new Error();
-      } catch (cause) {
-        if (cause instanceof UsageError) throw cause;
-        throw new UsageError("Webhook URL must be HTTPS (localhost is allowed for testing)");
-      }
+      try { validateWebhookUrl(url); }
+      catch (cause) { throw new UsageError((cause as Error).message); }
       const secret = parsed.values.get("secret"), token = parsed.values.get("token");
       let auth: WebhookAuth; if (mode === "hmac") { if (!secret) throw new UsageError("HMAC authentication requires --secret"); if (token) throw new UsageError("HMAC authentication does not accept --token"); auth = { mode, secret }; }
       else if (mode === "bearer") { if (!token) throw new UsageError("Bearer authentication requires --token"); if (secret) throw new UsageError("Bearer authentication does not accept --secret"); auth = { mode, token }; }
       else if (mode === "none") { if (secret || token) throw new UsageError("None authentication does not accept --secret or --token"); auth = { mode }; } else throw new UsageError("Invalid webhook auth mode");
-      const current = await optionalObject(paths.global.settings); const previous = object(current.webhook);
+      const current = await optionalObject(paths.global.settings); const projectSettings = await optionalObject(paths.project.settings);
+      try {
+        validateWebhookSettingsShape(current.webhook);
+        validateWebhookSettingsShape(projectSettings.webhook, "project ");
+      } catch (cause) { throw new UsageError((cause as Error).message); }
+      const previous = object(current.webhook);
       const previousAuth = withoutCredentials(object(previous.auth));
       const nextWebhook = mergeObjects(previous, {
         enabled: true,
@@ -348,7 +395,10 @@ export function createCli(options: CliOptions) {
       });
       nextWebhook.auth = { ...previousAuth, ...auth };
       const next = { ...current, webhook: nextWebhook };
-      await writeJsonObject(paths.global.settings, next); return { data: redactSettings(next), message: "Webhook configured" };
+      try { parseWebhookSettings(next.webhook, projectSettings.webhook); }
+      catch (cause) { throw new UsageError((cause as Error).message); }
+      await writeConfigs([{ path: paths.global.settings, value: next }]);
+      return { data: redactSettings(next), message: "Webhook configured" };
     }
     if (action === "test") {
       only(parsed, [], []); const globalSettings = await optionalObject(paths.global.settings); const projectSettings = await optionalObject(paths.project.settings); const parsedSettings = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");
@@ -420,6 +470,7 @@ export function createCli(options: CliOptions) {
     if (manifest.version !== expected) throw new Error(`Staged manifest version mismatch: expected ${expected}`); const entries = object(manifest.entryPoints);
     for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); try { await verifyNoSymlinkPath(root, join(root, candidate), "file"); } catch { throw new Error(`Missing staged ${name}: ${candidate}`); } }
     await verifyInstallDestination(options.homeDir, topology.root, topology.versions);
+    for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true);
     const managedRoot = await managedRootState(topology.root); if (managedRoot.status === "conflict") throw new Error(managedRoot.message ?? "Installation ownership conflict");
     const current = await currentState(topology.root, topology.current); const links = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); const conflict = [current, ...links].find((state) => state.status === "conflict"); if (conflict) throw new Error(conflict.message ?? "Installation ownership conflict");
     return { data: { eligible: true, root, version: expected }, message: "Staged release eligible" };
