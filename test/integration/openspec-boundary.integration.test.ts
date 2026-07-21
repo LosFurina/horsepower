@@ -11,14 +11,15 @@ test("authorizes this repository through the real official OpenSpec CLI and Pi i
     readText: (path) => readFile(path, "utf8"),
   });
 
+  const changeId = "isolate-workers-from-external-skills";
   await expect(boundary.authorize({
     action: "create",
-    changeId: "horsepower-alpha1",
+    changeId,
     cwd,
   })).resolves.toMatchObject({
     allowed: true,
     openspecRequired: true,
     version: "1.6.0",
-    changeId: "horsepower-alpha1",
+    changeId,
   });
 }, 15_000);

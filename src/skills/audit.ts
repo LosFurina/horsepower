@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { DefaultPackageManager, SettingsManager, type ResolvedResource } from "@earendil-works/pi-coding-agent";
+import { parse as parseYaml } from "yaml";
 
 export type AuditStatus = "complete" | "partial" | "failed";
 export type StaticSkillResolver = (onMissing: (source: string) => Promise<"skip">) => Promise<{ skills: ResolvedResource[] }>;
@@ -60,11 +61,20 @@ function cleanName(value: string): string {
   return (normalized || "unknown").slice(0, MAX_NAME);
 }
 function frontmatter(text: string): Record<string, string> {
-  const body = text.startsWith("---\n") ? text.slice(4, text.indexOf("\n---\n", 4)) : text;
+  const end = text.startsWith("---\n") ? text.indexOf("\n---\n", 4) : -1;
+  const parsed = parseYaml(end >= 0 ? text.slice(4, end) : text) as unknown;
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") return {};
+  const raw = parsed as Record<string, unknown>;
+  const nested = raw.metadata !== null && !Array.isArray(raw.metadata) && typeof raw.metadata === "object"
+    ? raw.metadata as Record<string, unknown>
+    : {};
   const result: Record<string, string> = {};
-  for (const line of body.split("\n").slice(0, 40)) {
-    const match = /^([A-Za-z][A-Za-z0-9-]*):\s*["']?([^"'].*?)["']?\s*$/u.exec(line);
-    if (match) result[match[1]!] = match[2]!;
+  for (const key of ["name", "description", "allowed-tools"] as const) {
+    if (typeof raw[key] === "string") result[key] = raw[key];
+  }
+  for (const key of ["author", "generatedBy"] as const) {
+    const value = nested[key] ?? raw[key];
+    if (typeof value === "string") result[key] = value;
   }
   return result;
 }

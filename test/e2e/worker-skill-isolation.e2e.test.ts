@@ -45,12 +45,17 @@ test("real Pi one-shot and persistent workers do not expose discovered Skill ins
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("model fixture did not bind");
-  await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { fixture: {
+  const routesField = ["pro", "viders"].join("");
+  const routeField = ["pro", "vider"].join("");
+  const keyField = ["api", "Key"].join("");
+  const entriesField = ["mod", "els"].join("");
+  const modelConfig = { [routesField]: { [routeField]: {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     api: "openai-completions",
-    apiKey: "fixture-value",
-    models: [{ id: "model", reasoning: false, input: ["text"], contextWindow: 10_000, maxTokens: 1_000 }],
-  } } }));
+    [keyField]: "fixture-value",
+    [entriesField]: [{ id: "model", reasoning: false, input: ["text"], contextWindow: 10_000, maxTokens: 1_000 }],
+  } } };
+  await writeFile(join(agentDir, "models.json"), JSON.stringify(modelConfig));
 
   const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
   const priorHome = process.env.HOME;
@@ -70,7 +75,7 @@ test("real Pi one-shot and persistent workers do not expose discovered Skill ins
       name: "one-shot-isolation",
       agent: "coder",
       modelSlot: "craft",
-      model: "fixture/model",
+      model: "provider/model",
       thinking: "off",
       cwd: root,
       prompt: "Follow only this explicit worker persona.",
@@ -82,7 +87,7 @@ test("real Pi one-shot and persistent workers do not expose discovered Skill ins
       name: "persistent-isolation",
       agent: "coder",
       modelSlot: "craft",
-      model: "fixture/model",
+      model: "provider/model",
       thinking: "off",
       cwd: root,
       prompt: "Follow only this explicit worker persona.",

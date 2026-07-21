@@ -45,7 +45,7 @@ test("provenance excludes only digest-owned Horsepower and structurally verified
   const lookalike = join(cwd, ".pi/skills/horsepower/SKILL.md");
   const official = join(cwd, ".pi/skills/openspec-apply-change/SKILL.md");
   await skill(ownedTarget, "horsepower"); await mkdir(join(homeDir, ".pi/agent/skills"), { recursive: true }); await symlink(join(release, "pi/skills/horsepower"), join(homeDir, ".pi/agent/skills/horsepower")); await skill(lookalike, "horsepower");
-  await skill(official, "openspec-apply-change", 'author: openspec\ngeneratedBy: "1.6.0"\nallowed-tools: Bash(openspec:*)\n');
+  await skill(official, "openspec-apply-change", 'allowed-tools: Bash(openspec:*)\nmetadata:\n  author: openspec\n  generatedBy: "1.6.0"\n');
   const digest = createHash("sha256").update(await readFile(ownedTarget)).digest("hex");
   await mkdir(release, { recursive: true });
   await writeFile(join(release, "release-manifest.json"), JSON.stringify({ version: "0.1.0", entryPoints: { skill: "pi/skills/horsepower/SKILL.md" }, digests: { "pi/skills/horsepower/SKILL.md": digest } }));
