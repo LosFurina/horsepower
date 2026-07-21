@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -6,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test, vi } from "vitest";
+import { fixtureReleaseEntryPoints as releaseEntryPoints, installManagedFixture, writeFixtureRelease as writeRelease } from "../fixtures/managed-installation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -52,49 +52,15 @@ const setupArgs = [
   "--utility", "provider/util", "--utility-thinking", "low", "--json",
 ];
 
-const releaseEntryPoints = {
-  cli: "bin/horsepower",
-  extension: "pi/extensions/horsepower/index.js",
-  skill: "pi/skills/horsepower/SKILL.md",
-};
 
-async function writeRelease(root: string, version: string): Promise<void> {
-  for (const path of Object.values(releaseEntryPoints)) {
-    await mkdir(dirname(join(root, path)), { recursive: true });
-    await writeFile(join(root, path), `owned:${path}\n`);
-  }
-  const digests = Object.fromEntries(await Promise.all(Object.values(releaseEntryPoints).map(async (path) => [
-    path,
-    createHash("sha256").update(await readFile(join(root, path))).digest("hex"),
-  ])));
-  await writeFile(join(root, "release-manifest.json"), JSON.stringify({
-    version,
-    compatibility: { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0" },
-    entryPoints: releaseEntryPoints,
-    digests,
-  }));
-}
-
-async function installManagedFixture(homeDir: string, integration: "enabled" | "disabled" = "disabled") {
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0");
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  const extension = join(homeDir, ".pi/agent/extensions/horsepower");
-  const skill = join(homeDir, ".pi/agent/skills/horsepower");
-  const cli = join(homeDir, ".local/bin/horsepower");
-  await mkdir(dirname(cli), { recursive: true });
-  await symlink(join(managed, "current/bin/horsepower"), cli);
-  if (integration === "enabled") {
-    for (const [path, target] of [
-      [extension, join(managed, "current/pi/extensions/horsepower")],
-      [skill, join(managed, "current/pi/skills/horsepower")],
-    ] as const) {
-      await mkdir(dirname(path), { recursive: true });
-      await symlink(target, path);
-    }
-  }
-  return { managed, extension, skill, cli };
-}
+test("every command uses its metadata-owned localized completion summary", async () => {
+  const { run } = await harness();
+  await run(setupArgs);
+  const slots = JSON.parse((await run(["slots", "--json"])).stdout);
+  expect(slots).toMatchObject({ outputLocale: "en", summary: "slots completed." });
+  const configured = JSON.parse((await run(["configure", "--locale", "zh-CN", "--json"])).stdout);
+  expect(configured).toMatchObject({ outputLocale: "zh-CN", summary: "输出语言已设置为 zh-CN。" });
+});
 
 test("strictly parses commands and emits deterministic JSON with stable exit codes", async () => {
   const { run } = await harness();
@@ -1282,7 +1248,12 @@ test("Chinese doctor localizes partial and conflict findings while preserving st
       action: kind === "partial" ? "运行 horsepower enable 恢复缺失的链接，或运行 horsepower disable 保持禁用。" : "修复冲突，然后运行 horsepower enable 或 horsepower disable。",
       rawEvidence: expect.any(String),
     });
-    expect(check.rawEvidence).toContain(kind === "partial" ? "absent" : "non-symlink");
+    if (kind === "partial") expect(check.rawEvidence).toBe("extension=owned; skill=absent");
+    else {
+      expect(check.rawEvidence).toContain("extension=conflict");
+      expect(check.rawEvidence).toContain("non-symlink");
+      expect(check.rawEvidence).toContain("skill=absent");
+    }
   }
 });
 

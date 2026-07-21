@@ -515,9 +515,7 @@ export function createCli(options: CliOptions) {
       return { id: "openspec", status: "error", message: localizedMessage(outputLocale, "doctor.openspecInvalid"), action: localizedMessage(outputLocale, actionId), rawEvidence };
     }
   }
-  async function installationCheck() {
-    let outputLocale: OutputLocale = "en";
-    try { outputLocale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* diagnostics report invalid settings separately */ }
+  async function installationCheck(outputLocale: OutputLocale) {
     try {
       await verifyTrustedPath(options.homeDir, topology.root);
       for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true);
@@ -535,7 +533,8 @@ export function createCli(options: CliOptions) {
           : extension.status === "conflict" || skill.status === "conflict" ? "conflict" : "partially_enabled";
       if (integrationStatus === "enabled") return { id: "installation", status: "ok", integrationStatus, message: localizedMessage(outputLocale, "doctor.integrationEnabled") };
       if (integrationStatus === "disabled") return { id: "installation", status: "ok", integrationStatus, message: localizedMessage(outputLocale, "doctor.integrationDisabled"), action: localizedMessage(outputLocale, "doctor.enableAction") };
-      const rawEvidence = [extension, skill].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; ");
+      const evidence = (role: "extension" | "skill", state: typeof extension) => `${role}=${state.status}${state.message ? ` (${state.message})` : ""}`;
+      const rawEvidence = [evidence("extension", extension), evidence("skill", skill)].join("; ");
       return { id: "installation", status: "error", integrationStatus, message: localizedMessage(outputLocale, integrationStatus === "conflict" ? "doctor.integrationConflict" : "doctor.integrationPartial"), action: localizedMessage(outputLocale, integrationStatus === "conflict" ? "doctor.integrationRepairAction" : "doctor.integrationPartialAction"), rawEvidence };
     } catch (cause) {
       const rawEvidence = cause instanceof Error ? cause.message : "Unable to inspect the managed installation topology";
@@ -556,7 +555,7 @@ export function createCli(options: CliOptions) {
     let outputLocale: OutputLocale = "en";
     try { outputLocale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* invalid settings are reported below */ }
     if (parsed.switches.has("installation-only")) {
-      const check = await installationCheck();
+      const check = await installationCheck(outputLocale);
       return { data: { checks: [check] }, ok: check.status !== "error", exitCode: check.status === "error" ? 1 : 0 };
     }
     const checks: Array<Record<string, unknown>> = [];
@@ -589,7 +588,7 @@ export function createCli(options: CliOptions) {
       : options.models
         ? { id: "model-registry", status: "ok", message: localizedMessage(outputLocale, "doctor.modelValidated") }
         : { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelUnavailable") });
-    checks.push(await installationCheck());
+    checks.push(await installationCheck(outputLocale));
     return { data: { checks }, ok: !checks.some((check) => check.status === "error"), exitCode: checks.some((check) => check.status === "error") ? 1 : 0 };
   }
   async function preflight(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
@@ -696,22 +695,29 @@ export function createCli(options: CliOptions) {
   type CommandDefinition = {
     run(parsed: ParsedFlags): Promise<CommandResult>;
     requiresPlatform?: boolean | ((parsed: ParsedFlags) => boolean);
-    summaryId?: MessageId;
+    summaryId: MessageId | ((parsed: ParsedFlags) => MessageId);
+    summaryVariables?: (parsed: ParsedFlags) => Readonly<Record<string, string | number>>;
   };
+  const completed = "cli.commandCompleted" as const;
   const commands = {
-    setup: { run: setup, requiresPlatform: true },
-    configure: { run: configure, requiresPlatform: (parsed) => parsed.values.size > 0 },
-    slots: { run: async (parsed) => { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); return { data: await slotsData() }; } },
-    set: { run: setSlot, requiresPlatform: true },
-    unset: { run: unsetSlot, requiresPlatform: true },
-    webhook: { run: webhook, requiresPlatform: true },
-    handoff: { run: handoff },
+    setup: { run: setup, requiresPlatform: true, summaryId: completed },
+    configure: {
+      run: configure,
+      requiresPlatform: (parsed) => parsed.values.size > 0,
+      summaryId: (parsed) => parsed.values.has("locale") ? "cli.localeConfigured" : "cli.configured",
+      summaryVariables: (parsed) => ({ locale: parsed.values.get("locale") ?? "" }),
+    },
+    slots: { run: async (parsed) => { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); return { data: await slotsData() }; }, summaryId: completed },
+    set: { run: setSlot, requiresPlatform: true, summaryId: completed },
+    unset: { run: unsetSlot, requiresPlatform: true, summaryId: completed },
+    webhook: { run: webhook, requiresPlatform: true, summaryId: completed },
+    handoff: { run: handoff, summaryId: completed },
     doctor: { run: doctor, summaryId: "doctor.healthy" },
-    preflight: { run: preflight, requiresPlatform: true },
+    preflight: { run: preflight, requiresPlatform: true, summaryId: completed },
     enable: { run: enable, requiresPlatform: true, summaryId: "cli.enabled" },
     disable: { run: disable, requiresPlatform: true, summaryId: "cli.disabled" },
-    uninstall: { run: uninstall, requiresPlatform: true },
-    purge: { run: purge, requiresPlatform: true },
+    uninstall: { run: uninstall, requiresPlatform: true, summaryId: completed },
+    purge: { run: purge, requiresPlatform: true, summaryId: completed },
   } satisfies Record<string, CommandDefinition>;
 
   return { async run(argv: readonly string[]): Promise<CliResult> {
@@ -731,13 +737,8 @@ export function createCli(options: CliOptions) {
       const result = await definition.run(parsed);
       try { locale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* doctor and diagnostics retain their structured evidence */ }
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1);
-      const summary = commandName === "configure" && parsed.values.has("locale") && result.message
-        ? result.message
-        : definition.summaryId
-          ? localizedMessage(locale, definition.summaryId)
-          : locale === "zh-CN"
-            ? localizedMessage(locale, "cli.commandCompleted", { command: commandName })
-            : result.message ?? (ok ? "OK" : "FAILED");
+      const summaryId = typeof definition.summaryId === "function" ? definition.summaryId(parsed) : definition.summaryId;
+      const summary = localizedMessage(locale, summaryId, { command: commandName, ...definition.summaryVariables?.(parsed) });
       return machine ? { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" } : { exitCode, stdout: `${summary}\n`, stderr: "" };
     } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(locale === "zh-CN" ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }
   } };
