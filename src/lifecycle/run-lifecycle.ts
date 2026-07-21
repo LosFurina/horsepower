@@ -27,6 +27,11 @@ export interface RunNotificationBinding {
   notify?: (event: TerminalWebhookEvent) => Promise<WebhookDeliveryResult>;
 }
 
+export interface RunIdentity {
+  changeId: string;
+  projectId: string;
+}
+
 export interface RunLifecycleOptions {
   notifications?: { change?: boolean; dispatch?: boolean };
   notify?: (event: TerminalWebhookEvent) => Promise<WebhookDeliveryResult>;
@@ -60,18 +65,26 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
   const runs = new Map<string, RunRecord>();
   const deliveries = new Map<string, Promise<WebhookDeliveryResult>>();
   const notificationBindings = new Map<string, RunNotificationBinding>();
+  const runIdentities = new Map<string, RunIdentity>();
   const notifications = {
     change: options.notifications?.change ?? true,
     dispatch: options.notifications?.dispatch ?? false,
   };
   const now = options.now ?? (() => new Date());
   const makeId = options.makeId ?? ((prefix: string) => `${prefix}-${crypto.randomUUID()}`);
+  let closed = false;
+  let shutdown: Promise<void> | undefined;
+
+  function assertOpen(): void {
+    if (closed) throw new Error("Run lifecycle is closed");
+  }
 
   function begin(
     scope: TerminalScope,
-    input: { changeId: string; summary?: string },
+    input: { changeId: string; projectId: string; summary?: string },
     notification?: RunNotificationBinding,
   ): RunRecord {
+    assertOpen();
     const runId = makeId("run");
     const run: RunRecord = {
       runId,
@@ -82,6 +95,7 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
       ...(input.summary === undefined ? {} : { summary: input.summary }),
     };
     runs.set(runId, run);
+    runIdentities.set(runId, { changeId: input.changeId, projectId: input.projectId });
     if (notification) notificationBindings.set(runId, notification);
     return structuredClone(run);
   }
@@ -97,6 +111,7 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
     scope: TerminalScope,
     report: ChangeTerminalReport | DispatchTerminalReport,
   ) {
+    assertOpen();
     const run = requireRun(report.runId, scope);
     if (run.status !== "running") throw new Error(`Run is already terminal: ${run.runId}`);
     const changeStatuses = new Set(["completed", "blocked_needs_human", "failed", "canceled"]);
@@ -165,10 +180,10 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
   }
 
   return {
-    beginChange(input: { changeId: string }, notification?: RunNotificationBinding) {
+    beginChange(input: { changeId: string; projectId: string }, notification?: RunNotificationBinding) {
       return begin("change", input, notification);
     },
-    beginDispatch(input: { changeId: string; summary?: string }, notification?: RunNotificationBinding) {
+    beginDispatch(input: { changeId: string; projectId: string; summary?: string }, notification?: RunNotificationBinding) {
       return begin("dispatch", input, notification);
     },
     reportChangeTerminal(report: ChangeTerminalReport) { return terminal("change", report); },
@@ -179,11 +194,16 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
       if (!delivery) throw new Error(`Run has no webhook delivery: ${runId}`);
       return delivery;
     },
-    async shutdown(): Promise<void> {
+    shutdown(): Promise<void> {
+      if (shutdown) return shutdown;
+      closed = true;
       options.stopNotifications?.();
-      await Promise.allSettled(deliveries.values());
+      shutdown = Promise.allSettled(deliveries.values()).then(() => undefined);
+      return shutdown;
     },
     abandon(): void {
+      if (closed) return;
+      closed = true;
       options.stopNotifications?.();
     },
     workerIdle(runId: string): false {
@@ -191,6 +211,10 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
       return false;
     },
     status(runId: string): RunRecord { return structuredClone(requireRun(runId)); },
+    identity(runId: string): RunIdentity {
+      requireRun(runId);
+      return structuredClone(runIdentities.get(runId)!);
+    },
     list(): RunRecord[] { return [...runs.values()].map((run) => structuredClone(run)); },
   };
 }

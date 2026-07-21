@@ -194,6 +194,85 @@ test("concurrent project runs retain distinct webhook URLs instead of using the 
   ]);
 });
 
+test("shutdown closes admission before deferred OpenSpec authorization can register a run", async () => {
+  let releaseVersion!: () => void;
+  const versionGate = new Promise<void>((resolve) => { releaseVersion = resolve; });
+  const manager = fakeManager();
+  const runOpenSpec = vi.fn(async (args: readonly string[], options: { cwd: string }) => {
+    if (args[0] === "--version") {
+      await versionGate;
+      return { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false };
+    }
+    if (args[0] === "doctor") return { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: options.cwd } }), stderr: "", truncated: false };
+    if (args[0] === "status") return { code: 0, stdout: JSON.stringify({ changeName: "change-a", isComplete: true }), stderr: "", truncated: false };
+    return { code: 0, stdout: JSON.stringify({ summary: { totals: { failed: 0 } } }), stderr: "", truncated: false };
+  });
+  const readText = vi.fn(async (path: string) => path.endsWith("SKILL.md")
+    ? "name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: 1.6.0\n"
+    : "Implement tasks from an OpenSpec change");
+  const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
+  const runtime = createHorsepowerRuntime({
+    homeDir: "/home", bundledAgentsDir: "/agents", manager: manager as never, runOpenSpec, readText,
+  });
+  const ctx = { captain: true, cwd: "/project", modelRegistry: modelRegistry as never };
+
+  const advancing = runtime.execute({ action: "begin_change", changeId: "change-a" }, ctx);
+  await vi.waitFor(() => expect(runOpenSpec).toHaveBeenCalledWith(["--version"], { cwd: "/project" }));
+  const firstShutdown = runtime.shutdown();
+  const secondShutdown = runtime.shutdown();
+  let shutdownSettled = false;
+  void firstShutdown.then(() => { shutdownSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(shutdownSettled).toBe(false);
+  releaseVersion();
+
+  await expect(advancing).rejects.toThrow("Horsepower runtime is closed");
+  await Promise.all([firstShutdown, secondShutdown]);
+  expect(manager.destroyAll).toHaveBeenCalledTimes(1);
+  expect(manager.create).not.toHaveBeenCalled();
+  await expect(runtime.execute({ action: "begin_change", changeId: "late" }, ctx))
+    .rejects.toThrow("Horsepower runtime is closed");
+});
+
+test("change terminal correlation requires canonical project identity", async () => {
+  const manager = fakeManager();
+  const fetch = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response("ok", { status: 200 }));
+  const runOpenSpec = vi.fn(async (args: readonly string[], options: { cwd: string }) => {
+    if (args[0] === "--version") return { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false };
+    if (args[0] === "doctor") return { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: options.cwd } }), stderr: "", truncated: false };
+    if (args[0] === "status") return { code: 0, stdout: JSON.stringify({ changeName: "change-a", isComplete: true }), stderr: "", truncated: false };
+    return { code: 0, stdout: JSON.stringify({ summary: { totals: { failed: 0 } } }), stderr: "", truncated: false };
+  });
+  const readText = vi.fn(async (path: string) => path.endsWith("SKILL.md")
+    ? "name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: 1.6.0\n"
+    : "Implement tasks from an OpenSpec change");
+  const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
+  const runtime = createHorsepowerRuntime({
+    homeDir: "/home", bundledAgentsDir: "/agents", manager: manager as never, runOpenSpec, readText,
+    resolveWebhook: (cwd) => ({
+      config: { url: `https://${cwd.includes("project-a") ? "a" : "b"}.example/hook`, auth: { mode: "none" } },
+      notifications: { change: true },
+      fetch: fetch as never,
+    }),
+  });
+  const ctx = (cwd: string) => ({ captain: true, cwd, modelRegistry: modelRegistry as never });
+
+  const begun = await runtime.execute({ action: "begin_change", changeId: "change-a" }, ctx("/workspace/project-a/../project-a")) as { runId: string };
+  await expect(runtime.execute({
+    action: "report_terminal", changeId: "change-a", runId: begun.runId,
+    status: "failed", summary: "wrong project",
+  }, ctx("/workspace/project-b"))).rejects.toThrow(`Run ${begun.runId} belongs to another project`);
+  await expect(runtime.execute({
+    action: "report_terminal", changeId: "change-a", runId: begun.runId,
+    status: "failed", summary: "same project",
+  }, ctx("/workspace/project-a"))).resolves.toMatchObject({ run: { runId: begun.runId, status: "failed" } });
+  await runtime.shutdown();
+
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0]![0]).toBe("https://a.example/hook");
+  expect(JSON.stringify(fetch.mock.calls[0]![1])).not.toContain("/workspace/project-a");
+});
+
 test("advancing actions use official OpenSpec checks in the active cwd", async () => {
   const root = await mkdtemp(join(tmpdir(), "horsepower-extension-"));
   const home = join(root, "home");

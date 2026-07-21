@@ -37,6 +37,34 @@ test("rejects advancing actions without Captain capability before authorization"
   expect(authorized).toBe(false);
 });
 
+test("rechecks admission after asynchronous authorization before registering work", async () => {
+  let release!: () => void;
+  const authorized = new Promise<void>((resolve) => { release = resolve; });
+  let open = true;
+  let dispatches = 0;
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => authorized,
+    assertOpen: () => { if (!open) throw new Error("Horsepower runtime is closed"); },
+    resolveSlot: () => { throw new Error("unused"); },
+    validateModel: () => undefined,
+    getAgent: () => { throw new Error("unused"); },
+    createWorker: async () => ({ workerId: "unused" }),
+    beginChange: () => { dispatches += 1; return { runId: "unused" }; },
+    beginDispatch: () => ({ runId: "unused" }),
+    reportDispatchTerminal: async () => undefined,
+  });
+
+  const execution = captain(orchestration, {
+    action: "begin_change", changeId: "change-a", cwd: "/project",
+  });
+  open = false;
+  release();
+
+  await expect(execution).rejects.toThrow("Horsepower runtime is closed");
+  expect(dispatches).toBe(0);
+});
+
 test("rejects an unknown resolved model before spawning any work", async () => {
   let workers = 0;
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
@@ -170,7 +198,7 @@ test("Captain terminal reporting uses E2E evidence without creating work", async
     beginDispatch: () => { throw new Error("unused"); },
     reportDispatchTerminal: async () => undefined,
     reportChangeTerminal: async (input) => { report = input; return { run: { status: input.status } }; },
-    changeIdForRun: () => "horsepower-alpha1",
+    identityForRun: () => ({ changeId: "horsepower-alpha1", projectId: "/project" }),
   });
 
   await captain(orchestration, {
@@ -197,7 +225,7 @@ test("rejects change terminal reporting when run belongs to another change", asy
     beginDispatch: () => ({ runId: "unused" }),
     reportDispatchTerminal: async () => undefined,
     reportChangeTerminal: async () => ({ run: {} }),
-    changeIdForRun: () => "change-a",
+    identityForRun: () => ({ changeId: "change-a", projectId: "/project" }),
   });
 
   await expect(captain(orchestration, {

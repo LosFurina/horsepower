@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, type AgentDefinition } from "../agents/catalog.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
@@ -60,6 +61,8 @@ export class HorsepowerRuntime {
   readonly #lifecycle: ReturnType<typeof createRunLifecycle>;
   readonly #boundary: ReturnType<typeof createOpenSpecBoundary>;
   readonly #notifiers = new Set<ReturnType<typeof createWebhookNotifier>>();
+  readonly #operations = new Set<Promise<unknown>>();
+  #closed = false;
   #shutdown?: Promise<void>;
 
   constructor(options: CreateHorsepowerRuntimeOptions) {
@@ -78,9 +81,20 @@ export class HorsepowerRuntime {
     this.#boundary = createOpenSpecBoundary({ run: options.runOpenSpec ?? createOpenSpecCliRunner(), readText });
   }
 
-  async execute(input: unknown, context: HorsepowerRuntimeContext): Promise<unknown> {
+  execute(input: unknown, context: HorsepowerRuntimeContext): Promise<unknown> {
+    if (this.#closed) return Promise.reject(new Error("Horsepower runtime is closed"));
+    const operation = this.#execute(input, context);
+    this.#operations.add(operation);
+    void operation.then(
+      () => this.#operations.delete(operation),
+      () => this.#operations.delete(operation),
+    );
+    return operation;
+  }
+
+  async #execute(input: unknown, context: HorsepowerRuntimeContext): Promise<unknown> {
     const raw = input as Record<string, unknown>;
-    const cwd = context.cwd;
+    const cwd = resolve(context.cwd);
     const paths = resolveHorsepowerPaths({ homeDir: this.#options.homeDir, projectDir: cwd });
     const readText = this.#options.readText ?? ((path: string) => readFile(path, "utf8"));
     const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor"]);
@@ -92,6 +106,7 @@ export class HorsepowerRuntime {
         cwd,
         ...(typeof raw.changeId === "string" ? { changeId: raw.changeId } : {}),
       });
+      if (this.#closed) throw new Error("Horsepower runtime is closed");
     }
     let slots: ReturnType<typeof createSlotRegistry> | undefined;
     let catalog: Map<string, AgentDefinition> | undefined;
@@ -118,11 +133,11 @@ export class HorsepowerRuntime {
       if (!webhook) return undefined;
       const enabled = webhook.notifications?.[scope] ?? (scope === "change");
       if (!enabled) return { enabled: false };
+      const active = createWebhookNotifier(webhook);
+      this.#notifiers.add(active);
       return {
         enabled: true,
         notify: async (event: Parameters<ReturnType<typeof createWebhookNotifier>["notify"]>[0]) => {
-          const active = createWebhookNotifier(webhook);
-          this.#notifiers.add(active);
           try {
             return await active.notify(event);
           } finally {
@@ -133,6 +148,9 @@ export class HorsepowerRuntime {
     };
     const orchestration = createOrchestration({
       authorize: async () => undefined,
+      assertOpen: () => {
+        if (this.#closed) throw new Error("Horsepower runtime is closed");
+      },
       resolveSlot: (slot) => {
         if (!slots) throw new Error("Model slots are unavailable for this action");
         return slots.resolve(slot);
@@ -158,16 +176,21 @@ export class HorsepowerRuntime {
       doctor: () => ({ generation: "process", workers: this.#manager.list().length }),
       reportDispatchTerminal: (report) => this.#lifecycle.reportDispatchTerminal(report),
       reportChangeTerminal: (report) => this.#lifecycle.reportChangeTerminal(report),
-      changeIdForRun: (runId) => this.#lifecycle.status(runId).changeId,
+      identityForRun: (runId) => this.#lifecycle.identity(runId),
     });
+    if (this.#closed) throw new Error("Horsepower runtime is closed");
     return orchestration.execute({ ...raw, cwd }, { captain: context.captain });
   }
 
   shutdown(): Promise<void> {
-    this.#shutdown ??= Promise.allSettled([
+    this.#closed = true;
+    if (this.#shutdown) return this.#shutdown;
+    const operations = Promise.allSettled(this.#operations);
+    const cleanup = Promise.allSettled([
       this.#manager.destroyAll(),
       this.#lifecycle.shutdown(),
-    ]).then((results) => {
+    ]);
+    this.#shutdown = Promise.all([operations, cleanup]).then(([, results]) => {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
       if (failures.length > 0) {
         throw new AggregateError(failures.map((failure) => failure.reason), "Failed to shut down Horsepower runtime");
@@ -177,6 +200,7 @@ export class HorsepowerRuntime {
   }
 
   abandon(): void {
+    this.#closed = true;
     this.#lifecycle.abandon();
     this.#manager.abandonAll();
   }

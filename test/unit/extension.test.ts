@@ -146,6 +146,35 @@ test("malformed webhook settings are observable without exposing credential cont
   }
 });
 
+test("rejects invalid webhook shapes and deep-merges notification overrides", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-webhook-settings-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const globalDir = join(home, ".pi", "agent", "horsepower");
+  const projectDir = join(project, ".pi", "horsepower");
+  await mkdir(globalDir, { recursive: true });
+  await mkdir(projectDir, { recursive: true });
+  const { webhookOptions } = await import("../../src/extension/index.js");
+
+  await writeFile(join(globalDir, "settings.json"), JSON.stringify({ webhook: "disabled" }));
+  expect(() => webhookOptions(home, project)).toThrow("webhook must be an object");
+
+  await writeFile(join(globalDir, "settings.json"), JSON.stringify({
+    webhook: {
+      url: "https://example.invalid/hook",
+      auth: { mode: "none" },
+      notifications: { change: false, dispatch: false },
+    },
+  }));
+  await writeFile(join(projectDir, "settings.json"), JSON.stringify({
+    webhook: { notifications: { dispatch: true } },
+  }));
+  expect(webhookOptions(home, project)?.notifications).toEqual({ change: false, dispatch: true });
+
+  await writeFile(join(projectDir, "settings.json"), JSON.stringify({ webhook: { notifications: [] } }));
+  expect(() => webhookOptions(home, project)).toThrow("notifications must be an object");
+});
+
 test("new resume and fork preserve runtime while reload and quit cleanup idempotently", async () => {
   const pi = fakePi();
   const cleanup = vi.fn(async () => undefined);

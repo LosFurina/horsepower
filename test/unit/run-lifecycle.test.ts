@@ -24,7 +24,7 @@ function setup(options: { change?: boolean; dispatch?: boolean } = {}) {
 
 test("requires explicit Captain reporting and blocks unit-only completion", async () => {
   const { lifecycle, notifications } = await setup();
-  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1" });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
 
   expect(notifications).toEqual([]);
   await expect(lifecycle.reportChangeTerminal({
@@ -39,7 +39,7 @@ test("requires explicit Captain reporting and blocks unit-only completion", asyn
 
 test("reports a completed change after successful E2E and notifies once", async () => {
   const { lifecycle, notifications } = await setup();
-  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1" });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
 
   const result = await lifecycle.reportChangeTerminal({
     runId: run.runId,
@@ -62,7 +62,7 @@ test("reports a completed change after successful E2E and notifies once", async 
 
 test("redacts and bounds webhook summary evidence without changing terminal status", async () => {
   const { lifecycle, notifications } = await setup();
-  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1" });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
 
   const result = await lifecycle.reportChangeTerminal({
     runId: run.runId,
@@ -92,7 +92,7 @@ test("notification metadata failure does not reject or partially corrupt termina
     },
     notify: async () => ({ delivered: true, attempts: 1 }),
   });
-  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1" });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
 
   const reported = await lifecycle.reportChangeTerminal({
     runId: run.runId,
@@ -114,7 +114,7 @@ test("terminal reporting does not wait for webhook delivery", async () => {
   const lifecycle = createRunLifecycle({
     notify: async () => delivery,
   });
-  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1" });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
 
   const reported = await lifecycle.reportChangeTerminal({
     runId: run.runId,
@@ -129,7 +129,7 @@ test("terminal reporting does not wait for webhook delivery", async () => {
 
 test("rejects unknown terminal status before mutating lifecycle state", async () => {
   const { lifecycle } = await setup({ change: false });
-  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1" });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
 
   await expect(lifecycle.reportChangeTerminal({
     runId: run.runId,
@@ -141,7 +141,7 @@ test("rejects unknown terminal status before mutating lifecycle state", async ()
 
 test("rejects blocked_needs_human for dispatch scope", async () => {
   const { lifecycle } = await setup({ dispatch: true });
-  const run = lifecycle.beginDispatch({ changeId: "horsepower-alpha1" });
+  const run = lifecycle.beginDispatch({ changeId: "horsepower-alpha1", projectId: "/project" });
 
   await expect(lifecycle.reportDispatchTerminal({
     runId: run.runId,
@@ -152,13 +152,13 @@ test("rejects blocked_needs_human for dispatch scope", async () => {
 
 test("dispatch notification is opt-in and idle is never terminal", async () => {
   const disabled = await setup({ dispatch: false });
-  const first = disabled.lifecycle.beginDispatch({ changeId: "horsepower-alpha1", summary: "review" });
+  const first = disabled.lifecycle.beginDispatch({ changeId: "horsepower-alpha1", projectId: "/project", summary: "review" });
   expect(disabled.lifecycle.workerIdle(first.runId)).toBe(false);
   await disabled.lifecycle.reportDispatchTerminal({ runId: first.runId, status: "completed", summary: "done" });
   expect(disabled.notifications).toEqual([]);
 
   const enabled = await setup({ dispatch: true });
-  const second = enabled.lifecycle.beginDispatch({ changeId: "horsepower-alpha1", summary: "test" });
+  const second = enabled.lifecycle.beginDispatch({ changeId: "horsepower-alpha1", projectId: "/project", summary: "test" });
   await enabled.lifecycle.reportDispatchTerminal({ runId: second.runId, status: "failed", summary: "failed" });
   expect(enabled.notifications[0]).toMatchObject({ scope: "dispatch", status: "failed" });
 });
@@ -175,11 +175,46 @@ test("shutdown stops notification retries and waits for pending deliveries", asy
     notify: async () => pending,
     stopNotifications,
   });
-  const run = lifecycle.beginDispatch({ changeId: "change-a" });
+  const run = lifecycle.beginDispatch({ changeId: "change-a", projectId: "/project" });
   await lifecycle.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: "failed" });
 
   await lifecycle.shutdown();
 
   expect(stopNotifications).toHaveBeenCalledTimes(1);
   await expect(lifecycle.waitForDelivery(run.runId)).resolves.toMatchObject({ delivered: false });
+});
+
+test("shutdown seals lifecycle admission and cannot miss a concurrently registered delivery", async () => {
+  let finish!: () => void;
+  const pending = new Promise<WebhookDeliveryResult>((resolve) => {
+    finish = () => resolve({ delivered: false, attempts: 1, error: "abandoned" });
+  });
+  const notify = vi.fn(async () => pending);
+  const stopNotifications = vi.fn(() => finish());
+  const { createRunLifecycle } = await import("../../src/lifecycle/run-lifecycle.js");
+  const lifecycle = createRunLifecycle({
+    notifications: { change: true },
+    notify,
+    stopNotifications,
+  });
+  const run = lifecycle.beginChange({ changeId: "change-a", projectId: "/project" });
+
+  const reporting = lifecycle.reportChangeTerminal({
+    runId: run.runId,
+    status: "failed",
+    summary: "failed",
+  });
+  const firstShutdown = lifecycle.shutdown();
+  const secondShutdown = lifecycle.shutdown();
+
+  await Promise.all([reporting, firstShutdown, secondShutdown]);
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(stopNotifications).toHaveBeenCalledTimes(1);
+  await expect(lifecycle.waitForDelivery(run.runId)).resolves.toMatchObject({ delivered: false });
+  expect(() => lifecycle.beginChange({ changeId: "late", projectId: "/project" })).toThrow("Run lifecycle is closed");
+  await expect(lifecycle.reportChangeTerminal({
+    runId: run.runId,
+    status: "failed",
+    summary: "late",
+  })).rejects.toThrow("Run lifecycle is closed");
 });

@@ -141,13 +141,25 @@ function readSettings(path: string): Record<string, unknown> {
 
 export function webhookOptions(homeDir: string, projectDir: string): CreateHorsepowerRuntimeOptions["webhook"] {
   const paths = resolveHorsepowerPaths({ homeDir, projectDir });
-  const global = readSettings(paths.global.settings).webhook;
-  const project = readSettings(paths.project.settings).webhook;
+  const rawGlobal = readSettings(paths.global.settings).webhook;
+  const rawProject = readSettings(paths.project.settings).webhook;
+  const objectSetting = (value: unknown, label: string): Record<string, unknown> => {
+    if (value === undefined) return {};
+    if (value === null || Array.isArray(value) || typeof value !== "object") {
+      throw new Error(`Invalid Horsepower webhook configuration: ${label} must be an object`);
+    }
+    return value as Record<string, unknown>;
+  };
+  const global = objectSetting(rawGlobal, "webhook");
+  const project = objectSetting(rawProject, "webhook");
+  if (Object.keys(global).length === 0 && Object.keys(project).length === 0) return undefined;
+  const globalNotifications = objectSetting(global.notifications, "notifications");
+  const projectNotifications = objectSetting(project.notifications, "notifications");
   const merged = {
-    ...(global !== null && !Array.isArray(global) && typeof global === "object" ? global : {}),
-    ...(project !== null && !Array.isArray(project) && typeof project === "object" ? project : {}),
+    ...global,
+    ...project,
+    notifications: { ...globalNotifications, ...projectNotifications },
   } as Record<string, unknown>;
-  if (Object.keys(merged).length === 0) return undefined;
   if (typeof merged.url !== "string" || !merged.url) throw new Error("Invalid Horsepower webhook configuration: url is required");
   const auth = merged.auth;
   if (auth === null || Array.isArray(auth) || typeof auth !== "object") {

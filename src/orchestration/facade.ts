@@ -19,12 +19,13 @@ interface CreateWorkerInput {
 
 export interface OrchestrationOptions {
   authorize(input: { action: string; changeId?: string; cwd: string }): Promise<unknown>;
+  assertOpen?: () => void;
   resolveSlot(slot: string): ResolvedSlot;
   validateModel(slot: ResolvedSlot): void;
   getAgent(name: string): AgentDefinition | Omit<AgentDefinition, "source" | "scope">;
   createWorker(input: CreateWorkerInput): Promise<{ workerId: string }>;
-  beginChange?: (input: { changeId: string }) => { runId: string };
-  beginDispatch(input: { changeId: string; summary: string }): { runId: string };
+  beginChange?: (input: { changeId: string; projectId: string }) => { runId: string };
+  beginDispatch(input: { changeId: string; projectId: string; summary: string }): { runId: string };
   oneShot?: OneShotExecutor;
   sendWorker?: (input: Record<string, unknown>) => Promise<unknown>;
   waitForMessage?: (workerId: string, messageId: string) => Promise<unknown>;
@@ -37,7 +38,7 @@ export interface OrchestrationOptions {
   doctor?: () => Promise<unknown> | unknown;
   reportDispatchTerminal: (report: DispatchTerminalReport) => Promise<unknown>;
   reportChangeTerminal?: (report: ChangeTerminalReport) => Promise<unknown>;
-  changeIdForRun?: (runId: string) => string;
+  identityForRun?: (runId: string) => { changeId: string; projectId: string };
 }
 
 function required(input: Record<string, unknown>, field: string): string {
@@ -143,7 +144,7 @@ export function createOrchestration(options: OrchestrationOptions) {
     const invocations = resolved.map((item) => item.invocation);
     const slots = resolved.map((item) => item.slot);
     const executor = dependency(options.oneShot, "oneShot");
-    const run = options.beginDispatch({ changeId, summary: `${action} ${invocations.length}` });
+    const run = options.beginDispatch({ changeId, projectId: cwd, summary: `${action} ${invocations.length}` });
     try {
       const result = action === "single"
         ? await executor.single(invocations[0]!)
@@ -168,6 +169,7 @@ export function createOrchestration(options: OrchestrationOptions) {
       if (!safe.has(action) && !caller.captain) throw new Error(`Captain capability is required for ${action}`);
       const changeId = safe.has(action) ? undefined : required(rawInput, "changeId");
       await options.authorize({ action, ...(changeId === undefined ? {} : { changeId }), cwd });
+      options.assertOpen?.();
 
       if (action === "list") return dependency(options.listWorkers, "listWorkers")();
       if (action === "status") return dependency(options.statusWorker, "statusWorker")(required(rawInput, "workerId"));
@@ -187,15 +189,18 @@ export function createOrchestration(options: OrchestrationOptions) {
       if (action === "doctor") return dependency(options.doctor, "doctor")();
 
       if (action === "begin_change") {
-        return dependency(options.beginChange, "beginChange")({ changeId: changeId! });
+        return dependency(options.beginChange, "beginChange")({ changeId: changeId!, projectId: cwd });
       }
 
       if (action === "report_terminal") {
         const report = dependency(options.reportChangeTerminal, "reportChangeTerminal");
         const runId = required(rawInput, "runId");
-        const runChangeId = dependency(options.changeIdForRun, "changeIdForRun")(runId);
-        if (runChangeId !== changeId) {
-          throw new Error(`Run ${runId} belongs to change ${runChangeId}, not ${changeId}`);
+        const identity = dependency(options.identityForRun, "identityForRun")(runId);
+        if (identity.projectId !== cwd) {
+          throw new Error(`Run ${runId} belongs to another project`);
+        }
+        if (identity.changeId !== changeId) {
+          throw new Error(`Run ${runId} belongs to change ${identity.changeId}, not ${changeId}`);
         }
         const evidence: CompletionEvidence = {
           ...(rawInput.e2e === undefined ? {} : { e2e: rawInput.e2e as CompletionEvidence["e2e"] & readonly unknown[] }),
@@ -221,7 +226,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         const slot = options.resolveSlot(modelSlot);
         options.validateModel(slot);
         const agent = options.getAgent(agentName);
-        const run = options.beginDispatch({ changeId: changeId!, summary: `create ${name}` });
+        const run = options.beginDispatch({ changeId: changeId!, projectId: cwd, summary: `create ${name}` });
         try {
           const worker = await options.createWorker({
             name,
@@ -255,7 +260,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         const sendWorker = dependency(options.sendWorker, "sendWorker");
         const waitForMessage = dependency(options.waitForMessage, "waitForMessage");
         const messageStatus = dependency(options.messageStatus, "messageStatus");
-        const run = options.beginDispatch({ changeId: changeId!, summary: `${action} ${workerId}` });
+        const run = options.beginDispatch({ changeId: changeId!, projectId: cwd, summary: `${action} ${workerId}` });
         let immediate: unknown;
         try {
           immediate = await sendWorker({
