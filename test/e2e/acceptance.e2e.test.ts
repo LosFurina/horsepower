@@ -6,8 +6,16 @@ import { afterEach, expect, test } from "vitest";
 import { createHandoffStore } from "../../src/handoffs/store.js";
 import { createRunLifecycle } from "../../src/lifecycle/run-lifecycle.js";
 import { createWebhookNotifier } from "../../src/lifecycle/webhook-notifier.js";
+import { selectedE2ELocales } from "../fixtures/e2e-locales.js";
 
 const roots: string[] = [];
+
+test("locale-sensitive E2E uses the selected CI locale or both locales locally", () => {
+  expect(selectedE2ELocales({})).toEqual(["en", "zh-CN"]);
+  expect(selectedE2ELocales({ HORSEPOWER_E2E_LOCALE: "en" })).toEqual(["en"]);
+  expect(selectedE2ELocales({ HORSEPOWER_E2E_LOCALE: "zh-CN" })).toEqual(["zh-CN"]);
+  expect(() => selectedE2ELocales({ HORSEPOWER_E2E_LOCALE: "fr" })).toThrow("HORSEPOWER_E2E_LOCALE");
+});
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
 test("managed brief/report survives a new store instance and remains until explicit cleanup", async () => {

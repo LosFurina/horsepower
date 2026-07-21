@@ -75,6 +75,27 @@ async function writeRelease(root: string, version: string): Promise<void> {
   }));
 }
 
+async function installManagedFixture(homeDir: string, integration: "enabled" | "disabled" = "disabled") {
+  const managed = join(homeDir, ".pi/agent/horsepower");
+  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0");
+  await symlink("versions/v0.1.0", join(managed, "current"));
+  const extension = join(homeDir, ".pi/agent/extensions/horsepower");
+  const skill = join(homeDir, ".pi/agent/skills/horsepower");
+  const cli = join(homeDir, ".local/bin/horsepower");
+  await mkdir(dirname(cli), { recursive: true });
+  await symlink(join(managed, "current/bin/horsepower"), cli);
+  if (integration === "enabled") {
+    for (const [path, target] of [
+      [extension, join(managed, "current/pi/extensions/horsepower")],
+      [skill, join(managed, "current/pi/skills/horsepower")],
+    ] as const) {
+      await mkdir(dirname(path), { recursive: true });
+      await symlink(target, path);
+    }
+  }
+  return { managed, extension, skill, cli };
+}
+
 test("strictly parses commands and emits deterministic JSON with stable exit codes", async () => {
   const { run } = await harness();
   expect(await run(["unknown", "--json"])).toEqual({
@@ -816,26 +837,14 @@ test("setup commits both initialized files in one configuration transaction", as
 
 test("installation-only doctor verifies owned active topology without requiring project configuration", async () => {
   const { homeDir, run } = await harness({ runOpenSpec: async () => ({ code: 1, stdout: "", stderr: "must not run" }) });
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  const release = join(managed, "versions/v0.1.0");
-  await writeRelease(release, "0.1.0");
-  await mkdir(join(homeDir, ".pi/agent/extensions"), { recursive: true });
-  await mkdir(join(homeDir, ".pi/agent/skills"), { recursive: true });
-  await mkdir(join(homeDir, ".local/bin"), { recursive: true });
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  await symlink(join(managed, "current/pi/extensions/horsepower"), join(homeDir, ".pi/agent/extensions/horsepower"));
-  await symlink(join(managed, "current/pi/skills/horsepower"), join(homeDir, ".pi/agent/skills/horsepower"));
-  await symlink(join(managed, "current/bin/horsepower"), join(homeDir, ".local/bin/horsepower"));
+  await installManagedFixture(homeDir, "enabled");
   const result = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout);
   expect(result).toMatchObject({ ok: true, data: { checks: [{ id: "installation", status: "ok" }] } });
 });
 
 test("Chinese doctor localizes integration findings while preserving status and commands", async () => {
   const { homeDir, run } = await harness();
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0");
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  const cli = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cli), { recursive: true }); await symlink(join(managed, "current/bin/horsepower"), cli);
+  await installManagedFixture(homeDir);
   await run(["configure", "--locale", "zh-CN", "--json"]);
   const result = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout);
   expect(result.data.checks[0]).toMatchObject({ id: "installation", status: "ok", integrationStatus: "disabled", message: "Horsepower Pi 集成已禁用。", action: "运行 horsepower enable。" });
@@ -843,10 +852,7 @@ test("Chinese doctor localizes integration findings while preserving status and 
 
 test("installation-only doctor distinguishes disabled Pi integration from installation failure", async () => {
   const { homeDir, run } = await harness();
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0");
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  const cli = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cli), { recursive: true }); await symlink(join(managed, "current/bin/horsepower"), cli);
+  await installManagedFixture(homeDir);
   const result = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout);
   expect(result).toMatchObject({ ok: true, data: { checks: [{ id: "installation", status: "ok", integrationStatus: "disabled", action: "Run horsepower enable." }] } });
 });
@@ -1106,16 +1112,80 @@ test("preflight rejects symlinked destination ancestors and versions without tou
   }
 });
 
+test("enable reconciles both links when a create mutates and then throws", async () => {
+  let creates = 0;
+  const { homeDir, run } = await harness({ linkOperations: {
+    create: async (target: string, path: string) => {
+      creates += 1;
+      await symlink(target, path);
+      if (creates === 2) throw new Error("injected post-create failure");
+    },
+    remove: async (path: string) => rm(path),
+  } });
+  const { managed, cli } = await installManagedFixture(homeDir);
+
+  const result = await run(["enable", "--json"]);
+
+  expect(result).toMatchObject({ exitCode: 1, stdout: "" });
+  expect(result.stderr).toContain("injected post-create failure");
+  await expect(lstat(join(homeDir, ".pi/agent/extensions/horsepower"))).rejects.toThrow();
+  await expect(lstat(join(homeDir, ".pi/agent/skills/horsepower"))).rejects.toThrow();
+});
+
+test("enable rollback preserves an unexpected conflicting object created during failure", async () => {
+  let creates = 0;
+  const { homeDir, run } = await harness({ linkOperations: {
+    create: async (target: string, path: string) => {
+      creates += 1;
+      if (creates === 2) { await writeFile(path, "foreign concurrent data"); throw new Error("mutation conflict"); }
+      await symlink(target, path);
+    },
+    remove: async (path: string) => rm(path),
+  } });
+  const { skill } = await installManagedFixture(homeDir);
+
+  const result = await run(["enable", "--json"]);
+
+  expect(result.stderr).toContain("mutation conflict");
+  expect(result.stderr).toContain("Rollback did not restore");
+  expect(await readFile(skill, "utf8")).toBe("foreign concurrent data");
+});
+
+test("enable attempts every reconciliation and reports operation plus rollback failures", async () => {
+  let creates = 0;
+  const removed: string[] = [];
+  const { homeDir, run } = await harness({ linkOperations: {
+    create: async (target: string, path: string) => {
+      creates += 1;
+      await symlink(target, path);
+      if (creates === 2) throw new Error("original mutation failure");
+    },
+    remove: async (path: string) => {
+      removed.push(path);
+      if (path.includes("extensions")) throw new Error("extension rollback failure");
+      await rm(path);
+    },
+  } });
+  const { managed, cli } = await installManagedFixture(homeDir);
+
+  const result = await run(["enable", "--json"]);
+
+  expect(removed).toEqual([
+    join(homeDir, ".pi/agent/extensions/horsepower"),
+    join(homeDir, ".pi/agent/skills/horsepower"),
+  ]);
+  expect(result.stderr).toContain("original mutation failure");
+  expect(result.stderr).toContain("extension rollback failure");
+  await expect(lstat(join(homeDir, ".pi/agent/skills/horsepower"))).rejects.toThrow();
+});
+
 test("enable rolls back the first link when creating the second link fails", async () => {
   let creates = 0;
   const { homeDir, run } = await harness({ linkOperations: {
     create: async (target: string, path: string) => { creates += 1; if (creates === 2) throw new Error("injected link failure"); await symlink(target, path); },
     remove: async (path: string) => rm(path),
   } });
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0");
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  const cli = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cli), { recursive: true }); await symlink(join(managed, "current/bin/horsepower"), cli);
+  const { managed, cli } = await installManagedFixture(homeDir);
   const result = await run(["enable", "--json"]);
   expect(result).toMatchObject({ exitCode: 1, stdout: "" });
   await expect(lstat(join(homeDir, ".pi/agent/extensions/horsepower"))).rejects.toThrow();
@@ -1125,10 +1195,7 @@ test("enable rolls back the first link when creating the second link fails", asy
 
 test("enable preflights both integration links and leaves both untouched on conflict", async () => {
   const { homeDir, run } = await harness();
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0");
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  const cli = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cli), { recursive: true }); await symlink(join(managed, "current/bin/horsepower"), cli);
+  const { managed, cli } = await installManagedFixture(homeDir);
   const skill = join(homeDir, ".pi/agent/skills/horsepower"); await mkdir(dirname(skill), { recursive: true }); await writeFile(skill, "unrelated");
   const extension = join(homeDir, ".pi/agent/extensions/horsepower");
   expect(await run(["enable", "--json"])).toMatchObject({ exitCode: 1, stdout: "" });
@@ -1138,9 +1205,7 @@ test("enable preflights both integration links and leaves both untouched on conf
 
 test("Chinese enable and disable conclusions preserve the /reload command", async () => {
   const { homeDir, run } = await harness();
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0"); await symlink("versions/v0.1.0", join(managed, "current"));
-  const cli = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cli), { recursive: true }); await symlink(join(managed, "current/bin/horsepower"), cli);
+  const { managed, cli } = await installManagedFixture(homeDir);
   await run(["configure", "--locale", "zh-CN", "--json"]);
   const enabled = JSON.parse((await run(["enable", "--json"])).stdout);
   expect(enabled).toMatchObject({ outputLocale: "zh-CN", summary: "Horsepower 已启用；请运行 /reload 或重启 Pi。" });
@@ -1150,22 +1215,40 @@ test("Chinese enable and disable conclusions preserve the /reload command", asyn
 
 test("enable and disable are idempotent across repeated invocations", async () => {
   const { homeDir, run } = await harness();
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0"); await symlink("versions/v0.1.0", join(managed, "current"));
-  const cli = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cli), { recursive: true }); await symlink(join(managed, "current/bin/horsepower"), cli);
+  const { managed, cli } = await installManagedFixture(homeDir);
   expect(await run(["enable", "--json"])).toMatchObject({ exitCode: 0 });
   expect(await run(["enable", "--json"])).toMatchObject({ exitCode: 0 });
   expect(await run(["disable", "--json"])).toMatchObject({ exitCode: 0 });
   expect(await run(["disable", "--json"])).toMatchObject({ exitCode: 0 });
 });
 
+test("Chinese doctor localizes partial and conflict findings while preserving status and raw evidence", async () => {
+  for (const kind of ["partial", "conflict"] as const) {
+    const { homeDir, run } = await harness();
+    const { managed, extension } = await installManagedFixture(homeDir);
+    await run(["configure", "--locale", "zh-CN", "--json"]);
+    await mkdir(dirname(extension), { recursive: true });
+    if (kind === "partial") await symlink(join(managed, "current/pi/extensions/horsepower"), extension); else await writeFile(extension, "conflict");
+
+    const check = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout).data.checks[0];
+
+    expect(check).toMatchObject({
+      id: "installation",
+      status: "error",
+      integrationStatus: kind === "partial" ? "partially_enabled" : "conflict",
+      message: kind === "partial" ? "Horsepower Pi 集成仅部分启用。" : "Horsepower Pi 集成存在冲突。",
+      action: "修复冲突，然后运行 horsepower enable 或 horsepower disable。",
+      rawEvidence: expect.any(String),
+    });
+    expect(check.rawEvidence).toContain(kind === "partial" ? "absent" : "non-symlink");
+  }
+});
+
 test("doctor distinguishes partially enabled and conflicting integration topology", async () => {
   for (const kind of ["partial", "conflict"] as const) {
     const { homeDir, run } = await harness();
-    const managed = join(homeDir, ".pi/agent/horsepower");
-    await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0"); await symlink("versions/v0.1.0", join(managed, "current"));
-    const cli = join(homeDir, ".local/bin/horsepower"); await mkdir(dirname(cli), { recursive: true }); await symlink(join(managed, "current/bin/horsepower"), cli);
-    const extension = join(homeDir, ".pi/agent/extensions/horsepower"); await mkdir(dirname(extension), { recursive: true });
+    const { managed, extension } = await installManagedFixture(homeDir);
+    await mkdir(dirname(extension), { recursive: true });
     if (kind === "partial") await symlink(join(managed, "current/pi/extensions/horsepower"), extension); else await writeFile(extension, "conflict");
     const result = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout);
     expect(result).toMatchObject({ ok: false, data: { checks: [{ id: "installation", status: "error", integrationStatus: kind === "partial" ? "partially_enabled" : "conflict" }] } });
@@ -1180,13 +1263,7 @@ test("enable and disable reject unsupported platforms before mutation", async ()
 
 test("enable verifies the active release and restores only absent Pi integration links", async () => {
   const { homeDir, run } = await harness();
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  const release = join(managed, "versions/v0.1.0");
-  await writeRelease(release, "0.1.0");
-  const cli = join(homeDir, ".local/bin/horsepower");
-  await mkdir(dirname(cli), { recursive: true });
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  await symlink(join(managed, "current/bin/horsepower"), cli);
+  const { managed, cli } = await installManagedFixture(homeDir);
   await mkdir(join(managed, "state"), { recursive: true }); await writeFile(join(managed, "state/keep"), "state");
   const result = JSON.parse((await run(["enable", "--json"])).stdout);
   expect(result).toMatchObject({ ok: true, data: { integrationStatus: "enabled", reloadRequired: true } });
@@ -1202,15 +1279,7 @@ test("disable restores the first link when removing the second link fails", asyn
     create: async (target: string, path: string) => symlink(target, path),
     remove: async (path: string) => { removes += 1; if (removes === 2) throw new Error("injected unlink failure"); await rm(path); },
   } });
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  await writeRelease(join(managed, "versions/v0.1.0"), "0.1.0");
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  const links: Array<[string, string]> = [
-    [join(homeDir, ".pi/agent/extensions/horsepower"), join(managed, "current/pi/extensions/horsepower")],
-    [join(homeDir, ".pi/agent/skills/horsepower"), join(managed, "current/pi/skills/horsepower")],
-    [join(homeDir, ".local/bin/horsepower"), join(managed, "current/bin/horsepower")],
-  ];
-  for (const [path, target] of links) { await mkdir(dirname(path), { recursive: true }); await symlink(target, path); }
+  const { managed } = await installManagedFixture(homeDir, "enabled");
   expect(await run(["disable", "--json"])).toMatchObject({ exitCode: 1 });
   expect(await readlink(join(homeDir, ".pi/agent/extensions/horsepower"))).toBe(join(managed, "current/pi/extensions/horsepower"));
   expect(await readlink(join(homeDir, ".pi/agent/skills/horsepower"))).toBe(join(managed, "current/pi/skills/horsepower"));
@@ -1218,17 +1287,7 @@ test("disable restores the first link when removing the second link fails", asyn
 
 test("disable removes only owned Pi integration links and preserves CLI, release, and user data", async () => {
   const { homeDir, run } = await harness();
-  const managed = join(homeDir, ".pi/agent/horsepower");
-  const release = join(managed, "versions/v0.1.0");
-  await writeRelease(release, "0.1.0");
-  const extension = join(homeDir, ".pi/agent/extensions/horsepower");
-  const skill = join(homeDir, ".pi/agent/skills/horsepower");
-  const cli = join(homeDir, ".local/bin/horsepower");
-  await mkdir(dirname(extension), { recursive: true }); await mkdir(dirname(skill), { recursive: true }); await mkdir(dirname(cli), { recursive: true });
-  await symlink("versions/v0.1.0", join(managed, "current"));
-  await symlink(join(managed, "current/pi/extensions/horsepower"), extension);
-  await symlink(join(managed, "current/pi/skills/horsepower"), skill);
-  await symlink(join(managed, "current/bin/horsepower"), cli);
+  const { managed, extension, skill, cli } = await installManagedFixture(homeDir, "enabled");
   await writeFile(join(managed, "settings.json"), "{}\n"); await writeFile(join(managed, "model-slots.json"), "{}\n");
   await mkdir(join(managed, "state/handoffs"), { recursive: true }); await writeFile(join(managed, "state/handoffs/keep"), "evidence");
   const result = JSON.parse((await run(["disable", "--json"])).stdout);
@@ -1338,8 +1397,9 @@ test("doctor rejects trusted installation ancestor symlinks without following or
     expect(result, hostile).toMatchObject({ exitCode: 1, stderr: "" });
     expect(installation, hostile).toMatchObject({
       status: "error",
-      message: expect.stringContaining(hostile === "horsepower-root" ? hp : hostile === "extensions-parent" ? join(homeDir, ".pi/agent/extensions") : hostile === "skills-parent" ? join(homeDir, ".pi/agent/skills") : join(homeDir, ".local/bin")),
-      action: "Install or repair Horsepower from an official release",
+      message: "Horsepower installation is invalid.",
+      rawEvidence: expect.stringContaining(hostile === "horsepower-root" ? hp : hostile === "extensions-parent" ? join(homeDir, ".pi/agent/extensions") : hostile === "skills-parent" ? join(homeDir, ".pi/agent/skills") : join(homeDir, ".local/bin")),
+      action: "Install or repair Horsepower from an official release.",
     });
     expect(await readFile(marker, "utf8"), hostile).toBe("external data");
     expect(await readlink(hostile === "horsepower-root" ? hp : hostile === "extensions-parent" ? join(homeDir, ".pi/agent/extensions") : hostile === "skills-parent" ? join(homeDir, ".pi/agent/skills") : join(homeDir, ".local/bin")), hostile).toBe(external);
@@ -1404,7 +1464,9 @@ test("doctor reports malformed managed release topology as actionable installati
     expect(result.exitCode, hostile).toBe(1);
     expect(JSON.parse(result.stdout).data.checks.find((check: { id: string }) => check.id === "installation"), hostile).toMatchObject({
       status: "error",
-      action: "Install or repair Horsepower from an official release",
+      message: "Horsepower installation is invalid.",
+      rawEvidence: expect.any(String),
+      action: "Install or repair Horsepower from an official release.",
     });
   }
 });
@@ -1440,8 +1502,9 @@ test("doctor rejects extra foreign data anywhere in an otherwise valid managed v
     expect(result, foreign).toMatchObject({ exitCode: 1, stderr: "" });
     expect(JSON.parse(result.stdout).data.checks.find((check: { id: string }) => check.id === "installation"), foreign).toMatchObject({
       status: "error",
-      message: expect.stringContaining(foreignPath),
-      action: "Install or repair Horsepower from an official release",
+      message: "Horsepower installation is invalid.",
+      rawEvidence: expect.stringContaining(foreignPath),
+      action: "Install or repair Horsepower from an official release.",
     });
   }
 });

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
+import { selectedE2ELocales } from "../fixtures/e2e-locales.js";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(import.meta.dirname, "../..");
@@ -215,27 +216,29 @@ test("repeated installation safely reuses the same immutable verified release", 
   expect(await readlink(join(managedRoot, "current"))).toBe(`versions/v${version}`);
 });
 
-test("installed bundled CLI disables and re-enables Pi links while retaining state", async () => {
-  const result = await install();
-  const managed = join(result.home, ".pi", "agent", "horsepower");
-  const cli = join(result.home, ".local", "bin", "horsepower");
-  const extension = join(result.home, ".pi", "agent", "extensions", "horsepower");
-  const skill = join(result.home, ".pi", "agent", "skills", "horsepower");
-  const handoff = join(managed, "state", "handoffs", "retained-evidence");
-  await mkdir(dirname(handoff), { recursive: true }); await writeFile(handoff, "English internal evidence");
-  const env = { ...process.env, HOME: result.home, PATH: `${result.bin}:${process.env.PATH ?? ""}` };
-  await execFileAsync(cli, ["configure", "--locale", "zh-CN", "--json"], { cwd: result.root, env });
-  const doctor = JSON.parse((await execFileAsync(cli, ["doctor", "--installation-only", "--json"], { cwd: result.root, env })).stdout);
-  expect(doctor).toMatchObject({ outputLocale: "zh-CN", summary: "Horsepower 诊断已完成。" });
-  const disabled = JSON.parse((await execFileAsync(cli, ["disable", "--json"], { cwd: result.root, env })).stdout);
-  expect(disabled).toMatchObject({ ok: true, outputLocale: "zh-CN", summary: "Horsepower 已禁用；请运行 /reload 或重启 Pi。", data: { integrationStatus: "disabled", reloadRequired: true } });
-  await expect(access(extension)).rejects.toThrow(); await expect(access(skill)).rejects.toThrow();
-  expect(await readFile(handoff, "utf8")).toBe("English internal evidence");
-  expect(await readlink(join(managed, "current"))).toBe(`versions/v${version}`);
-  const enabled = JSON.parse((await execFileAsync(cli, ["enable", "--json"], { cwd: result.root, env })).stdout);
-  expect(enabled).toMatchObject({ ok: true, outputLocale: "zh-CN", summary: "Horsepower 已启用；请运行 /reload 或重启 Pi。", data: { integrationStatus: "enabled", reloadRequired: true } });
-  expect(await readlink(extension)).toBe(join(managed, "current/pi/extensions/horsepower"));
-  expect(await readlink(skill)).toBe(join(managed, "current/pi/skills/horsepower"));
+test("installed bundled CLI covers selected locales while retaining English internal state", async () => {
+  for (const locale of selectedE2ELocales()) {
+    const result = await install();
+    const managed = join(result.home, ".pi", "agent", "horsepower");
+    const cli = join(result.home, ".local", "bin", "horsepower");
+    const extension = join(result.home, ".pi", "agent", "extensions", "horsepower");
+    const skill = join(result.home, ".pi", "agent", "skills", "horsepower");
+    const handoff = join(managed, "state", "handoffs", "retained-evidence");
+    await mkdir(dirname(handoff), { recursive: true }); await writeFile(handoff, "English internal evidence");
+    const env = { ...process.env, HOME: result.home, PATH: `${result.bin}:${process.env.PATH ?? ""}` };
+    await execFileAsync(cli, ["configure", "--locale", locale, "--json"], { cwd: result.root, env });
+    const doctor = JSON.parse((await execFileAsync(cli, ["doctor", "--installation-only", "--json"], { cwd: result.root, env })).stdout);
+    expect(doctor, locale).toMatchObject({ outputLocale: locale, summary: locale === "zh-CN" ? "Horsepower 诊断已完成。" : "Horsepower diagnostics completed." });
+    const disabled = JSON.parse((await execFileAsync(cli, ["disable", "--json"], { cwd: result.root, env })).stdout);
+    expect(disabled, locale).toMatchObject({ ok: true, outputLocale: locale, summary: locale === "zh-CN" ? "Horsepower 已禁用；请运行 /reload 或重启 Pi。" : "Horsepower disabled; run /reload or restart Pi.", data: { integrationStatus: "disabled", reloadRequired: true } });
+    await expect(access(extension), locale).rejects.toThrow(); await expect(access(skill), locale).rejects.toThrow();
+    expect(await readFile(handoff, "utf8"), locale).toBe("English internal evidence");
+    expect(await readlink(join(managed, "current")), locale).toBe(`versions/v${version}`);
+    const enabled = JSON.parse((await execFileAsync(cli, ["enable", "--json"], { cwd: result.root, env })).stdout);
+    expect(enabled, locale).toMatchObject({ ok: true, outputLocale: locale, summary: locale === "zh-CN" ? "Horsepower 已启用；请运行 /reload 或重启 Pi。" : "Horsepower enabled; run /reload or restart Pi.", data: { integrationStatus: "enabled", reloadRequired: true } });
+    expect(await readlink(extension), locale).toBe(join(managed, "current/pi/extensions/horsepower"));
+    expect(await readlink(skill), locale).toBe(join(managed, "current/pi/skills/horsepower"));
+  }
 });
 
 test("clean non-interactive install verifies and activates stable symlinks with English guidance", async () => {

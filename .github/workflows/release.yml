@@ -10,22 +10,7 @@ permissions:
 
 jobs:
   verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14]
-        output-locale: [en, zh-CN]
-    runs-on: ${{ matrix.os }}
-    env:
-      HORSEPOWER_E2E_LOCALE: ${{ matrix.output-locale }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.19.0
-          cache: npm
-      - run: npm ci
-      - run: npm run check
+    uses: ./.github/workflows/verify.yml
 
   publish-release:
     needs: verify

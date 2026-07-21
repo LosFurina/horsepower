@@ -27,18 +27,27 @@ test("English and Chinese documentation cover the public execution and safety co
   }
 });
 
-test("CI, alpha, and tag-only release workflows enforce cross-platform bilingual E2E gates", async () => {
+test("CI, alpha, and tag-only release workflows share one cross-platform bilingual release-scanning gate", async () => {
+  const verify = await readFile(new URL("../../.github/workflows/verify.yml", import.meta.url), "utf8");
   const ci = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const alpha = await readFile(new URL("../../.github/workflows/alpha.yml", import.meta.url), "utf8");
   const release = await readFile(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
-  for (const workflow of [ci, alpha, release]) {
+  for (const workflow of [verify, ci, alpha, release]) {
     expect(() => parse(workflow)).not.toThrow();
-    expect(workflow).toContain("ubuntu-latest");
-    expect(workflow).toContain("macos-14");
-    expect(workflow).toContain("npm run check");
-    expect(workflow).toContain("en");
-    expect(workflow).toContain("zh-CN");
     expect(workflow).not.toMatch(/npm publish|git push|pi install|pi update/u);
+  }
+  expect(verify).toContain("workflow_call");
+  expect(verify).toContain("ubuntu-latest");
+  expect(verify).toContain("macos-14");
+  expect(verify).toContain("HORSEPOWER_E2E_LOCALE");
+  expect(verify).toContain("en");
+  expect(verify).toContain("zh-CN");
+  expect(verify).toContain("npm run check");
+  expect(verify).toContain("npm run release");
+  for (const caller of [ci, alpha, release]) {
+    expect(caller).toContain("uses: ./.github/workflows/verify.yml");
+    expect(caller).not.toContain("npm run check");
+    expect(caller).not.toContain("ubuntu-latest, macos-14");
   }
   expect(alpha).toContain("workflow_dispatch");
   expect(release).toContain("tags:");

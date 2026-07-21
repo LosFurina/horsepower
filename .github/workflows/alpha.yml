@@ -8,28 +8,4 @@ permissions:
 
 jobs:
   verify-alpha:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14]
-        output-locale: [en, zh-CN]
-    runs-on: ${{ matrix.os }}
-    env:
-      HORSEPOWER_E2E_LOCALE: ${{ matrix.output-locale }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.19.0
-          cache: npm
-      - run: npm ci
-      - run: npm run check
-      - name: Build and scan alpha release
-        run: npm run release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: horsepower-alpha-${{ matrix.os }}-${{ matrix.output-locale }}
-          path: |
-            release/horsepower-v*.tar.gz
-            release/horsepower-v*.tar.gz.sha256
-          if-no-files-found: error
+    uses: ./.github/workflows/verify.yml
