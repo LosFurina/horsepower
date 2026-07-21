@@ -5,6 +5,7 @@ import { discoverAgents, type AgentDefinition } from "../agents/catalog.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
 import { createHandoffStore } from "../handoffs/store.js";
 import { createRunLifecycle } from "../lifecycle/run-lifecycle.js";
+import { createReviewCampaignManager } from "../lifecycle/review-campaign.js";
 import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary } from "../openspec/boundary.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
@@ -61,6 +62,7 @@ export class HorsepowerRuntime {
   readonly #options: CreateHorsepowerRuntimeOptions;
   readonly #manager: PersistentWorkerManager;
   readonly #lifecycle: ReturnType<typeof createRunLifecycle>;
+  readonly #reviews = createReviewCampaignManager();
   readonly #boundary: ReturnType<typeof createOpenSpecBoundary>;
   readonly #notifiers = new Set<ReturnType<typeof createWebhookNotifier>>();
   readonly #operations = new Set<Promise<unknown>>();
@@ -103,8 +105,8 @@ export class HorsepowerRuntime {
     const projectId = await realpath(cwd).catch(() => cwd);
     const paths = resolveHorsepowerPaths({ homeDir: this.#options.homeDir, projectDir: cwd });
     const readText = this.#options.readText ?? ((path: string) => readFile(path, "utf8"));
-    const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor"]);
-    const lifecycleOnly = new Set(["begin_change", "report_terminal"]);
+    const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor", "review_campaign_status"]);
+    const lifecycleOnly = new Set(["begin_change", "report_terminal", "begin_review_campaign", "record_review_finding", "extend_review_campaign", "end_review_campaign"]);
     if (!safe.has(String(raw.action))) {
       if (!context.captain) throw new Error(`Captain capability is required for ${String(raw.action)}`);
       await this.#boundary.authorize({
@@ -186,6 +188,12 @@ export class HorsepowerRuntime {
       prepareHandoffMessage: (input) => handoffs.prepareMessage(input),
       validateHandoffReport: (input) => handoffs.validateReport(input),
       recordHandoffTerminal: (input) => handoffs.recordTerminal(input),
+      beginReviewCampaign: (input) => this.#reviews.begin(input),
+      consumeReviewCampaign: (input) => this.#reviews.consume(input),
+      recordReviewFinding: (input) => this.#reviews.recordFinding(input),
+      extendReviewCampaign: (input) => this.#reviews.extend(input),
+      endReviewCampaign: (input) => this.#reviews.end(input),
+      reviewCampaignStatus: (campaignId, campaignProjectId) => this.#reviews.status(campaignId, campaignProjectId),
       trackSettlement: (settlement) => { this.#track(settlement); },
     });
     return orchestration.execute({ ...raw, cwd }, { captain: context.captain });

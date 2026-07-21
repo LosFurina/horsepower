@@ -2,6 +2,7 @@ import { Check, Errors } from "typebox/value";
 import type { AgentDefinition } from "../agents/catalog.js";
 import type { ChangeTerminalReport, DispatchTerminalReport } from "../lifecycle/run-lifecycle.js";
 import type { CompletionEvidence, E2EWaiver } from "../lifecycle/verification-gate.js";
+import type { ReviewCampaign, ReviewCampaignOutcome, ReviewFindingScope } from "../lifecycle/review-campaign.js";
 import type { OneShotExecutor, OneShotInvocation } from "../runtime/one-shot.js";
 import type { ResolvedSlot } from "../slots/registry.js";
 import { horsepowerActionSchemas, horsepowerSubagentSchema } from "./schema.js";
@@ -49,6 +50,12 @@ export interface OrchestrationOptions {
   prepareHandoffMessage?: (input: { projectPath: string; runId: string; brief: string; producer: { kind: "captain"; id: string } }) => Promise<{ worker: { briefPath: string; reportPath: string }; reportRevision: number }>;
   validateHandoffReport?: (input: { projectPath: string; runId: string; producer: { kind: "worker"; id: string }; expectedRevision?: number }) => Promise<unknown>;
   recordHandoffTerminal?: (input: { projectPath: string; runId: string; status: "failed" | "canceled"; producer?: { kind: "worker"; id: string } }) => Promise<unknown>;
+  beginReviewCampaign?: (input: { changeId: string; projectId: string; acceptanceScope: string; budget: number }) => ReviewCampaign;
+  consumeReviewCampaign?: (input: { campaignId: string; changeId: string; projectId: string; dispatchSummary: string }) => ReviewCampaign;
+  recordReviewFinding?: (input: { campaignId: string; changeId: string; projectId: string; rootCauseId: string; summary: string; scope: ReviewFindingScope; evidenceRef?: string }) => ReviewCampaign;
+  extendReviewCampaign?: (input: { campaignId: string; changeId: string; projectId: string; additionalBudget: number; humanAuthorized: boolean; reason: string }) => ReviewCampaign;
+  endReviewCampaign?: (input: { campaignId: string; changeId: string; projectId: string; outcome: ReviewCampaignOutcome; summary: string }) => ReviewCampaign;
+  reviewCampaignStatus?: (campaignId: string, projectId: string) => ReviewCampaign;
 }
 
 function required(input: Record<string, unknown>, field: string): string {
@@ -104,6 +111,12 @@ function preflight(action: string, input: Record<string, unknown>): void {
     for (const field of ["changeId", "cwd"]) required(input, field);
   } else if (action === "report_terminal") {
     for (const field of ["changeId", "cwd", "runId", "status", "summary"]) required(input, field);
+  } else if (action === "begin_review_campaign") {
+    for (const field of ["changeId", "cwd", "acceptanceScope"]) required(input, field);
+  } else if (["record_review_finding", "extend_review_campaign", "end_review_campaign"].includes(action)) {
+    for (const field of ["changeId", "cwd", "campaignId"]) required(input, field);
+  } else if (action === "review_campaign_status") {
+    for (const field of ["cwd", "campaignId"]) required(input, field);
   } else if (["status", "read", "abort", "destroy"].includes(action)) {
     required(input, "cwd");
     required(input, "workerId");
@@ -195,7 +208,7 @@ export function createOrchestration(options: OrchestrationOptions) {
       const action = required(rawInput, "action");
       preflight(action, rawInput);
       const cwd = required(rawInput, "cwd");
-      const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor"]);
+      const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor", "review_campaign_status"]);
       if (!safe.has(action) && !caller.captain) throw new Error(`Captain capability is required for ${action}`);
       const changeId = safe.has(action) ? undefined : required(rawInput, "changeId");
       await options.authorize({ action, ...(changeId === undefined ? {} : { changeId }), cwd });
@@ -217,6 +230,44 @@ export function createOrchestration(options: OrchestrationOptions) {
         rawInput.force === true,
       );
       if (action === "doctor") return dependency(options.doctor, "doctor")();
+      if (action === "review_campaign_status") return dependency(options.reviewCampaignStatus, "reviewCampaignStatus")(required(rawInput, "campaignId"), options.projectId ?? cwd);
+
+      if (action === "begin_review_campaign") {
+        return dependency(options.beginReviewCampaign, "beginReviewCampaign")({
+          changeId: changeId!, projectId: options.projectId ?? cwd,
+          acceptanceScope: required(rawInput, "acceptanceScope"), budget: rawInput.budget as number,
+        });
+      }
+      if (action === "record_review_finding") {
+        return dependency(options.recordReviewFinding, "recordReviewFinding")({
+          campaignId: required(rawInput, "campaignId"), changeId: changeId!, projectId: options.projectId ?? cwd,
+          rootCauseId: required(rawInput, "rootCauseId"),
+          summary: required(rawInput, "summary"), scope: required(rawInput, "scope") as ReviewFindingScope,
+          ...(rawInput.evidenceRef === undefined ? {} : { evidenceRef: required(rawInput, "evidenceRef") }),
+        });
+      }
+      if (action === "extend_review_campaign") {
+        return dependency(options.extendReviewCampaign, "extendReviewCampaign")({
+          campaignId: required(rawInput, "campaignId"), changeId: changeId!, projectId: options.projectId ?? cwd,
+          additionalBudget: rawInput.additionalBudget as number,
+          humanAuthorized: rawInput.humanAuthorized === true, reason: required(rawInput, "reason"),
+        });
+      }
+      if (action === "end_review_campaign") {
+        return dependency(options.endReviewCampaign, "endReviewCampaign")({
+          campaignId: required(rawInput, "campaignId"), changeId: changeId!, projectId: options.projectId ?? cwd,
+          outcome: required(rawInput, "outcome") as ReviewCampaignOutcome,
+          summary: required(rawInput, "summary"),
+        });
+      }
+
+      const reviewCampaignId = typeof rawInput.reviewCampaignId === "string" ? rawInput.reviewCampaignId : undefined;
+      if (reviewCampaignId) {
+        dependency(options.consumeReviewCampaign, "consumeReviewCampaign")({
+          campaignId: reviewCampaignId, changeId: changeId!, projectId: options.projectId ?? cwd,
+          dispatchSummary: `${action} ${typeof rawInput.name === "string" ? rawInput.name : typeof rawInput.workerId === "string" ? rawInput.workerId : "work"}`,
+        });
+      }
 
       if (action === "begin_change") {
         return dependency(options.beginChange, "beginChange")({ changeId: changeId!, projectId: options.projectId ?? cwd });

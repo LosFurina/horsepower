@@ -18,6 +18,42 @@ test("exports a strict Horsepower TypeBox action schema", async () => {
   expect(Check(schema as never, { action: "create", handoffMode: "inline", changeId: "x", cwd: "/project", name: "n", agent: "a" })).toBe(false);
 });
 
+test("review campaign budget is consumed before a review dispatch creates work", async () => {
+  const calls: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => { calls.push("authorize"); },
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: name, prompt: "Review.", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => { calls.push("worker"); return { workerId: "w" }; },
+    beginDispatch: () => { calls.push("dispatch"); return { runId: "run" }; },
+    consumeReviewCampaign: (input) => { calls.push(`consume:${input.campaignId}`); throw new Error("Review campaign budget exhausted: campaign-1"); },
+    reportDispatchTerminal: async () => undefined,
+  });
+  await expect(captain(orchestration, {
+    action: "create", handoffMode: "inline", changeId: "change-a", cwd: "/project", name: "review", agent: "reviewer", modelSlot: "judgment", reviewCampaignId: "campaign-1",
+  })).rejects.toThrow("budget exhausted");
+  expect(calls).toEqual(["authorize", "consume:campaign-1"]);
+});
+
+test("workers cannot create or extend review campaigns", async () => {
+  let mutations = 0;
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: () => { throw new Error("unused"); }, validateModel: () => undefined, getAgent: () => { throw new Error("unused"); },
+    createWorker: async () => ({ workerId: "unused" }), beginDispatch: () => ({ runId: "unused" }), reportDispatchTerminal: async () => undefined,
+    beginReviewCampaign: () => { mutations += 1; throw new Error("unexpected"); },
+    extendReviewCampaign: () => { mutations += 1; throw new Error("unexpected"); },
+  });
+  await expect(orchestration.execute({ action: "begin_review_campaign", changeId: "change-a", cwd: "/project", acceptanceScope: "task", budget: 1 }, { captain: false }))
+    .rejects.toThrow("Captain capability is required");
+  await expect(orchestration.execute({ action: "extend_review_campaign", changeId: "change-a", cwd: "/project", campaignId: "campaign-1", additionalBudget: 1, humanAuthorized: true, reason: "human" }, { captain: false }))
+    .rejects.toThrow("Captain capability is required");
+  expect(mutations).toBe(0);
+});
+
 test("rejects advancing actions without Captain capability before authorization", async () => {
   let authorized = false;
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
