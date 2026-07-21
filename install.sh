@@ -276,11 +276,35 @@ fi
 activate_failed=0
 trap cleanup EXIT HUP INT TERM
 
+MODEL_SETUP_COMPLETE=0
+if [ "$INTERACTIVE" -eq 1 ]; then
+  if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "现在设置必需的模型 slot？[y/N]：" >&4
+  else printf '%s ' "Set up required model slots now? [y/N]:" >&4; fi
+  IFS= read -r MODEL_SETUP_CONFIRM <&3 || MODEL_SETUP_CONFIRM=""
+  case "$MODEL_SETUP_CONFIRM" in
+    y|Y|yes|YES)
+      if HOME="$HOME_DIR" HORSEPOWER_TTY_INPUT="$TTY_INPUT" HORSEPOWER_TTY_OUTPUT="$TTY_OUTPUT" "$CLI_LINK" setup --interactive --json >/dev/null; then
+        MODEL_SETUP_COMPLETE=1
+      fi
+      ;;
+  esac
+fi
+
 if [ "$LOCALE" = "zh-CN" ]; then
   printf '%s\n' "Horsepower 安装成功。"
-  printf '%s\n' "下一步：horsepower setup"
+  if [ "$MODEL_SETUP_COMPLETE" -eq 1 ]; then
+    printf '%s\n' "模型设置已完成。"
+  else
+    printf '%s\n' "模型设置未完成。"
+    printf '%s\n' "下一步：horsepower setup --interactive"
+  fi
 else
   printf '%s\n' "Horsepower installed successfully."
-  printf '%s\n' "Next: horsepower setup"
+  if [ "$MODEL_SETUP_COMPLETE" -eq 1 ]; then
+    printf '%s\n' "Model setup completed."
+  else
+    printf '%s\n' "Model setup incomplete."
+    printf '%s\n' "Next: horsepower setup --interactive"
+  fi
   if [ "$NO_SETUP" -eq 1 ]; then printf '%s\n' "Chinese output: horsepower configure --locale zh-CN"; fi
 fi

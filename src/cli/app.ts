@@ -25,6 +25,11 @@ export interface CliOptions {
   models?: ModelCatalog;
   modelCatalog?: PiModelCatalog;
   capabilityProbe?: ModelCapabilityProbe;
+  modelCapabilityDiagnostics?: readonly {
+    id: string;
+    status: "unverified" | "unsupported" | "inconclusive" | "stale";
+    rawEvidence: string;
+  }[];
   terminal?: SetupTerminal;
   runOpenSpec(args: readonly string[], options: { cwd: string }): Promise<RunResult>;
   fetch?: typeof fetch;
@@ -606,8 +611,9 @@ export function createCli(options: CliOptions) {
     }
     const checks: Array<Record<string, unknown>> = [];
     let configurationValid = false;
+    let resolvedSlots: Record<string, { model: string; thinking: ThinkingLevel }> = {};
     try {
-      const data = await slotsData(); configurationValid = true;
+      const data = await slotsData(); configurationValid = true; resolvedSlots = data.resolved;
       checks.push({ id: "configuration", status: "ok", message: localizedMessage(outputLocale, "doctor.configurationValid"), rawEvidence: `Slots revision ${data.revision}` });
     } catch (cause) {
       checks.push({ id: "configuration", status: "error", message: localizedMessage(outputLocale, "doctor.configurationInvalid"), action: localizedMessage(outputLocale, "doctor.setupAction"), rawEvidence: (cause as Error).message });
@@ -629,11 +635,57 @@ export function createCli(options: CliOptions) {
       }
     }
     checks.push(await openspecCheck(outputLocale));
-    checks.push(!configurationValid
-      ? { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelNeedsConfiguration"), action: localizedMessage(outputLocale, "doctor.setupAction") }
-      : options.models
-        ? { id: "model-registry", status: "ok", message: localizedMessage(outputLocale, "doctor.modelValidated") }
-        : { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelUnavailable") });
+    const catalog = setupCatalog();
+    if (configurationValid && catalog?.status === "unavailable") {
+      checks.push({
+        id: "model-catalog", status: "skipped", catalogStatus: "unavailable",
+        message: localizedMessage(outputLocale, "doctor.catalogUnavailable"),
+        action: localizedMessage(outputLocale, "doctor.catalogAction"), rawEvidence: catalog.reason,
+      });
+    } else {
+      checks.push(!configurationValid
+        ? { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelNeedsConfiguration"), action: localizedMessage(outputLocale, "doctor.setupAction") }
+        : catalog?.status === "available"
+          ? { id: "model-registry", status: "ok", message: localizedMessage(outputLocale, "doctor.modelValidated") }
+          : { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelUnavailable") });
+    }
+    const derivedDiagnostics: Array<{ id: string; status: "unverified" | "unsupported"; rawEvidence: string }> = [];
+    if (configurationValid && catalog?.status === "available") {
+      const seen = new Set<string>();
+      for (const slot of requiredSetupSlots) {
+        const binding = resolvedSlots[slot];
+        if (!binding) continue;
+        const id = `${binding.model}:${binding.thinking}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const declared = catalog.models[binding.model]?.thinkingLevels;
+        if (declared === undefined) {
+          derivedDiagnostics.push({
+            id, status: "unverified",
+            rawEvidence: `${binding.model} thinking=${binding.thinking} code=missing_evidence catalogRevision=${catalog.revision}`,
+          });
+        } else if (!declared.includes(binding.thinking)) {
+          derivedDiagnostics.push({
+            id, status: "unsupported",
+            rawEvidence: `${binding.model} thinking=${binding.thinking} code=declared_exact_exclusion catalogRevision=${catalog.revision}`,
+          });
+        }
+      }
+    }
+    const capabilityMessages = {
+      unverified: ["doctor.capabilityUnverified", "doctor.capabilityReconfigureAction"],
+      unsupported: ["doctor.capabilityUnsupported", "doctor.capabilityUnsupportedAction"],
+      inconclusive: ["doctor.capabilityInconclusive", "doctor.capabilityRetryAction"],
+      stale: ["doctor.capabilityStale", "doctor.capabilityStaleAction"],
+    } as const;
+    for (const diagnostic of [...derivedDiagnostics, ...(options.modelCapabilityDiagnostics ?? [])]) {
+      const [messageId, actionId] = capabilityMessages[diagnostic.status];
+      checks.push({
+        id: `model-capability:${diagnostic.id}`, status: "skipped", capabilityStatus: diagnostic.status,
+        message: localizedMessage(outputLocale, messageId), action: localizedMessage(outputLocale, actionId),
+        rawEvidence: diagnostic.rawEvidence,
+      });
+    }
     checks.push(await installationCheck(outputLocale));
     return { data: { checks }, ok: !checks.some((check) => check.status === "error"), exitCode: checks.some((check) => check.status === "error") ? 1 : 0 };
   }

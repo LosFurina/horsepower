@@ -875,6 +875,91 @@ test("installation-only doctor distinguishes disabled Pi integration from instal
   expect(result).toMatchObject({ ok: true, data: { checks: [{ id: "installation", status: "ok", integrationStatus: "disabled", action: "Run horsepower enable." }] } });
 });
 
+test("doctor derives unverified and unsupported capability findings from current catalog metadata", async () => {
+  const modelCatalog = {
+    status: "available" as const,
+    modelIds: ["provider/judge", "provider/craft", "provider/util"],
+    models: {
+      "provider/judge": { thinkingLevels: undefined },
+      "provider/craft": { thinkingLevels: ["low"] },
+      "provider/util": { thinkingLevels: ["low"] },
+    },
+    revision: "catalog-revision",
+  };
+  const { homeDir, run } = await harness({ models: undefined, modelCatalog });
+  const slotsPath = join(homeDir, ".pi/agent/horsepower/model-slots.json");
+  await mkdir(dirname(slotsPath), { recursive: true });
+  await writeFile(slotsPath, JSON.stringify({ slots: {
+    judgment: { model: "provider/judge", thinking: "high" },
+    craft: { model: "provider/craft", thinking: "medium" },
+    utility: { model: "provider/util", thinking: "low" },
+  } }));
+
+  const checks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
+  expect(checks).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      id: "model-capability:provider/judge:high", capabilityStatus: "unverified",
+      rawEvidence: "provider/judge thinking=high code=missing_evidence catalogRevision=catalog-revision",
+    }),
+    expect.objectContaining({
+      id: "model-capability:provider/craft:medium", capabilityStatus: "unsupported",
+      rawEvidence: "provider/craft thinking=medium code=declared_exact_exclusion catalogRevision=catalog-revision",
+    }),
+  ]));
+});
+
+test("doctor localizes capability diagnostics while preserving status IDs and raw evidence", async () => {
+  const diagnostics = [
+    { id: "provider/judge:high", status: "unverified", rawEvidence: "provider/judge thinking=high code=missing_evidence" },
+    { id: "provider/craft:medium", status: "unsupported", rawEvidence: "provider/craft thinking=medium code=INVALID_THINKING" },
+    { id: "provider/util:low", status: "inconclusive", rawEvidence: "provider/util thinking=low code=timeout" },
+    { id: "project/craft:max", status: "stale", rawEvidence: "project/craft thinking=max code=ttl_expired" },
+  ] as const;
+  for (const locale of ["en", "zh-CN"] as const) {
+    const { run } = await harness({ modelCapabilityDiagnostics: diagnostics });
+    await run(setupArgs);
+    if (locale === "zh-CN") await run(["configure", "--locale", locale, "--json"]);
+
+    const checks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
+    const capability = checks.filter((check: { id: string }) => check.id.startsWith("model-capability:"));
+    expect(capability.map((check: { id: string; capabilityStatus: string; rawEvidence: string }) => ({
+      id: check.id, capabilityStatus: check.capabilityStatus, rawEvidence: check.rawEvidence,
+    }))).toEqual(diagnostics.map((diagnostic) => ({
+      id: `model-capability:${diagnostic.id}`, capabilityStatus: diagnostic.status, rawEvidence: diagnostic.rawEvidence,
+    })));
+    expect(capability.map((check: { action: string }) => check.action)).toEqual([
+      locale === "zh-CN" ? "运行 horsepower setup --interactive 重新验证或配置模型。" : "Run horsepower setup --interactive to revalidate or reconfigure models.",
+      locale === "zh-CN" ? "运行 horsepower setup --interactive 选择受支持的模型与 thinking 组合。" : "Run horsepower setup --interactive to choose a supported model and thinking combination.",
+      locale === "zh-CN" ? "解决 rawEvidence 中的问题，然后运行 horsepower setup --interactive 重试。" : "Resolve the issue in rawEvidence, then retry with horsepower setup --interactive.",
+      locale === "zh-CN" ? "运行 horsepower setup --interactive 刷新过期的能力证据。" : "Run horsepower setup --interactive to refresh stale capability evidence.",
+    ]);
+    expect(capability.map((check: { message: string }) => check.message).join(" ")).toContain(locale === "zh-CN" ? "未验证" : "unverified");
+  }
+});
+
+test("doctor reports an unavailable current model catalog with localized remediation", async () => {
+  for (const locale of ["en", "zh-CN"] as const) {
+    const { homeDir, run } = await harness({ models: undefined, modelCatalog: { status: "unavailable", reason: "registry-error" } });
+    const slotsPath = join(homeDir, ".pi/agent/horsepower/model-slots.json");
+    await mkdir(dirname(slotsPath), { recursive: true });
+    await writeFile(slotsPath, JSON.stringify({ slots: {
+      judgment: { model: "provider/judge", thinking: "high" },
+      craft: { model: "provider/craft", thinking: "medium" },
+      utility: { model: "provider/util", thinking: "low" },
+    } }));
+    if (locale === "zh-CN") await run(["configure", "--locale", locale, "--json"]);
+
+    const check = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks.find((candidate: { id: string }) => candidate.id === "model-catalog");
+    expect(check).toMatchObject({
+      status: "skipped",
+      catalogStatus: "unavailable",
+      rawEvidence: "registry-error",
+      message: locale === "zh-CN" ? "Pi 模型目录不可用；无法验证模型能力。" : "The Pi model catalog is unavailable; model capabilities could not be verified.",
+      action: locale === "zh-CN" ? "恢复 Pi 模型目录后运行 horsepower setup --interactive。" : "Restore the Pi model catalog, then run horsepower setup --interactive.",
+    });
+  }
+});
+
 test("doctor reports configuration, notifications, OpenSpec, skipped models, and ownership actionably", async () => {
   const { run } = await harness({ models: undefined, runOpenSpec: async (args: readonly string[]) => args[0] === "--version"
     ? { code: 127, stdout: "", stderr: "not found" }

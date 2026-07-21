@@ -18,7 +18,7 @@ beforeAll(async () => {
   releaseDir = join(repositoryRoot, "release");
 });
 
-async function fixture(options: { failInstallationDoctor?: boolean } = {}) {
+async function fixture(options: { failInstallationDoctor?: boolean; guidedSetup?: "configured" | "probe-failure" | "canceled" } = {}) {
   const root = await mkdtemp(join(tmpdir(), "horsepower-installer-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -27,9 +27,13 @@ async function fixture(options: { failInstallationDoctor?: boolean } = {}) {
   const pi = join(bin, "pi");
   await writeFile(openspec, "#!/bin/sh\nprintf '%s\\n' '1.6.0'\n", { mode: 0o755 });
   await writeFile(pi, "#!/bin/sh\nprintf '%s\\n' '0.80.10'\n", { mode: 0o755 });
-  if (options.failInstallationDoctor) {
+  if (options.failInstallationDoctor || options.guidedSetup) {
     const realNode = process.execPath;
-    await writeFile(join(bin, "node"), `#!/bin/sh\ncase \"$*\" in *\"doctor --installation-only\"*) exit 42 ;; esac\nexec ${JSON.stringify(realNode)} \"$@\"\n`, { mode: 0o755 });
+    const setup = options.guidedSetup === "configured"
+      ? `mkdir -p "$HOME/.pi/agent/horsepower"; printf '%s\\n' '{"slots":{"judgment":{"model":"provider/judge","thinking":"high"},"craft":{"model":"provider/craft","thinking":"medium"},"utility":{"model":"provider/util","thinking":"low"}}}' > "$HOME/.pi/agent/horsepower/model-slots.json"; exit 0`
+      : options.guidedSetup === "probe-failure" ? "exit 1"
+        : options.guidedSetup === "canceled" ? "exit 1" : "";
+    await writeFile(join(bin, "node"), `#!/bin/sh\ncase \"$*\" in *\"doctor --installation-only\"*) ${options.failInstallationDoctor ? "exit 42" : `exec ${JSON.stringify(realNode)} \"$@\"`} ;; *\"setup --interactive\"*) ${setup || `exec ${JSON.stringify(realNode)} \"$@\"`} ;; esac\nexec ${JSON.stringify(realNode)} \"$@\"\n`, { mode: 0o755 });
   }
   return { root, home, bin, openspec, pi };
 }
@@ -52,6 +56,23 @@ async function install(args: string[] = []) {
   return { ...fixturePaths, ...result };
 }
 
+async function runInstallerWithoutTty(
+  fixturePaths: Awaited<ReturnType<typeof fixture>>,
+  args: string[] = [],
+) {
+  return execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version, ...args], {
+    cwd: fixturePaths.root,
+    env: {
+      ...process.env,
+      HOME: fixturePaths.home,
+      PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`,
+      HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`,
+      HORSEPOWER_TTY_INPUT: join(fixturePaths.root, "missing-tty-input"),
+      HORSEPOWER_TTY_OUTPUT: join(fixturePaths.root, "missing-tty-output"),
+    },
+  });
+}
+
 async function runInteractiveInstaller(
   fixturePaths: Awaited<ReturnType<typeof fixture>>,
   ttyInput: string,
@@ -70,6 +91,55 @@ async function runInteractiveInstaller(
     },
   });
 }
+
+test("installer optionally runs guided model setup after activation and reports configuration separately", async () => {
+  const fixturePaths = await fixture({ guidedSetup: "configured" });
+  const ttyInput = join(fixturePaths.root, "tty-model-success");
+  const ttyOutput = join(fixturePaths.root, "tty-model-success-output");
+  await writeFile(ttyInput, "\ny\n");
+  await writeFile(ttyOutput, "");
+
+  const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "en"]);
+
+  expect(await readFile(ttyOutput, "utf8")).toContain("Set up required model slots now?");
+  expect(result.stdout).toContain("Horsepower installed successfully.");
+  expect(result.stdout).toContain("Model setup completed.");
+  expect(result.stdout).not.toContain("horsepower setup --interactive");
+  expect(JSON.parse(await readFile(join(fixturePaths.home, ".pi/agent/horsepower/model-slots.json"), "utf8"))).toHaveProperty("slots.judgment.model", "provider/judge");
+});
+
+test.each([
+  ["skip", undefined, "\nn\n"],
+  ["probe failure", "probe-failure" as const, "\ny\n"],
+  ["cancel", "canceled" as const, "\ny\n"],
+])("installer preserves prior model-slot bytes on incomplete guided setup: %s", async (_label, guidedSetup, input) => {
+  const fixturePaths = await fixture(guidedSetup ? { guidedSetup } : {});
+  const slotsPath = join(fixturePaths.home, ".pi/agent/horsepower/model-slots.json");
+  const before = Buffer.from('{ "prior": "exact model slot bytes" }\n');
+  await mkdir(dirname(slotsPath), { recursive: true });
+  await writeFile(slotsPath, before);
+  const ttyInput = join(fixturePaths.root, "tty-model-incomplete");
+  const ttyOutput = join(fixturePaths.root, "tty-model-incomplete-output");
+  await writeFile(ttyInput, input);
+  await writeFile(ttyOutput, "");
+
+  const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "en"]);
+
+  expect(result.stdout).toContain("Horsepower installed successfully.");
+  expect(result.stdout).toContain("Model setup incomplete.");
+  expect(result.stdout).toContain("horsepower setup --interactive");
+  expect(await readFile(slotsPath)).toEqual(before);
+});
+
+test("no-TTY and --no-setup installs skip model setup with the exact follow-up command", async () => {
+  const noTty = await fixture();
+  const noTtyResult = await runInstallerWithoutTty(noTty, ["--locale", "en"]);
+  expect(noTtyResult.stdout).toContain("Horsepower installed successfully.");
+  expect(noTtyResult.stdout).toContain("horsepower setup --interactive");
+
+  const disabled = await install();
+  expect(disabled.stdout).toContain("horsepower setup --interactive");
+});
 
 test("interactive external Skill audit defaults to No before activation and affirmative input continues", async () => {
   const fixturePaths = await fixture();

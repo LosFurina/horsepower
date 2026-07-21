@@ -1,4 +1,4 @@
-import { open } from "node:fs/promises";
+import { appendFile, open, readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import type { SetupAction, SetupTerminal } from "./setup.js";
@@ -26,20 +26,7 @@ async function terminalStreams(): Promise<TerminalStreams | undefined> {
   }
 }
 
-async function question(prompt: string): Promise<string | undefined> {
-  const streams = await terminalStreams();
-  if (!streams) return undefined;
-  const readline = createInterface({ input: streams.input, output: streams.output });
-  try {
-    const answer = (await readline.question(prompt)).trim();
-    return answer.toLowerCase() === "cancel" ? undefined : answer;
-  } finally {
-    readline.close();
-    await streams.close();
-  }
-}
-
-async function select<T extends string>(prompt: string, choices: readonly T[]): Promise<T | undefined> {
+async function select<T extends string>(question: (prompt: string) => Promise<string | undefined>, prompt: string, choices: readonly T[]): Promise<T | undefined> {
   for (;;) {
     const answer = await question(prompt);
     if (answer === undefined) return undefined;
@@ -51,21 +38,44 @@ async function select<T extends string>(prompt: string, choices: readonly T[]): 
 }
 
 export function createSetupTerminal(): SetupTerminal {
+  const injectedInput = process.env.HORSEPOWER_TTY_INPUT;
+  const injectedOutput = process.env.HORSEPOWER_TTY_OUTPUT;
+  let injectedAnswers: Promise<string[]> | undefined;
+  const question = async (prompt: string): Promise<string | undefined> => {
+    if (injectedInput && injectedOutput) {
+      injectedAnswers ??= readFile(injectedInput, "utf8").then((value) => value.split(/\r?\n/u));
+      await appendFile(injectedOutput, prompt);
+      const answer = ((await injectedAnswers).shift() ?? "").trim();
+      return answer.toLowerCase() === "cancel" ? undefined : answer;
+    }
+    const streams = await terminalStreams();
+    if (!streams) return undefined;
+    const readline = createInterface({ input: streams.input, output: streams.output });
+    try {
+      const answer = (await readline.question(prompt)).trim();
+      return answer.toLowerCase() === "cancel" ? undefined : answer;
+    } finally {
+      readline.close();
+      await streams.close();
+    }
+  };
   return {
-    showModels(modelIds) {
-      process.stderr.write(`Current Pi models:\n${modelIds.map((model, index) => `  ${index + 1}. ${model}`).join("\n")}\n`);
+    async showModels(modelIds) {
+      const text = `Current Pi models:\n${modelIds.map((model, index) => `  ${index + 1}. ${model}`).join("\n")}\n`;
+      if (injectedOutput) await appendFile(injectedOutput, text);
+      else process.stderr.write(text);
     },
     chooseModel({ slot, modelIds }) {
-      return select(`Select model for ${slot} (name or number; cancel to stop): `, modelIds);
+      return select(question, `Select model for ${slot} (name or number; cancel to stop): `, modelIds);
     },
     chooseThinking({ slot, thinkingLevels }) {
-      return select<ThinkingLevel>(`Select thinking for ${slot} (${thinkingLevels.join(", ")}; cancel to stop): `, thinkingLevels);
+      return select<ThinkingLevel>(question, `Select thinking for ${slot} (${thinkingLevels.join(", ")}; cancel to stop): `, thinkingLevels);
     },
     chooseProbeAction({ result }) {
       const actions: readonly SetupAction[] = result.status === "inconclusive"
         ? ["retry", "reselect", "skip", "cancel"]
         : ["reselect", "skip", "cancel"];
-      return select(`Capability ${result.status} (${result.evidence.code}). Choose ${actions.join("/")}: `, actions);
+      return select(question, `Capability ${result.status} (${result.evidence.code}). Choose ${actions.join("/")}: `, actions);
     },
   };
 }
