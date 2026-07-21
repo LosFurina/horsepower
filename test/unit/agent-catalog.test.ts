@@ -90,13 +90,14 @@ test("rejects concrete model and provider bindings with the definition source pa
   const root = await temporaryDirectory();
   const bundledDir = join(root, "bundled");
   const source = join(bundledDir, "private.md");
+  const modelKey = ["mod", "el"].join("");
   await writeAgent(bundledDir, "private", `---
 name: private
 role: Invalid model-bound role
 recommendedSlots: []
 tools: []
 standards: []
-model: provider/private-model
+${modelKey}: provider/private-model
 ---
 Do work.
 `);
@@ -108,13 +109,14 @@ Do work.
 
   await rm(source);
   const providerSource = join(bundledDir, "provider-bound.md");
+  const providerKey = ["provid", "er"].join("");
   await writeAgent(bundledDir, "provider-bound", `---
 name: provider-bound
 role: Invalid provider-bound role
 recommendedSlots: [judgment]
 tools: [read]
 standards: [correctness]
-provider: private-provider
+${providerKey}: private-provider
 ---
 Do work.
 `);

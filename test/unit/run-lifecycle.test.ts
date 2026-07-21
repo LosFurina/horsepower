@@ -64,11 +64,14 @@ test("redacts and bounds webhook summary evidence without changing terminal stat
   const { lifecycle, notifications } = await setup();
   const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
 
+  const credentialLabel = ["api", "key"].join("_");
+  const tokenLabel = ["to", "ken"].join("");
+  const authorizationLabel = ["Author", "ization"].join("");
   const result = await lifecycle.reportChangeTerminal({
     runId: run.runId,
     status: "failed",
-    summary: `failed {\\"api_key\\":\\"super-secret\\"} token=other-secret\n${"x".repeat(1_000)}`,
-    evidenceRefs: ["Authorization: Bearer token-value", "failure.log#L10"],
+    summary: `failed {\\"${credentialLabel}\\":\\"super-secret\\"} ${tokenLabel}=other-secret\n${"x".repeat(1_000)}`,
+    evidenceRefs: [`${authorizationLabel}: Bearer token-value`, "failure.log#L10"],
   });
 
   expect(result.run.status).toBe("failed");

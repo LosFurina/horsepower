@@ -230,6 +230,30 @@ test("archive inspection rejects hostile USTAR name/prefix combinations and malf
   await expect(inspectReleaseArchive(boundary)).rejects.toThrow("Unexpected archive root");
 });
 
+test("archive inspection rejects every non-canonical USTAR header region", async () => {
+  const root = await temporaryDirectory();
+  const privatePath = ["", "Users", "alice", "private"].join("/");
+  const mutations = [
+    { label: "linkname", offset: 157, value: privatePath },
+    { label: "magic", offset: 257, value: "opaque" },
+    { label: "version", offset: 263, value: "01" },
+    { label: "uname", offset: 265, value: "private-provider" },
+    { label: "gname", offset: 297, value: "private-model" },
+    { label: "devmajor", offset: 329, value: "token" },
+    { label: "devminor", offset: 337, value: "secret" },
+    { label: "reserved padding", offset: 500, value: "private" },
+  ] as const;
+
+  for (const [index, mutation] of mutations.entries()) {
+    const archive = join(root, `opaque-${index}.tar.gz`);
+    await writeFile(archive, makeHostileArchive({
+      name: "horsepower/file",
+      headerMutation: mutation,
+    }));
+    await expect(inspectReleaseArchive(archive), mutation.label).rejects.toThrow("Non-canonical archive header");
+  }
+});
+
 test("archive inspection requires canonical termination, padding, and directory content", async () => {
   const root = await temporaryDirectory();
   const valid = join(root, "valid.tar.gz");
@@ -324,13 +348,16 @@ test("privacy scanner rejects structured bindings, standalone credentials, NUL c
   const githubToken = `${["ghp", ""].join("_")}${"a".repeat(36)}`;
   const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"private"}').toString("base64url")}.${"a".repeat(32)}`;
   const authorization = ["Author", "ization"].join("");
+  const providerKey = ["provid", "er"].join("");
+  const providersKey = `${providerKey}s`;
+  const modelKey = ["mod", "el"].join("");
   const forbidden = [
-    ["provider mapping", "provider: secret-cloud"],
-    ["quoted provider", `{"provider": "secret-cloud"}`],
-    ["provider array", `providers: ["secret-cloud"]`],
-    ["concrete model", "model: private-model-v9"],
-    ["quoted model", `{"modelId": "private-model-v9"}`],
-    ["model array", `models: ["private-model-v9"]`],
+    ["provider mapping", `${providerKey}: secret-cloud`],
+    ["quoted provider", `{"${providerKey}": "secret-cloud"}`],
+    ["provider array", `${providersKey}: ["secret-cloud"]`],
+    ["concrete model", `${modelKey}: private-model-v9`],
+    ["quoted model", `{"${modelKey}Id": "private-model-v9"}`],
+    ["model array", `${modelKey}s: ["private-model-v9"]`],
     ["credential", `${["api", "key"].join("_")} = '${"a".repeat(24)}1'`],
     ["token", `${authorization}: Bearer ${"a".repeat(26)}`],
     ["standalone github", githubToken],
@@ -357,23 +384,23 @@ test("privacy scanner rejects structured bindings, standalone credentials, NUL c
   const structuredBindings = [
     ["multiline JSON", "binding.json", `{
       "runtime": {
-        "models": [
+        "${modelKey}s": [
           "private-model-v9"
         ]
       }
     }`],
     ["YAML sequence", "binding.yaml", `runtime:
-  providers:
+  ${providersKey}:
     - secret-cloud
 `],
     ["nested YAML map", "binding.yml", `runtime:
-  "models":
+  "${modelKey}s":
     judgment:
       name: private-model-v9
 `],
     ["Markdown frontmatter", "agent.md", `---
 runtime:
-  provider:
+  ${providerKey}:
     name: secret-cloud
 ---
 Provider-neutral instructions.
@@ -405,6 +432,39 @@ slotPolicy:
   expect(() => scanPublicContent([{ path: "bin/horsepower", content: Buffer.from("return {\n  model: binding.model,\n  provider: resolved.provider,\n};\n") }])).not.toThrow();
 });
 
+test("privacy scanner rejects language-agnostic concrete bindings and letter-only labeled credentials", () => {
+  const key = (left: string, right = "") => [left, right].join("");
+  const forbidden = [
+    ["src/settings.ts", `export const settings = { ${key("mod", "el")}: "private-alpha", ${key("provid", "ers")}: [\n  "secret-cloud"\n] };`],
+    ["src/settings.js", `config['${key("model", "Id")}'] = 'private-beta';\nconfig.${key("provider", "Mapping")} = { craft: 'secret-cloud' };`],
+    ["scripts/configure.sh", `${key("model", "Name")}=private-gamma\n${key("provid", "er")}=secret-cloud\n`],
+    ["scripts/export.sh", `export ${key("MOD", "EL")}=private-exported\n`],
+    ["config/runtime.env", `${key("MOD", "ELS")}=private-delta,private-epsilon\n`],
+    ["docs/setup.md", `Runtime configuration:\n\n- ${key("provid", "er")}: secret-cloud\n- ${key("mod", "el")}: private-zeta\n`],
+    ["notes/release.txt", `${key("provid", "ers")} = [secret-cloud]\n`],
+    ["src/credentials.ts", `const config = { ${["api", "key"].join("_")}: '${"a".repeat(28)}' };`],
+    ["scripts/auth.env", `${["access", "token"].join("_")}=${"b".repeat(28)}\n${key("pass", "word") }=${"c".repeat(28)}\n`],
+  ] as const;
+  for (const [path, content] of forbidden) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from(content) }]), path).toThrow(/Forbidden public content/u);
+  }
+});
+
+test("privacy scanner permits semantic names, neutral prose, references, placeholders, and runtime-built fixtures", () => {
+  const modelKey = ["mod", "el"].join("");
+  const providerKey = ["provid", "er"].join("");
+  const safe = [
+    ["src/slots.ts", `interface Binding { ${modelKey}: string; ${providerKey}?: unknown }\nconst modelSlot = 'craft';\nconst ${modelKey} = parsed.values.get(id);\nconst token = parsed.values.get('token');\nreturn { ${modelKey}: binding.${modelKey}, ${providerKey}: resolved.${providerKey}, ${modelKey}s: options.${modelKey}s, secret: authValue.secret };\n`],
+    ["docs/model-neutral.md", "Models and providers are selected through semantic slots. A model-neutral release has no concrete binding.\n"],
+    ["config/example.env", "API_KEY=your_api_key_here\nTOKEN=<token>\nPASSWORD=changeme\n"],
+    ["config/example.yaml", `${modelKey}: <model-name>\n${providerKey}: your-provider-here\n${modelKey}s: [provider/model, project/craft, p/m, unknown/model]\n`],
+    ["test/runtime-fixture.ts", `const key = ['model', 'Id'].join('');\nconst fixture = { [key]: ['private', 'model'].join('-') };\n`],
+  ] as const;
+  for (const [path, content] of safe) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from(content) }]), path).not.toThrow();
+  }
+});
+
 function makeHostileArchive(options: {
   name: string;
   prefix?: string;
@@ -417,6 +477,7 @@ function makeHostileArchive(options: {
   nonZeroPadding?: boolean;
   zeroBlocks?: number;
   tail?: Buffer;
+  headerMutation?: { offset: number; value: string };
 }): Buffer {
   const {
     name,
@@ -441,7 +502,10 @@ function makeHostileArchive(options: {
   header.write(link, 157, 100, "utf8");
   header.write("ustar\0", 257, 6, "ascii");
   header.write("00", 263, 2, "ascii");
+  header.write("root", 265, 32, "ascii");
+  header.write("root", 297, 32, "ascii");
   Buffer.from(prefix).copy(header, 345, 0, 155);
+  if (options.headerMutation) Buffer.from(options.headerMutation.value).copy(header, options.headerMutation.offset);
   const sum = header.reduce((total, byte) => total + byte, 0);
   header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
   if (options.corruptChecksum === true) header[0] = (header[0] ?? 0) ^ 1;

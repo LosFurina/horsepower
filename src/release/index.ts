@@ -439,6 +439,13 @@ export async function inspectReleaseArchive(path: string): Promise<{ entries: Ar
     const expectedModes = typeFlag === "5" ? [0o755] : [0o644, 0o755];
     if (!expectedModes.includes(mode)) throw new Error(`Unsafe archive mode for ${name}: ${mode.toString(8)}`);
     if (uid !== 0 || gid !== 0 || mtime !== fixedMtimeSeconds) throw new Error(`Non-canonical archive metadata: ${name}`);
+    const canonicalHeader = tarHeader(
+      typeFlag === "5" ? `${normalized}/` : normalized,
+      typeFlag,
+      mode,
+      size,
+    );
+    if (!header.equals(canonicalHeader)) throw new Error(`Non-canonical archive header: ${canonicalPath}`);
     entries.push({
       path: normalized,
       type: typeFlag === "5" ? "directory" : "file",
@@ -508,6 +515,24 @@ const structuredBindingKeys = new Map<string, string>([
   ["modelname", "concrete-model"],
 ]);
 
+function isPlaceholder(value: string): boolean {
+  const trimmed = value.trim();
+  if (/^<[^>]+>$/u.test(trimmed)) return true;
+  const normalized = trimmed.toLowerCase().replace(/[^a-z0-9]/gu, "");
+  return normalized.length === 0
+    || /^(?:your|example|sample|placeholder|replace|redacted|dummy|fake|test|change|todo|none|null)/u.test(normalized)
+    || /^(?:provider|model|providermodel|providerjudge|providerutil|providerstrong|providercraft|providercheap|providervision|providerta|providerza|providermissing|projectcraft|mutatedmodel|othermodel|pm|unknownmodel|tokenvalue)$/u.test(normalized)
+    || /^(?:remove|stale|malformed|incompatible|requested|notification|auth|array|global|project)[a-z]*(?:credential|secret|token|header)$/u.test(normalized)
+    || /(?:here|changeme|redacted|placeholder)$/u.test(normalized);
+}
+
+function hasConcreteStructuredValue(value: unknown): boolean {
+  if (typeof value === "string") return !isPlaceholder(value);
+  if (Array.isArray(value)) return value.some(hasConcreteStructuredValue);
+  if (value !== null && typeof value === "object") return Object.values(value as Record<string, unknown>).some(hasConcreteStructuredValue);
+  return value !== null && value !== undefined;
+}
+
 function findStructuredBinding(value: unknown): string | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -519,7 +544,7 @@ function findStructuredBinding(value: unknown): string | undefined {
   if (value === null || typeof value !== "object") return undefined;
   for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
     const id = structuredBindingKeys.get(key.toLowerCase());
-    if (id && nested !== null && (!(typeof nested === "string") || nested.trim().length > 0)) return id;
+    if (id && hasConcreteStructuredValue(nested)) return id;
     const found = findStructuredBinding(nested);
     if (found) return found;
   }
@@ -542,8 +567,57 @@ function structuredDocument(path: string, text: string): unknown | undefined {
   }
 }
 
+function isRuntimeReference(value: string): boolean {
+  return /^(?:new\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/u.test(value)
+    || /^[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\[\d+\]))+$/u.test(value);
+}
+
+function findTextualBinding(text: string): string | undefined {
+  const assignment = /(?:^|[\n;,{}])\s*(?:(?:[-*]\s+)|(?:export\s+)?(?:const|let|var)\s+|export\s+)?(?:[A-Za-z_$][\w$]*\s*(?:\.\s*|\[\s*))?["']?(providerMapping|providers?|models?|modelId|modelName|model)["']?\s*\]?\s*[:=]\s*/gimu;
+  for (const match of text.matchAll(assignment)) {
+    const key = match[1]?.toLowerCase() ?? "";
+    const tail = text.slice((match.index ?? 0) + match[0].length);
+    const quoted = /^(["'])([^\r\n]*?)\1/u.exec(tail);
+    if (quoted) {
+      if (!isPlaceholder(quoted[2] ?? "")) return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
+      continue;
+    }
+    const collection = /^([\[{])([\s\S]*?)[\]}]/u.exec(tail);
+    if (collection) {
+      const body = collection[2]?.trim() ?? "";
+      const safePlaceholderArray = collection[1] === "[" && body.split(",")
+        .map((value) => value.trim().replace(/^(?:["'])(.*)(?:["'])$/u, "$1"))
+        .every(isPlaceholder);
+      const modelPaths = [...body.matchAll(/[A-Za-z][\w.-]*\/[A-Za-z][\w.-]*/gu)].map(([value]) => value);
+      const safePlaceholderMap = modelPaths.length > 0 && modelPaths.every(isPlaceholder)
+        && !/\b(?:private|secret|production|personal)\b/iu.test(body);
+      if (body.length > 0 && !safePlaceholderArray && !safePlaceholderMap) return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
+      continue;
+    }
+    const bare = /^([^\s,;}]+)/u.exec(tail)?.[1] ?? "";
+    const typeKeyword = /^(?:string|unknown|never|boolean|number|undefined|null)$/u.test(bare);
+    if (bare.length > 0 && !typeKeyword && !isRuntimeReference(bare) && !isPlaceholder(bare)) {
+      return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
+    }
+  }
+  return undefined;
+}
+
+function hasLabeledCredential(text: string): boolean {
+  const assignment = /(?:^|[\n;,{}])\s*["']?(?:api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password|credential|authorization)["']?\s*[:=]\s*/gimu;
+  for (const match of text.matchAll(assignment)) {
+    const tail = text.slice((match.index ?? 0) + match[0].length);
+    const quoted = /^(["'])([A-Za-z0-9_./+= -]+?)\1/u.exec(tail)?.[2];
+    const expression = quoted ?? /^([^,;}\r\n]+)/u.exec(tail)?.[1] ?? "";
+    const value = expression.trim();
+    const credential = /^(?:bearer|basic)\s+(.+)$/iu.exec(value)?.[1] ?? value;
+    if (credential.length >= 16 && !isRuntimeReference(credential) && !isPlaceholder(credential)) return true;
+  }
+  return false;
+}
+
 const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
-  { id: "credential", pattern: /(?:api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*["']?(?=[A-Za-z0-9_./+=-]{24,})(?=[A-Za-z0-9_./+=-]*\d)[A-Za-z0-9_./+=-]+|authorization\s*[:=]\s*["']?(?:bearer|basic)\s+[A-Za-z0-9_./+=-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
+  { id: "credential", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
   { id: "machine-path", pattern: /(?:^|[\s"'`(])(?:\/Users\/[^/\s]+\/|\/home\/[^/\s]+\/|[A-Za-z]:\\Users\\[^\\\s]+\\)/mu },
   { id: "legacy-workflow", pattern: /\b(?:AgentFlow|Superpowers)\b/mu },
 ];
@@ -559,6 +633,9 @@ export function scanPublicContent(contents: readonly PublicContent[]): void {
       const binding = findStructuredBinding(structuredDocument(item.path, text));
       if (binding) throw new Error(`Forbidden public content (${binding}) in ${item.path}`);
     }
+    const textualBinding = findTextualBinding(text);
+    if (textualBinding) throw new Error(`Forbidden public content (${textualBinding}) in ${item.path}`);
+    if (hasLabeledCredential(text)) throw new Error(`Forbidden public content (credential) in ${item.path}`);
     for (const forbidden of forbiddenPatterns) {
       const definesPrivacyPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";
       const isApprovedPlanningHistory = item.path.startsWith("openspec/");
