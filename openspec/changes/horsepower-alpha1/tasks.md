@@ -23,7 +23,7 @@
 
 ## 5. CLI and Installation
 
-- [ ] 5.1 Implement CLI parsing plus setup, configure, slots, set, unset, webhook configuration/test, doctor, staged-release preflight, and safe uninstall/purge commands with deterministic JSON flags, secret redaction, transactional mode-`0600` configuration, notification diagnostics, OpenSpec diagnostics, symlink ownership checks, and no model-provider mutation; verify command and filesystem behavior.
+- [x] 5.1 Implement CLI parsing plus setup, configure, slots, set, unset, webhook configuration/test, doctor, staged-release preflight, and safe uninstall/purge commands with deterministic JSON flags, secret redaction, transactional mode-`0600` configuration, notification diagnostics, OpenSpec diagnostics, symlink ownership checks, and no model-provider mutation; verify command and filesystem behavior.
 - [ ] 5.2 Implement deterministic GitHub Release staging, manifest/internal digests, archive/checksum generation, Pi extension/skill layout, and private-data scanning; verify the allowlisted archive, executable bits, checksum, model neutrality, and absence of private paths or credentials.
 - [ ] 5.3 Implement the POSIX curl bootstrap for Linux/macOS with official OpenSpec prerequisite checks, safe archive inspection/extraction, atomic `current` activation, conflict-safe stable links, optional `/dev/tty` webhook setup supporting skip/HMAC/Bearer/none and dispatch opt-in, rollback on failed doctor, and no copy/sudo/shell-profile/Pi-package operations; verify clean, skipped-webhook, authenticated-webhook, repeated, hostile, conflicting, and rollback installations.
 

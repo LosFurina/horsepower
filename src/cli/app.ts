@@ -493,14 +493,17 @@ export function createCli(options: CliOptions) {
   }
   async function installationCheck() {
     try {
+      await verifyTrustedPath(options.homeDir, topology.root);
+      for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true);
       const current = await currentState(topology.root, topology.current);
       const versions = await versionsState(topology.versions);
       const states = await Promise.all(topology.links.map((link) => linkState(link.path, link.target)));
       return current.status === "owned" && versions.status === "owned" && states.every((state) => state.status === "owned")
         ? { id: "installation", status: "ok", message: "Managed symlink topology is owned" }
         : { id: "installation", status: "error", message: [current, versions, ...states].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Install or repair Horsepower from an official release" };
-    } catch {
-      return { id: "installation", status: "error", message: "Unable to inspect the managed installation topology", action: "Inspect destination permissions, then install or repair Horsepower from an official release" };
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Unable to inspect the managed installation topology";
+      return { id: "installation", status: "error", message, action: "Install or repair Horsepower from an official release" };
     }
   }
   async function doctorSettings(trustedRoot: string, path: string): Promise<{ value?: JsonObject; error?: string }> {

@@ -1112,6 +1112,48 @@ test("preflight enforces semantic release compatibility boundaries", async () =>
   }
 });
 
+test("doctor rejects trusted installation ancestor symlinks without following or mutating them", async () => {
+  for (const hostile of ["horsepower-root", "extensions-parent", "skills-parent", "cli-parent"] as const) {
+    const { homeDir, root, run } = await harness();
+    const hp = join(homeDir, ".pi/agent/horsepower");
+    const external = join(root, `external-${hostile}`);
+    const managedRoot = hostile === "horsepower-root" ? external : hp;
+    await writeRelease(join(managedRoot, "versions/v0.1.0"), "0.1.0");
+    await symlink("versions/v0.1.0", join(managedRoot, "current"));
+    const marker = join(external, "keep");
+    await mkdir(external, { recursive: true });
+    await writeFile(marker, "external data");
+
+    if (hostile === "horsepower-root") {
+      await mkdir(dirname(hp), { recursive: true });
+      await symlink(external, hp);
+    }
+
+    for (const [name, parent, target] of [
+      ["extensions-parent", join(homeDir, ".pi/agent/extensions"), join(hp, "current/pi/extensions/horsepower")],
+      ["skills-parent", join(homeDir, ".pi/agent/skills"), join(hp, "current/pi/skills/horsepower")],
+      ["cli-parent", join(homeDir, ".local/bin"), join(hp, "current/bin/horsepower")],
+    ] as const) {
+      const actualParent = hostile === name ? external : parent;
+      await mkdir(dirname(parent), { recursive: true });
+      if (hostile === name) await symlink(external, parent);
+      else await mkdir(parent, { recursive: true });
+      await symlink(target, join(actualParent, "horsepower"));
+    }
+
+    const result = await run(["doctor", "--json"]);
+    const installation = JSON.parse(result.stdout).data.checks.find((check: { id: string }) => check.id === "installation");
+    expect(result, hostile).toMatchObject({ exitCode: 1, stderr: "" });
+    expect(installation, hostile).toMatchObject({
+      status: "error",
+      message: expect.stringContaining(hostile === "horsepower-root" ? hp : hostile === "extensions-parent" ? join(homeDir, ".pi/agent/extensions") : hostile === "skills-parent" ? join(homeDir, ".pi/agent/skills") : join(homeDir, ".local/bin")),
+      action: "Install or repair Horsepower from an official release",
+    });
+    expect(await readFile(marker, "utf8"), hostile).toBe("external data");
+    expect(await readlink(hostile === "horsepower-root" ? hp : hostile === "extensions-parent" ? join(homeDir, ".pi/agent/extensions") : hostile === "skills-parent" ? join(homeDir, ".pi/agent/skills") : join(homeDir, ".local/bin")), hostile).toBe(external);
+  }
+});
+
 test("doctor reports malformed managed release topology as actionable installation checks", async () => {
   for (const hostile of ["trivial", "compatibility", "entrypoint", "digest-shape", "digest-mismatch", "symlink"] as const) {
     const { homeDir, root, run } = await harness();
