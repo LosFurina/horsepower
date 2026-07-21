@@ -7,6 +7,7 @@ export const PI_CAPABILITY_PROBE_PROMPT = "Reply with OK.";
 
 export interface PiCapabilityProbeOptions {
   executable?: string;
+  environment?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   outputByteLimit?: number;
   evidenceByteLimit?: number;
@@ -79,7 +80,11 @@ export function createPiCapabilityProbe(options: PiCapabilityProbeOptions = {}):
           "--mode", "json", "--no-session", "--no-skills", "--no-tools",
           "--model", request.model, "--thinking", request.thinking,
           PI_CAPABILITY_PROBE_PROMPT,
-        ], { shell: false, stdio: ["pipe", "pipe", "pipe"] });
+        ], {
+          shell: false,
+          stdio: ["pipe", "pipe", "pipe"],
+          ...(options.environment ? { env: options.environment } : {}),
+        });
       } catch {
         return { status: "inconclusive", evidence: { code: "transport" } };
       }

@@ -16,7 +16,7 @@ Install only from the `LosFurina/horsepower` GitHub Releases page. Download the 
 ```sh
 curl -fsSLO https://github.com/LosFurina/horsepower/raw/main/install.sh
 sh install.sh --version 0.1.0-alpha.1 --no-setup
-horsepower setup
+horsepower setup --interactive
 ```
 
 The bootstrap downloads `horsepower-v<version>.tar.gz` and its SHA-256 asset, validates the exact layout and internal digests, then atomically switches `current`. It never uses `sudo`, edits shell startup files, or copies Pi resources. Use `--locale en` or `--locale zh-CN`; without a terminal or prior setting, English is used.
@@ -32,6 +32,10 @@ Run `horsepower skill-audit` or `horsepower skill-audit --json` from any project
 ## Model capability slots
 
 Every worker creation or one-shot dispatch explicitly names a `modelSlot`. Required slots are `judgment`, `craft`, and `utility`. Built-in fallbacks are `speed -> utility` and `context -> judgment`; custom slots are supported. Roles remain provider/model-neutral.
+
+Run `horsepower setup --interactive` to select current Pi-visible identifiers for all required slots. Horsepower validates each exact selected thinking value with authoritative current metadata or a bounded live probe; it does not infer every level from Pi's coarse reasoning flag. Authentication, quota, timeout, transport, malformed response, and unknown failures are **inconclusive**, not proof of support. An explicit accepted-values exclusion is **unsupported**. Setup validates all required bindings before one atomic write, so canceling or failing preserves the previous file.
+
+Successful evidence is process-local, keyed to the exact identifier, thinking value, and catalog revision, and reusable for at most ten minutes. A new process, stale evidence, or a changed catalog revision requires another probe. An actual worker rejection invalidates matching evidence immediately. Horsepower preserves the configured binding: there is no silent downgrade, identifier change, or fallback retry. Re-run `horsepower setup --interactive` to select another binding, or retry after an inconclusive provider condition clears. Live probes use the configured upstream and can add latency or cost; automated acceptance tests use only the repository's deterministic offline fixture.
 
 ## Pi interface and execution campaigns
 

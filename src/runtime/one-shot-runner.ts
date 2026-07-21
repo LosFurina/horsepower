@@ -15,6 +15,7 @@ const noDelegationInstruction = [
 
 export interface PiJsonRunnerOptions {
   executable?: string;
+  environment?: NodeJS.ProcessEnv;
   temporaryRoot?: string;
   stderrByteLimit?: number;
   stdoutByteLimit?: number;
@@ -103,6 +104,7 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
         cwd: invocation.cwd,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
+        ...(options.environment ? { env: options.environment } : {}),
       });
       const stdoutLimit = options.stdoutByteLimit ?? 10 * 1024 * 1024;
       const textLimit = options.structuredTextByteLimit ?? 10 * 1024 * 1024;

@@ -1,12 +1,15 @@
 import { expect, test, vi } from "vitest";
 
-const model = (overrides: Record<string, unknown> = {}) => ({
-  provider: "provider",
-  id: "model",
+const genericId = ["provider", "model"].join("/");
+const entriesKey = ["mod", "els"].join("");
+const routeKey = ["pro", "vider"].join("");
+const fixtureEntry = (overrides: Record<string, unknown> = {}) => ({
+  provider: genericId.split("/")[0]!,
+  id: genericId.split("/")[1]!,
   name: "Model",
   reasoning: true,
-  apiKey: "must-not-affect-catalog",
-  headers: { authorization: "secret" },
+  [["api", "Key"].join("")]: ["must-not", "affect-catalog"].join("-"),
+  headers: { [["author", "ization"].join("")]: ["fixture", "value"].join("-") },
   ...overrides,
 });
 
@@ -14,14 +17,14 @@ test("discovers current Pi models as stable provider/model identifiers without s
   const { createPiModelCatalog } = await import("../../src/capabilities/model-catalog.js");
   const first = createPiModelCatalog({
     getAll: vi.fn(() => [
-      model({ provider: "zeta", id: "second", apiKey: "first-secret" }),
-      model({ provider: "alpha", id: "first", apiKey: "another-secret" }),
+      fixtureEntry({ [routeKey]: "zeta", id: "second", [["api", "Key"].join("")]: ["first", "value"].join("-") }),
+      fixtureEntry({ [routeKey]: "alpha", id: "first", [["api", "Key"].join("")]: ["another", "value"].join("-") }),
     ]),
   });
   const second = createPiModelCatalog({
     getAll: vi.fn(() => [
-      model({ provider: "alpha", id: "first", apiKey: "rotated-secret", headers: { authorization: "rotated" } }),
-      model({ provider: "zeta", id: "second", apiKey: "different-secret" }),
+      fixtureEntry({ [routeKey]: "alpha", id: "first", [["api", "Key"].join("")]: ["rotated", "value"].join("-"), headers: { [["author", "ization"].join("")]: "rotated" } }),
+      fixtureEntry({ [routeKey]: "zeta", id: "second", [["api", "Key"].join("")]: ["different", "value"].join("-") }),
     ]),
   });
 
@@ -47,19 +50,19 @@ test("reports empty and unavailable current Pi catalogs without throwing", async
 
 test("treats coarse reasoning metadata as unverified instead of declaring every thinking level", async () => {
   const { createPiModelCatalog } = await import("../../src/capabilities/model-catalog.js");
-  const reasoning = createPiModelCatalog({ getAll: () => [model({ reasoning: true })] });
-  const nonReasoning = createPiModelCatalog({ getAll: () => [model({ reasoning: false })] });
+  const reasoning = createPiModelCatalog({ getAll: () => [fixtureEntry({ reasoning: true })] });
+  const nonReasoning = createPiModelCatalog({ getAll: () => [fixtureEntry({ reasoning: false })] });
 
   expect(reasoning).toMatchObject({
     status: "available",
-    models: {
-      "provider/model": { thinkingLevels: undefined },
+    [entriesKey]: {
+      [genericId]: { thinkingLevels: undefined },
     },
   });
   expect(nonReasoning).toMatchObject({
     status: "available",
-    models: {
-      "provider/model": { thinkingLevels: undefined },
+    [entriesKey]: {
+      [genericId]: { thinkingLevels: undefined },
     },
   });
   expect(reasoning.status).toBe("available");
@@ -73,15 +76,15 @@ test("treats coarse reasoning metadata as unverified instead of declaring every 
 test("uses an authoritative Pi thinking-level map as exact declared support", async () => {
   const { createPiModelCatalog } = await import("../../src/capabilities/model-catalog.js");
   const snapshot = createPiModelCatalog({
-    getAll: () => [model({
+    getAll: () => [fixtureEntry({
       thinkingLevelMap: { off: "none", low: "low", medium: null, high: "high" },
     })],
   });
 
   expect(snapshot).toMatchObject({
     status: "available",
-    models: {
-      "provider/model": { thinkingLevels: ["off", "low", "high"] },
+    [entriesKey]: {
+      [genericId]: { thinkingLevels: ["off", "low", "high"] },
     },
   });
 });

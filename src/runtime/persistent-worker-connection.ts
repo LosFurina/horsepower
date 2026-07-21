@@ -9,6 +9,7 @@ import { createRpcTransport } from "./rpc-transport.js";
 
 export interface PersistentWorkerStarterOptions {
   executable?: string;
+  environment?: NodeJS.ProcessEnv;
   temporaryRoot?: string;
   spawnProcess?: (
     command: string,
@@ -37,7 +38,11 @@ export function createPersistentWorkerStarter(options: PersistentWorkerStarterOp
       const child = spawnProcess(
         launch.command,
         launch.args,
-        { ...launch.options, cwd: input.cwd },
+        {
+          ...launch.options,
+          cwd: input.cwd,
+          ...(options.environment ? { env: options.environment } : {}),
+        },
       ) as ChildProcessWithoutNullStreams;
       const emitter = new EventEmitter();
       const transport = createRpcTransport(

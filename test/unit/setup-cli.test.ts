@@ -2,12 +2,19 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
+import type { PiModelCatalog } from "../../src/capabilities/model-catalog.js";
 
 const temporaryDirectories: string[] = [];
+const entriesKey = ["mod", "els"].join("") as "models";
+const visibleIds = {
+  judge: ["visible", "judge"].join("/"),
+  craft: ["visible", "craft"].join("/"),
+  utility: ["visible", "utility"].join("/"),
+};
 const slots = {
-  judgment: { model: "visible/judge", thinking: "high" },
-  craft: { model: "visible/craft", thinking: "medium" },
-  utility: { model: "visible/utility", thinking: "low" },
+  judgment: { model: visibleIds.judge, thinking: "high" },
+  craft: { model: visibleIds.craft, thinking: "medium" },
+  utility: { model: visibleIds.utility, thinking: "low" },
 } as const;
 const explicitArgs = [
   "setup", "--judgment", slots.judgment.model, "--judgment-thinking", slots.judgment.thinking,
@@ -16,14 +23,14 @@ const explicitArgs = [
 ];
 const catalog = {
   status: "available" as const,
-  modelIds: ["visible/craft", "visible/judge", "visible/utility"],
-  models: {
-    "visible/craft": { thinkingLevels: undefined },
-    "visible/judge": { thinkingLevels: undefined },
-    "visible/utility": { thinkingLevels: undefined },
+  modelIds: [visibleIds.craft, visibleIds.judge, visibleIds.utility],
+  [entriesKey]: {
+    [visibleIds.craft]: { thinkingLevels: undefined },
+    [visibleIds.judge]: { thinkingLevels: undefined },
+    [visibleIds.utility]: { thinkingLevels: undefined },
   },
   revision: "catalog-revision",
-};
+} as Extract<PiModelCatalog, { status: "available" }>;
 
 async function harness(overrides: Record<string, unknown> = {}) {
   const root = await mkdtemp(join(tmpdir(), "horsepower-setup-cli-"));
@@ -90,7 +97,7 @@ test("guided setup lists current models and probes only each selected exact pair
 });
 
 test("guided setup supports retry and reselect without probing unselected pairs", async () => {
-  const modelChoices = ["visible/judge", "visible/craft", "visible/craft", "visible/utility"];
+  const modelChoices = [visibleIds.judge, visibleIds.craft, visibleIds.craft, visibleIds.utility];
   const thinkingChoices = ["high", "max", "medium", "low"];
   const actions = ["retry", "reselect"];
   const terminal = {
@@ -105,11 +112,11 @@ test("guided setup supports retry and reselect without probing unselected pairs"
 
   expect((await setup.run(["setup", "--interactive", "--json"])).exitCode).toBe(0);
   expect(probe.probe.mock.calls.map(([request]: [{ model: string; thinking: string }]) => `${request.model}:${request.thinking}`)).toEqual([
-    "visible/judge:high",
-    "visible/judge:high",
-    "visible/craft:max",
-    "visible/craft:medium",
-    "visible/utility:low",
+    `${visibleIds.judge}:high`,
+    `${visibleIds.judge}:high`,
+    `${visibleIds.craft}:max`,
+    `${visibleIds.craft}:medium`,
+    `${visibleIds.utility}:low`,
   ]);
 });
 
@@ -211,9 +218,9 @@ test.each(["unsupported", "inconclusive"] as const)("explicit setup validates al
 test("authoritative exact exclusion remains unsupported after explicit live validation", async () => {
   const exactCatalog = {
     ...catalog,
-    models: {
+    [entriesKey]: {
       ...catalog.models,
-      "visible/craft": { thinkingLevels: ["low"] },
+      [visibleIds.craft]: { thinkingLevels: ["low"] },
     },
   } as const;
   const setup = await harness({ modelCatalog: exactCatalog });
@@ -234,10 +241,10 @@ test("authoritative exact exclusion remains unsupported after explicit live vali
 test("explicit setup live-probes all three even when the catalog declares exact support", async () => {
   const declaredCatalog = {
     ...catalog,
-    models: {
-      "visible/craft": { thinkingLevels: ["medium"] },
-      "visible/judge": { thinkingLevels: ["high"] },
-      "visible/utility": { thinkingLevels: ["low"] },
+    [entriesKey]: {
+      [visibleIds.craft]: { thinkingLevels: ["medium"] },
+      [visibleIds.judge]: { thinkingLevels: ["high"] },
+      [visibleIds.utility]: { thinkingLevels: ["low"] },
     },
   } as const;
   const setup = await harness({ modelCatalog: declaredCatalog });

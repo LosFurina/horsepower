@@ -1,0 +1,183 @@
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterEach, expect, test } from "vitest";
+import { createPiModelCatalog } from "../../src/capabilities/model-catalog.js";
+import { createCli } from "../../src/cli/app.js";
+import type { SetupTerminal } from "../../src/cli/setup.js";
+import { createHorsepowerRuntime } from "../../src/extension/runtime.js";
+import { createOneShotExecutor } from "../../src/runtime/one-shot.js";
+import { createPiJsonRunner } from "../../src/runtime/one-shot-runner.js";
+import { PersistentWorkerManager } from "../../src/runtime/persistent-manager.js";
+import { createPersistentWorkerStarter } from "../../src/runtime/persistent-worker-connection.js";
+import { createPiCapabilityProbe } from "../../src/runtime/pi-capability-probe.js";
+
+const fixtureExecutable = resolve(import.meta.dirname, "../fixtures/pi-local-capability.mjs");
+const roots: string[] = [];
+const genericId = ["provider", "model"].join("/");
+
+interface FixtureState {
+  acceptedThinking: string[];
+  rejectNextOneShot?: boolean;
+  rejectNextPersistent?: boolean;
+}
+
+interface FixtureEvent {
+  kind: "probe" | "one-shot" | "persistent";
+  thinking: string;
+}
+
+async function localFixture(state: FixtureState) {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-live-capability-"));
+  roots.push(root);
+  const statePath = join(root, "state.json");
+  const logPath = join(root, "events.ndjson");
+  await writeFile(statePath, JSON.stringify(state));
+  await chmod(fixtureExecutable, 0o755);
+  const environment = { ...process.env, HORSEPOWER_FIXTURE_STATE: statePath, HORSEPOWER_FIXTURE_LOG: logPath };
+  return {
+    root,
+    probe: createPiCapabilityProbe({ executable: fixtureExecutable, environment }),
+    oneShot: createOneShotExecutor({ run: createPiJsonRunner({ executable: fixtureExecutable, environment, temporaryRoot: root }) }),
+    manager: new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter({ executable: fixtureExecutable, environment, temporaryRoot: root }) }),
+    async set(patch: Partial<FixtureState>) {
+      const current = JSON.parse(await readFile(statePath, "utf8")) as FixtureState;
+      await writeFile(statePath, JSON.stringify({ ...current, ...patch }));
+    },
+    async events(): Promise<FixtureEvent[]> {
+      const text = await readFile(logPath, "utf8").catch(() => "");
+      return text.trim() ? text.trim().split("\n").map((line) => JSON.parse(line) as FixtureEvent) : [];
+    },
+  };
+}
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+test("interactive setup probes exact choices and explicitly reselects a rejected thinking value", async () => {
+  const fixture = await localFixture({ acceptedThinking: ["high"] });
+  const home = join(fixture.root, "home");
+  const project = join(fixture.root, "project");
+  await mkdir(project, { recursive: true });
+  const choices = ["max", "high", "high", "high"] as const;
+  let choice = 0;
+  const terminal: SetupTerminal = {
+    showModels: async (ids) => expect(ids).toEqual([genericId]),
+    chooseModel: async () => genericId,
+    chooseThinking: async () => choices[choice++],
+    chooseProbeAction: async ({ result }) => {
+      expect(result).toMatchObject({ status: "unsupported", evidence: { code: "INVALID_THINKING" } });
+      return "reselect";
+    },
+  };
+  const registry = { getAll: () => [{ provider: genericId.split("/")[0]!, id: genericId.split("/")[1]!, reasoning: true }] };
+  const cli = createCli({
+    homeDir: home,
+    cwd: project,
+    platform: process.platform,
+    modelCatalog: createPiModelCatalog(registry),
+    capabilityProbe: fixture.probe,
+    terminal,
+    runOpenSpec: async () => ({ code: 0, stdout: "", stderr: "" }),
+  });
+
+  const result = await cli.run(["setup", "--interactive", "--json"]);
+
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, data: { status: "configured" } });
+  const configured = JSON.parse(await readFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), "utf8"));
+  expect(Object.values(configured.slots)).toEqual([
+    { model: genericId, thinking: "high" },
+    { model: genericId, thinking: "high" },
+    { model: genericId, thinking: "high" },
+  ]);
+  expect((await fixture.events()).map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([
+    "probe:max", "probe:high", "probe:high", "probe:high",
+  ]);
+});
+
+async function runtimeHarness() {
+  const fixture = await localFixture({ acceptedThinking: ["high"] });
+  const home = join(fixture.root, "home");
+  const project = join(fixture.root, "project");
+  const agents = join(fixture.root, "agents");
+  await mkdir(join(home, ".pi", "agent", "horsepower"), { recursive: true });
+  await mkdir(project, { recursive: true });
+  await mkdir(agents, { recursive: true });
+  const binding = { model: genericId, thinking: "high" };
+  await writeFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), JSON.stringify({ slots: {
+    judgment: binding, craft: binding, utility: binding,
+  } }));
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: []\nstandards: []\n---\nWork only.\n");
+  const runOpenSpec = async (args: readonly string[]) => {
+    if (args[0] === "--version") return { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false };
+    if (args[0] === "doctor") return { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: project } }), stderr: "", truncated: false };
+    if (args[0] === "status") return { code: 0, stdout: JSON.stringify({ changeName: "change-a", isComplete: true }), stderr: "", truncated: false };
+    return { code: 0, stdout: JSON.stringify({ summary: { totals: { failed: 0 } } }), stderr: "", truncated: false };
+  };
+  const readText = async (path: string) => path.endsWith("SKILL.md")
+    ? "name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: 1.6.0\n"
+    : path.endsWith("opsx-apply.md") ? "Implement tasks from an OpenSpec change" : readFile(path, "utf8");
+  const runtime = createHorsepowerRuntime({
+    homeDir: home,
+    bundledAgentsDir: agents,
+    manager: fixture.manager,
+    oneShot: fixture.oneShot,
+    capabilityProbe: fixture.probe,
+    runOpenSpec,
+    readText,
+  });
+  const scopes = ["fresh", "reuse", "revision", "one-reject", "one-reprobe", "rpc-reject", "rpc-reprobe"];
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: scopes, mode: "multi_agent" });
+  let revisionFlag = false;
+  const context = {
+    captain: true,
+    cwd: project,
+    modelRegistry: { getAll: () => [{
+      provider: genericId.split("/")[0]!, id: genericId.split("/")[1]!, reasoning: revisionFlag,
+    }] } as never,
+  };
+  const common = {
+    changeId: "change-a", agent: "coder", modelSlot: "craft", handoffMode: "inline",
+    implementationCampaignId: campaign.campaignId, workKind: "implementation",
+  } as const;
+  return { fixture, runtime, context, common, setRevision: () => { revisionFlag = true; } };
+}
+
+test("one-shot and persistent workers reuse fresh evidence and revision changes force an exact reprobe", async () => {
+  const { fixture, runtime, context, common, setRevision } = await runtimeHarness();
+  await runtime.execute({ action: "single", ...common, taskScope: "fresh", name: "first", task: "first" }, context);
+  await runtime.execute({ action: "create", ...common, taskScope: "reuse", name: "persistent" }, context);
+  setRevision();
+  await runtime.execute({ action: "single", ...common, taskScope: "revision", name: "second", task: "second" }, context);
+
+  expect((await fixture.events()).map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([
+    "probe:high", "one-shot:high", "persistent:high", "probe:high", "one-shot:high",
+  ]);
+  await runtime.shutdown();
+});
+
+test("explicit worker rejections invalidate evidence and never retry with downgraded thinking", async () => {
+  const { fixture, runtime, context, common } = await runtimeHarness();
+  await runtime.execute({ action: "single", ...common, taskScope: "fresh", name: "fresh", task: "fresh" }, context);
+
+  await fixture.set({ rejectNextOneShot: true });
+  await expect(runtime.execute({ action: "single", ...common, taskScope: "one-reject", name: "rejected", task: "reject" }, context))
+    .rejects.toMatchObject({ code: "MODEL_CAPABILITY_REJECTED", status: "unsupported" });
+  await runtime.execute({ action: "single", ...common, taskScope: "one-reprobe", name: "after-one", task: "after" }, context);
+
+  await fixture.set({ rejectNextPersistent: true });
+  await expect(runtime.execute({ action: "create", ...common, taskScope: "rpc-reject", name: "rpc-rejected" }, context))
+    .rejects.toMatchObject({ code: "MODEL_CAPABILITY_REJECTED", status: "unsupported" });
+  await runtime.execute({ action: "create", ...common, taskScope: "rpc-reprobe", name: "rpc-after" }, context);
+
+  const events = await fixture.events();
+  expect(events.map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([
+    "probe:high", "one-shot:high",
+    "one-shot:high", "probe:high", "one-shot:high",
+    "persistent:high", "probe:high", "persistent:high",
+  ]);
+  expect(events.every(({ thinking }) => thinking === "high")).toBe(true);
+  await runtime.shutdown();
+});

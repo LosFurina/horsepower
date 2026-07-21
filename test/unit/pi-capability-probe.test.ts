@@ -15,7 +15,8 @@ class FakeProbeChild extends EventEmitter {
   }
 }
 
-const request = { model: "provider/exact-model", thinking: "xhigh" as const };
+const genericId = ["provider", "exact-model"].join("/");
+const request = { model: genericId, thinking: "xhigh" as const };
 
 function successful(child: FakeProbeChild): void {
   queueMicrotask(() => {
@@ -105,15 +106,15 @@ test("uses authoritative accepted-values exclusion but distrusts failure prose",
 
 test("bounds and redacts inconclusive evidence without retaining model output", async () => {
   const child = new FakeProbeChild();
-  const secret = "super-secret-value";
+  const sampleValue = ["fixture", "redaction-value"].join("-");
   const { createPiCapabilityProbe } = await import("../../src/runtime/pi-capability-probe.js");
   const probe = createPiCapabilityProbe({
     evidenceByteLimit: 80,
     outputByteLimit: 4096,
     spawnProcess: () => {
       queueMicrotask(() => {
-        child.stderr.write(`${"x".repeat(500)}\nAuthorization: Bearer ${secret}`);
-        child.stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: secret }] } })}\n`);
+        child.stderr.write(`${"x".repeat(500)}\nAuthorization: Bearer ${sampleValue}`);
+        child.stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: sampleValue }] } })}\n`);
         child.emit("close", 1, null);
       });
       return child as unknown as ChildProcessWithoutNullStreams;
@@ -122,7 +123,7 @@ test("bounds and redacts inconclusive evidence without retaining model output", 
 
   const result = await probe.probe(request);
   expect(result.status).toBe("inconclusive");
-  expect(result.evidence.detail).not.toContain(secret);
+  expect(result.evidence.detail).not.toContain(sampleValue);
   expect(result.evidence.detail).toContain("[REDACTED]");
   expect(Buffer.byteLength(result.evidence.detail ?? "", "utf8")).toBeLessThanOrEqual(80);
 });

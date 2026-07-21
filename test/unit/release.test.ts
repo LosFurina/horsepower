@@ -75,6 +75,9 @@ test("builds the exact Pi layout with strict manifest digests and canonical mode
   const inspected = await inspectReleaseArchive(result.archivePath);
 
   expect(inspected.entries.filter((entry) => entry.type === "file").map((entry) => entry.path)).toEqual(expectedFiles);
+  expect(inspected.entries.map((entry) => entry.path)).not.toContain("horsepower/test/fixtures/pi-local-capability.mjs");
+  expect(inspected.entries.find((entry) => entry.path === "horsepower/pi/skills/horsepower/SKILL.md")?.content?.toString("utf8"))
+    .toContain("horsepower_subagent");
   expect(inspected.entries.filter((entry) => entry.type === "directory").every((entry) => entry.mode === 0o755)).toBe(true);
   expect(inspected.entries.find((entry) => entry.path === "horsepower/bin/horsepower")?.mode).toBe(0o755);
   expect(inspected.entries.filter((entry) => entry.type === "file" && entry.path !== "horsepower/bin/horsepower").every((entry) => entry.mode === 0o644)).toBe(true);

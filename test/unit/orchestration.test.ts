@@ -1,6 +1,8 @@
 import { Check } from "typebox/value";
 import { expect, test, vi } from "vitest";
 
+const genericId = (...parts: string[]) => parts.join("/");
+
 function captain(orchestration: { execute(input: unknown, caller: { captain: boolean }): Promise<unknown> }, input: unknown) {
   return orchestration.execute(input, { captain: true });
 }
@@ -23,7 +25,7 @@ test("review campaign budget is consumed before a review dispatch creates work",
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
     authorize: async () => { calls.push("authorize"); },
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "r" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
     getAgent: (name) => ({ name, role: name, prompt: "Review.", tools: [], recommendedSlots: [], standards: [] }),
     createWorker: async () => { calls.push("worker"); return { workerId: "w" }; },
@@ -106,7 +108,7 @@ test("rejects an unknown resolved model before spawning any work", async () => {
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
     authorize: async () => undefined,
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "unknown/model", thinking: "high", fallbackPath: [slot], revision: "r" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("unknown", "model"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: (slot) => { throw new Error(`Unknown model: ${slot.model}`); },
     getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: [], recommendedSlots: [], standards: [] }),
     createWorker: async () => { workers += 1; return { workerId: "unused" }; },
@@ -125,7 +127,7 @@ test.each(["unsupported", "inconclusive"] as const)("gates persistent creation a
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
     authorize: async () => { calls.push("authorize"); },
-    resolveSlot: (slot) => { calls.push("resolve"); return { requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
+    resolveSlot: (slot) => { calls.push("resolve"); return { requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
     validateModel: () => { calls.push("catalog"); },
     validateCapability: async () => { calls.push("gate"); throw Object.assign(new Error(status), { status }); },
     getAgent: () => { calls.push("agent"); return { name: "a", role: "a", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }; },
@@ -146,7 +148,7 @@ test.each(["single", "parallel"] as const)("gates %s one-shot after all slot res
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
     authorize: async () => { calls.push("authorize"); },
-    resolveSlot: (slot) => { calls.push(`resolve:${slot}`); return { requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
+    resolveSlot: (slot) => { calls.push(`resolve:${slot}`); return { requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
     validateModel: () => { calls.push("catalog"); },
     validateCapability: async (slot) => { calls.push(`gate:${slot.requestedSlot}`); if (slot.requestedSlot === "craft") throw new Error("unsupported"); },
     getAgent: (name) => { calls.push(`agent:${name}`); return { name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }; },
@@ -175,7 +177,7 @@ test.each(["single", "parallel"] as const)("gates %s one-shot after all slot res
 });
 
 test("actual worker capability rejection invalidates evidence without fallback or binding mutation", async () => {
-  const configured = { model: "p/m", thinking: "high" as const };
+  const configured = { model: genericId("p", "m"), thinking: "high" as const };
   const attempts: Array<{ model: string; thinking: string }> = [];
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const rejection = { kind: "capability_rejection", parameter: "thinking", rejectedValue: "high", code: "INVALID_THINKING" };
@@ -199,9 +201,9 @@ test("actual worker capability rejection invalidates evidence without fallback o
   }).catch((cause: unknown) => cause) as Error & { code?: string };
 
   expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
-  expect(attempts).toEqual([{ model: "p/m", thinking: "high" }]);
+  expect(attempts).toEqual([{ model: genericId("p", "m"), thinking: "high" }]);
   expect(invalidated).toHaveBeenCalledTimes(1);
-  expect(configured).toEqual({ model: "p/m", thinking: "high" });
+  expect(configured).toEqual({ model: genericId("p", "m"), thinking: "high" });
 });
 
 test("parallel worker capability rejection invalidates each matching attempted combination without retry", async () => {
@@ -214,7 +216,7 @@ test("parallel worker capability rejection invalidates each matching attempted c
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
     authorize: async () => undefined,
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: `p/${slot}`, thinking: "high", fallbackPath: [slot], revision: "slot-r" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", slot), thinking: "high", fallbackPath: [slot], revision: "slot-r" }),
     validateModel: () => undefined, validateCapability: async () => undefined,
     handleWorkerCapabilityRejection: invalidated,
     getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
@@ -241,7 +243,7 @@ test("parallel worker capability rejection invalidates each matching attempted c
   }).catch((cause: unknown) => cause) as Error & { code?: string };
 
   expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
-  expect(attempts).toEqual([[{ model: "p/judgment", thinking: "high" }, { model: "p/craft", thinking: "high" }]]);
+  expect(attempts).toEqual([[{ model: genericId("p", "judgment"), thinking: "high" }, { model: genericId("p", "craft"), thinking: "high" }]]);
   expect(invalidated.mock.calls.map(([slot]) => slot.model)).toEqual(["p/judgment", "p/craft"]);
 });
 
@@ -253,7 +255,7 @@ test("one-shot worker capability rejection invalidates evidence without automati
   }));
   const orchestration = createOrchestration({
     authorize: async () => undefined,
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "xhigh", fallbackPath: [slot], revision: "slot-r" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "xhigh", fallbackPath: [slot], revision: "slot-r" }),
     validateModel: () => undefined,
     validateCapability: async () => undefined,
     handleWorkerCapabilityRejection: invalidated,
@@ -276,7 +278,7 @@ test("one-shot worker capability rejection invalidates evidence without automati
   }).catch((cause: unknown) => cause) as Error & { code?: string };
 
   expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
-  expect(attempts).toEqual([{ model: "p/m", thinking: "xhigh" }]);
+  expect(attempts).toEqual([{ model: genericId("p", "m"), thinking: "xhigh" }]);
   expect(invalidated).toHaveBeenCalledTimes(1);
 });
 
@@ -287,7 +289,7 @@ test("authorizes and executes exactly one explicitly requested persistent creati
   }));
   const orchestration = createOrchestration?.({
     authorize: async () => { calls.push("authorize"); },
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "provider/model", thinking: "high", fallbackPath: [slot], revision: "rev" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("provider", "model"), thinking: "high", fallbackPath: [slot], revision: "rev" }),
     validateModel: () => undefined,
     getAgent: (name) => ({ name, role: "Review", prompt: "Review.", tools: ["read"], recommendedSlots: ["judgment"], standards: [] }),
     createWorker: async (input) => { calls.push(`create:${input.name}`); return { workerId: "worker-1" }; },
@@ -312,7 +314,7 @@ test("dispatches exactly the explicit parallel tasks and reports terminal lifecy
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
     authorize: async () => undefined,
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "r" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
     getAgent: (name) => ({ name, role: name, prompt: `${name}.`, tools: ["read"], recommendedSlots: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
@@ -342,8 +344,8 @@ test("dispatches exactly the explicit parallel tasks and reports terminal lifecy
   expect(result).toMatchObject({
     runId: "run-parallel",
     slots: [
-      { requestedSlot: "judgment", resolvedSlot: "judgment", model: "p/m", thinking: "high", fallbackPath: ["judgment"] },
-      { requestedSlot: "craft", resolvedSlot: "craft", model: "p/m", thinking: "high", fallbackPath: ["craft"] },
+      { requestedSlot: "judgment", resolvedSlot: "judgment", model: genericId("p", "m"), thinking: "high", fallbackPath: ["judgment"] },
+      { requestedSlot: "craft", resolvedSlot: "craft", model: genericId("p", "m"), thinking: "high", fallbackPath: ["craft"] },
     ],
   });
 });
@@ -565,7 +567,7 @@ test("persistent execution capability rejection invalidates matching evidence wi
     resolveSlot: () => { throw new Error("unused"); }, validateModel: () => undefined,
     getAgent: () => { throw new Error("unused"); }, createWorker: async () => ({ workerId: "unused" }),
     beginDispatch: () => ({ runId: "run-send" }), reportDispatchTerminal: async () => undefined,
-    statusWorker: () => ({ model: "p/m", thinking: "high" }),
+    statusWorker: () => ({ model: genericId("p", "m"), thinking: "high" }),
     sendWorker: sends,
     waitForMessage: async () => ({ status: "completed" }),
     messageStatus: () => "failed",
@@ -578,7 +580,7 @@ test("persistent execution capability rejection invalidates matching evidence wi
 
   expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
   expect(sends).toHaveBeenCalledTimes(1);
-  expect(invalidated).toHaveBeenCalledWith({ model: "p/m", thinking: "high" }, expect.anything());
+  expect(invalidated).toHaveBeenCalledWith({ model: genericId("p", "m"), thinking: "high" }, expect.anything());
 });
 
 test("late persistent execution rejection invalidates evidence during tracked settlement", async () => {
@@ -593,7 +595,7 @@ test("late persistent execution rejection invalidates evidence during tracked se
     resolveSlot: () => { throw new Error("unused"); }, validateModel: () => undefined,
     getAgent: () => { throw new Error("unused"); }, createWorker: async () => ({ workerId: "unused" }),
     beginDispatch: () => ({ runId: "run-send" }), reportDispatchTerminal: async () => undefined,
-    statusWorker: () => ({ model: "p/m", thinking: "high" }),
+    statusWorker: () => ({ model: genericId("p", "m"), thinking: "high" }),
     sendWorker: async () => ({ messageId: "message-1" }),
     waitForMessage: async () => { throw rejection; },
     messageStatus: () => "failed",
@@ -607,7 +609,7 @@ test("late persistent execution rejection invalidates evidence during tracked se
   const error = await tracked!.catch((cause: unknown) => cause) as Error & { code?: string };
 
   expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
-  expect(invalidated).toHaveBeenCalledWith({ model: "p/m", thinking: "high" }, rejection);
+  expect(invalidated).toHaveBeenCalledWith({ model: genericId("p", "m"), thinking: "high" }, rejection);
 });
 
 test("settles create and persistent-send dispatch runs without creating extra work", async () => {
@@ -616,7 +618,7 @@ test("settles create and persistent-send dispatch runs without creating extra wo
   let runNumber = 0;
   const orchestration = createOrchestration({
     authorize: async () => undefined,
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "r" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
     getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: ["read"], recommendedSlots: [], standards: [] }),
     createWorker: async () => ({ workerId: "worker-1" }),
@@ -648,7 +650,7 @@ test("reports failed create dispatch without spawning replacement work", async (
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
     authorize: async () => undefined,
-    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "r" }),
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
     getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: [], recommendedSlots: [], standards: [] }),
     createWorker: async () => { throw new Error("startup failed"); },

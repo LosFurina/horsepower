@@ -15,6 +15,8 @@ Use `horsepower_subagent` only for work the Captain explicitly chooses to dispat
 - Present principal user-facing conclusions in the `outputLocale` returned by Horsepower (`en` or `zh-CN`), even when worker briefs, reports, reviewer discussion, or raw evidence are English. Preserve machine fields, commands, paths, IDs, digests, artifact references, and raw evidence verbatim.
 - `horsepower disable` removes only the Horsepower extension and skill links; `horsepower enable` restores only those links after validating the active release. Both preserve the CLI, versions, configuration, state, and handoffs, and take effect in an existing Pi process only after `/reload` or restart.
 - Name every requested `modelSlot`; Horsepower never selects a model from an agent role.
+- Before dispatch, Horsepower requires current support for the exact configured thinking value. Successful evidence is process-local and reusable for at most ten minutes only when the exact identifier, thinking value, and catalog revision still match.
+- Treat `unsupported` as an explicit capability exclusion and `inconclusive` as a temporary inability to prove support. Horsepower must never silently lower thinking, change identifiers, or retry through a fallback. Preserve the configured binding and direct the user to `horsepower setup --interactive` to reselect, or to retry after an inconclusive condition clears.
 - Dispatch only the requested `single`, `parallel`, `chain`, or persistent action.
 - Keep proposal, design, specs, tasks, verification, and archive facts in official OpenSpec artifacts.
 - Do not ask workers to create other workers.

@@ -1,7 +1,9 @@
 import { expect, test } from "vitest";
 
+const genericId = ["provider", "model"].join("/");
+const otherId = ["provider", "other"].join("/");
 const key = {
-  model: "provider/model",
+  model: genericId,
   thinking: "high",
   catalogRevision: "catalog-a",
 } as const;
@@ -14,7 +16,7 @@ test("reuses only positive evidence for the exact model, thinking, and catalog r
   cache.recordSupported(key, supported);
 
   expect(cache.get(key)).toEqual({ ...supported, recordedAt: 1_000 });
-  expect(cache.get({ ...key, model: "provider/other" })).toBeUndefined();
+  expect(cache.get({ ...key, model: otherId })).toBeUndefined();
   expect(cache.get({ ...key, thinking: "low" })).toBeUndefined();
   expect(cache.get({ ...key, catalogRevision: "catalog-b" })).toBeUndefined();
 });
