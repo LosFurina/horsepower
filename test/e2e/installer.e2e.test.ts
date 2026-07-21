@@ -50,6 +50,25 @@ async function install(args: string[] = []) {
   return { ...fixturePaths, ...result };
 }
 
+async function runInteractiveInstaller(
+  fixturePaths: Awaited<ReturnType<typeof fixture>>,
+  ttyInput: string,
+  ttyOutput: string,
+  args: string[] = [],
+) {
+  return execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version, ...args], {
+    cwd: fixturePaths.root,
+    env: {
+      ...process.env,
+      HOME: fixturePaths.home,
+      PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`,
+      HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`,
+      HORSEPOWER_TTY_INPUT: ttyInput,
+      HORSEPOWER_TTY_OUTPUT: ttyOutput,
+    },
+  });
+}
+
 test("failed interactive setup restores the exact prior settings and existing topology", async () => {
   const fixturePaths = await fixture();
   await runInstaller(fixturePaths);
@@ -60,10 +79,7 @@ test("failed interactive setup restores the exact prior settings and existing to
   const ttyOutput = join(fixturePaths.root, "tty-output-invalid");
   await writeFile(ttyInput, "https://example.test/hook\ninvalid-auth\n");
   await writeFile(ttyOutput, "");
-  await expect(execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version, "--locale", "zh-CN"], {
-    cwd: fixturePaths.root,
-    env: { ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`, HORSEPOWER_TTY_INPUT: ttyInput, HORSEPOWER_TTY_OUTPUT: ttyOutput },
-  })).rejects.toMatchObject({ stderr: expect.stringMatching(/Horsepower 安装程序失败：.*invalid webhook authentication mode/u) });
+  await expect(runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "zh-CN"])).rejects.toMatchObject({ stderr: expect.stringMatching(/Horsepower 安装程序失败：.*invalid webhook authentication mode/u) });
   expect(await readFile(settingsPath)).toEqual(before);
   expect(await readlink(join(managed, "current"))).toBe(`versions/v${version}`);
   expect(await readlink(join(fixturePaths.home, ".local/bin/horsepower"))).toBe(join(managed, "current/bin/horsepower"));
@@ -76,10 +92,7 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
   const sampleValue = "fixture-bearer-value-123";
   await writeFile(ttyInput, `1\nhttps://example.test/hook\nbearer\n${sampleValue}\n\n`);
   await writeFile(ttyOutput, "");
-  const result = await execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version], {
-    cwd: fixturePaths.root,
-    env: { ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`, HORSEPOWER_TTY_INPUT: ttyInput, HORSEPOWER_TTY_OUTPUT: ttyOutput },
-  });
+  const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   expect(`${await readFile(ttyOutput, "utf8")}${result.stdout}${result.stderr}`).not.toContain(sampleValue);
   const settings = JSON.parse(await readFile(join(fixturePaths.home, ".pi", "agent", "horsepower", "settings.json"), "utf8"));
   expect(settings.webhook).toMatchObject({ auth: { mode: "bearer", token: sampleValue }, notifications: { change: true, dispatch: false } });
@@ -99,10 +112,7 @@ test("interactive HMAC webhook setup stores private credentials and dispatch opt
   const sampleValue = "fixture-hmac-value-1234";
   await writeFile(ttyInput, `1\nhttps://example.test/hook\nhmac\n${sampleValue}\ny\n`);
   await writeFile(ttyOutput, "");
-  const result = await execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version], {
-    cwd: fixturePaths.root,
-    env: { ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`, HORSEPOWER_TTY_INPUT: ttyInput, HORSEPOWER_TTY_OUTPUT: ttyOutput },
-  });
+  const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   const output = `${await readFile(ttyOutput, "utf8")}\n${result.stdout}\n${result.stderr}`;
   expect(output).not.toContain(sampleValue);
   const settingsPath = join(fixturePaths.home, ".pi", "agent", "horsepower", "settings.json");
@@ -117,10 +127,7 @@ test("interactive installation starts bilingual, selects Chinese, and permits sk
   const ttyOutput = join(fixturePaths.root, "tty-output");
   await writeFile(ttyInput, "2\n\n");
   await writeFile(ttyOutput, "");
-  const result = await execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--version", version], {
-    cwd: fixturePaths.root,
-    env: { ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`, HORSEPOWER_TTY_INPUT: ttyInput, HORSEPOWER_TTY_OUTPUT: ttyOutput },
-  });
+  const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   const output = `${await readFile(ttyOutput, "utf8")}\n${result.stdout}`;
   expect(output).toContain("Choose language / 选择语言");
   expect(output).toContain("Webhook URL（留空跳过）");

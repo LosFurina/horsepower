@@ -159,6 +159,27 @@ test("configure sets global or project output locale with localized structured c
   expect(await readFile(join(cwd, ".pi", "horsepower", "settings.json"), "utf8")).toBe(before);
 });
 
+test("Chinese doctor localizes every finding and remediation while preserving English raw evidence", async () => {
+  const { cwd, run } = await harness();
+  await mkdir(join(cwd, ".pi/skills/openspec-apply-change"), { recursive: true });
+  await mkdir(join(cwd, ".pi/prompts"), { recursive: true });
+  await writeFile(join(cwd, ".pi/skills/openspec-apply-change/SKILL.md"), 'name: openspec-apply-change\nallowed-tools: Bash(openspec:*)\nauthor: openspec\ngeneratedBy: "1.6.0"');
+  await writeFile(join(cwd, ".pi/prompts/opsx-apply.md"), "Implement tasks from an OpenSpec change.");
+  await run(setupArgs);
+  await run(["configure", "--locale", "zh-CN", "--json"]);
+
+  const checks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
+
+  expect(checks).toEqual([
+    expect.objectContaining({ id: "configuration", status: "ok", message: "模型能力 slot 配置有效。", rawEvidence: expect.stringContaining("Slots revision") }),
+    expect.objectContaining({ id: "notification", status: "skipped", message: "Webhook 已禁用。" }),
+    expect.objectContaining({ id: "openspec", status: "ok", message: "官方 OpenSpec 运行正常。", rawEvidence: "Official OpenSpec 1.6.0 healthy" }),
+    expect.objectContaining({ id: "model-registry", status: "ok", message: "Slot 模型验证通过。" }),
+    expect.objectContaining({ id: "installation", status: "error", message: "Horsepower 安装无效。", action: "从官方 release 安装或修复 Horsepower。", rawEvidence: expect.any(String) }),
+  ]);
+  expect(JSON.stringify(checks)).not.toContain("Run horsepower");
+});
+
 test("Chinese CLI doctor and errors use Chinese principal conclusions with stable evidence", async () => {
   const { run } = await harness();
   await run(["configure", "--locale", "zh-CN", "--json"]);
@@ -894,8 +915,9 @@ test("doctor absorbs malformed global and project settings into stable redacted 
     ]);
     expect(checks.find((check: { id: string }) => check.id === "notification"), scope).toMatchObject({
       status: "error",
-      message: `Malformed JSON in ${settingsPath}`,
-      action: expect.stringContaining(settingsPath),
+      message: "Horsepower settings are invalid.",
+      action: "Repair or remove the invalid settings listed in rawEvidence.",
+      rawEvidence: expect.stringContaining(`Malformed JSON in ${settingsPath}`),
     });
   }
 });
@@ -918,8 +940,9 @@ test("doctor absorbs unreadable global and project settings into path-specific c
     ]);
     expect(checks.find((check: { id: string }) => check.id === "notification"), scope).toMatchObject({
       status: "error",
-      message: expect.stringContaining(settingsPath),
-      action: expect.stringContaining(settingsPath),
+      message: "Horsepower settings are invalid.",
+      action: "Repair or remove the invalid settings listed in rawEvidence.",
+      rawEvidence: expect.stringContaining(settingsPath),
     });
   }
 });
@@ -948,7 +971,7 @@ test("doctor rejects malformed partial OpenSpec semver", async () => {
     ? { code: 0, stdout: "1.6.\n", stderr: "" }
     : { code: 0, stdout: JSON.stringify({ root: { path: "/project", healthy: true } }), stderr: "" } });
   const checks = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks;
-  expect(checks.find((check: { id: string }) => check.id === "openspec")).toMatchObject({ status: "error", message: expect.stringContaining("1.6.0") });
+  expect(checks.find((check: { id: string }) => check.id === "openspec")).toMatchObject({ status: "error", message: "Official OpenSpec is unavailable or invalid.", rawEvidence: expect.stringContaining("1.6.0") });
 });
 
 test("staged-release preflight validates manifest, version, layout, and current/link ownership", async () => {
@@ -1151,6 +1174,25 @@ test("enable rollback preserves an unexpected conflicting object created during 
   expect(await readFile(skill, "utf8")).toBe("foreign concurrent data");
 });
 
+test("enable reports rollback errors truthfully when final state was restored", async () => {
+  let creates = 0;
+  let removes = 0;
+  const { homeDir, run } = await harness({ linkOperations: {
+    create: async (target: string, path: string) => { creates += 1; if (creates === 2) throw new Error("original create failure"); await symlink(target, path); },
+    remove: async (path: string) => { removes += 1; await rm(path); if (removes === 1) throw new Error("post-remove rollback error"); },
+  } });
+  await installManagedFixture(homeDir);
+
+  const result = await run(["enable", "--json"]);
+
+  expect(result.stderr).toContain("original create failure");
+  expect(result.stderr).toContain("post-remove rollback error");
+  expect(result.stderr).toContain("rollback restored the original state");
+  expect(result.stderr).not.toContain("rollback was incomplete");
+  await expect(lstat(join(homeDir, ".pi/agent/extensions/horsepower"))).rejects.toThrow();
+  await expect(lstat(join(homeDir, ".pi/agent/skills/horsepower"))).rejects.toThrow();
+});
+
 test("enable attempts every reconciliation and reports operation plus rollback failures", async () => {
   let creates = 0;
   const removed: string[] = [];
@@ -1237,7 +1279,7 @@ test("Chinese doctor localizes partial and conflict findings while preserving st
       status: "error",
       integrationStatus: kind === "partial" ? "partially_enabled" : "conflict",
       message: kind === "partial" ? "Horsepower Pi 集成仅部分启用。" : "Horsepower Pi 集成存在冲突。",
-      action: "修复冲突，然后运行 horsepower enable 或 horsepower disable。",
+      action: kind === "partial" ? "运行 horsepower enable 恢复缺失的链接，或运行 horsepower disable 保持禁用。" : "修复冲突，然后运行 horsepower enable 或 horsepower disable。",
       rawEvidence: expect.any(String),
     });
     expect(check.rawEvidence).toContain(kind === "partial" ? "absent" : "non-symlink");
@@ -1873,7 +1915,7 @@ test("doctor blocks model-registry validation when slot validation fails", async
   expect(checks.find((check: { id: string }) => check.id === "model-registry")).toMatchObject({
     status: "skipped",
     message: expect.stringContaining("valid slot configuration"),
-    action: "Run horsepower setup",
+    action: "Run horsepower setup.",
   });
 });
 

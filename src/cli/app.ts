@@ -149,11 +149,10 @@ const releaseEntryPoints = {
 
 function installTopology(home: string) {
   const root = join(home, ".pi", "agent", "horsepower");
-  return { root, current: join(root, "current"), versions: join(root, "versions"), links: [
-    { path: join(home, ".pi", "agent", "extensions", "horsepower"), target: join(root, "current", "pi", "extensions", "horsepower") },
-    { path: join(home, ".pi", "agent", "skills", "horsepower"), target: join(root, "current", "pi", "skills", "horsepower") },
-    { path: join(home, ".local", "bin", "horsepower"), target: join(root, "current", "bin", "horsepower") },
-  ] };
+  const extension = { path: join(home, ".pi", "agent", "extensions", "horsepower"), target: join(root, "current", "pi", "extensions", "horsepower") };
+  const skill = { path: join(home, ".pi", "agent", "skills", "horsepower"), target: join(root, "current", "pi", "skills", "horsepower") };
+  const cli = { path: join(home, ".local", "bin", "horsepower"), target: join(root, "current", "bin", "horsepower") };
+  return { root, current: join(root, "current"), versions: join(root, "versions"), extension, skill, cli, links: [extension, skill, cli] };
 }
 class ManagedTopologyError extends Error {}
 
@@ -503,17 +502,17 @@ export function createCli(options: CliOptions) {
     }
     throw new UsageError(`Unknown webhook command: ${action}`);
   }
-  async function openspecCheck() {
+  async function openspecCheck(outputLocale: OutputLocale) {
     try {
       const result = await validateOpenSpecInstallation({ run: options.runOpenSpec, readText: (path) => readFile(path, "utf8") }, options.cwd);
-      return { id: "openspec", status: "ok", message: `Official OpenSpec ${result.version} healthy` };
+      return { id: "openspec", status: "ok", message: localizedMessage(outputLocale, "doctor.openspecHealthy"), rawEvidence: `Official OpenSpec ${result.version} healthy` };
     } catch (cause) {
-      const message = (cause as Error).message;
-      const action = message.includes("init --tools pi") ? "Run openspec init --tools pi"
-        : message.includes("openspec update") ? "Run openspec update"
-          : message.includes("not healthy") ? "Run openspec doctor"
-            : "Install official @fission-ai/openspec 1.6.0 or newer";
-      return { id: "openspec", status: "error", message, action };
+      const rawEvidence = (cause as Error).message;
+      const actionId: MessageId = rawEvidence.includes("init --tools pi") ? "doctor.openspecInitAction"
+        : rawEvidence.includes("openspec update") ? "doctor.openspecUpdateAction"
+          : rawEvidence.includes("not healthy") ? "doctor.openspecDoctorAction"
+            : "doctor.openspecInstallAction";
+      return { id: "openspec", status: "error", message: localizedMessage(outputLocale, "doctor.openspecInvalid"), action: localizedMessage(outputLocale, actionId), rawEvidence };
     }
   }
   async function installationCheck() {
@@ -524,8 +523,11 @@ export function createCli(options: CliOptions) {
       for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true);
       const current = await currentState(topology.root, topology.current);
       const versions = await versionsState(topology.versions);
-      const states = await Promise.all(topology.links.map((link) => linkState(link.path, link.target)));
-      const [extension, skill, cli] = states as [typeof states[number], typeof states[number], typeof states[number]];
+      const [extension, skill, cli] = await Promise.all([
+        linkState(topology.extension.path, topology.extension.target),
+        linkState(topology.skill.path, topology.skill.target),
+        linkState(topology.cli.path, topology.cli.target),
+      ]);
       const coreFailure = [current, versions, cli].find((state) => state.status !== "owned");
       if (coreFailure) return { id: "installation", status: "error", integrationStatus: "conflict", message: localizedMessage(outputLocale, "doctor.installationInvalid"), action: localizedMessage(outputLocale, "doctor.installationRepairAction"), rawEvidence: coreFailure.message ?? coreFailure.status };
       const integrationStatus = extension.status === "owned" && skill.status === "owned" ? "enabled"
@@ -534,7 +536,7 @@ export function createCli(options: CliOptions) {
       if (integrationStatus === "enabled") return { id: "installation", status: "ok", integrationStatus, message: localizedMessage(outputLocale, "doctor.integrationEnabled") };
       if (integrationStatus === "disabled") return { id: "installation", status: "ok", integrationStatus, message: localizedMessage(outputLocale, "doctor.integrationDisabled"), action: localizedMessage(outputLocale, "doctor.enableAction") };
       const rawEvidence = [extension, skill].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; ");
-      return { id: "installation", status: "error", integrationStatus, message: localizedMessage(outputLocale, integrationStatus === "conflict" ? "doctor.integrationConflict" : "doctor.integrationPartial"), action: localizedMessage(outputLocale, "doctor.integrationRepairAction"), rawEvidence };
+      return { id: "installation", status: "error", integrationStatus, message: localizedMessage(outputLocale, integrationStatus === "conflict" ? "doctor.integrationConflict" : "doctor.integrationPartial"), action: localizedMessage(outputLocale, integrationStatus === "conflict" ? "doctor.integrationRepairAction" : "doctor.integrationPartialAction"), rawEvidence };
     } catch (cause) {
       const rawEvidence = cause instanceof Error ? cause.message : "Unable to inspect the managed installation topology";
       return { id: "installation", status: "error", message: localizedMessage(outputLocale, "doctor.installationInvalid"), action: localizedMessage(outputLocale, "doctor.installationRepairAction"), rawEvidence };
@@ -551,30 +553,43 @@ export function createCli(options: CliOptions) {
   }
   async function doctor(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], ["installation-only"]);
+    let outputLocale: OutputLocale = "en";
+    try { outputLocale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* invalid settings are reported below */ }
     if (parsed.switches.has("installation-only")) {
       const check = await installationCheck();
       return { data: { checks: [check] }, ok: check.status !== "error", exitCode: check.status === "error" ? 1 : 0 };
     }
     const checks: Array<Record<string, unknown>> = [];
     let configurationValid = false;
-    try { const data = await slotsData(); configurationValid = true; checks.push({ id: "configuration", status: "ok", message: `Slots revision ${data.revision}` }); } catch (cause) { checks.push({ id: "configuration", status: "error", message: (cause as Error).message, action: "Run horsepower setup" }); }
+    try {
+      const data = await slotsData(); configurationValid = true;
+      checks.push({ id: "configuration", status: "ok", message: localizedMessage(outputLocale, "doctor.configurationValid"), rawEvidence: `Slots revision ${data.revision}` });
+    } catch (cause) {
+      checks.push({ id: "configuration", status: "error", message: localizedMessage(outputLocale, "doctor.configurationInvalid"), action: localizedMessage(outputLocale, "doctor.setupAction"), rawEvidence: (cause as Error).message });
+    }
     const globalSettings = await doctorSettings(options.homeDir, paths.global.settings);
     const projectSettings = await doctorSettings(options.cwd, paths.project.settings);
     const settingsErrors = [globalSettings.error, projectSettings.error].filter((message): message is string => message !== undefined);
     if (settingsErrors.length > 0) {
       const invalidPaths = [globalSettings.error ? paths.global.settings : undefined, projectSettings.error ? paths.project.settings : undefined].filter((path): path is string => path !== undefined);
-      checks.push({ id: "notification", status: "error", message: settingsErrors.join("; "), action: `Repair or remove invalid settings: ${invalidPaths.join(", ")}` });
+      checks.push({ id: "notification", status: "error", message: localizedMessage(outputLocale, "doctor.settingsInvalid"), action: localizedMessage(outputLocale, "doctor.settingsRepairAction"), rawEvidence: `${settingsErrors.join("; ")}; ${invalidPaths.join(", ")}` });
     } else {
       try {
         const configured = parseWebhookSettings(globalSettings.value!.webhook, projectSettings.value!.webhook);
-        checks.push(configured ? { id: "notification", status: "ok", message: `Webhook enabled (${configured.config.auth.mode})` } : { id: "notification", status: "skipped", message: "Webhook disabled" });
+        checks.push(configured
+          ? { id: "notification", status: "ok", message: localizedMessage(outputLocale, "doctor.webhookEnabled", { mode: configured.config.auth.mode }) }
+          : { id: "notification", status: "skipped", message: localizedMessage(outputLocale, "doctor.webhookDisabled") });
       } catch (cause) {
-        checks.push({ id: "notification", status: "error", message: (cause as Error).message, action: "Run horsepower webhook configure or webhook disable" });
+        checks.push({ id: "notification", status: "error", message: localizedMessage(outputLocale, "doctor.webhookInvalid"), action: localizedMessage(outputLocale, "doctor.webhookRepairAction"), rawEvidence: (cause as Error).message });
       }
     }
-    checks.push(await openspecCheck()); checks.push(!configurationValid
-      ? { id: "model-registry", status: "skipped", message: "Model registry validation requires valid slot configuration", action: "Run horsepower setup" }
-      : options.models ? { id: "model-registry", status: "ok", message: "Slot models validated" } : { id: "model-registry", status: "skipped", message: "Pi model registry unavailable; validation skipped" }); checks.push(await installationCheck());
+    checks.push(await openspecCheck(outputLocale));
+    checks.push(!configurationValid
+      ? { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelNeedsConfiguration"), action: localizedMessage(outputLocale, "doctor.setupAction") }
+      : options.models
+        ? { id: "model-registry", status: "ok", message: localizedMessage(outputLocale, "doctor.modelValidated") }
+        : { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelUnavailable") });
+    checks.push(await installationCheck());
     return { data: { checks }, ok: !checks.some((check) => check.status === "error"), exitCode: checks.some((check) => check.status === "error") ? 1 : 0 };
   }
   async function preflight(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
@@ -598,11 +613,10 @@ export function createCli(options: CliOptions) {
     if (root.status === "conflict") throw new Error(root.message);
     const current = await currentState(topology.root, topology.current);
     if (current.status !== "owned") throw new Error(current.message ?? "No valid active Horsepower release");
-    const cli = topology.links[2]!;
-    await verifyTrustedPath(options.homeDir, cli.path, true);
-    const cliState = await linkState(cli.path, cli.target);
-    if (cliState.status !== "owned") throw new Error(cliState.message ?? `Horsepower CLI link is not owned: ${cli.path}`);
-    const integration = topology.links.slice(0, 2);
+    await verifyTrustedPath(options.homeDir, topology.cli.path, true);
+    const cliState = await linkState(topology.cli.path, topology.cli.target);
+    if (cliState.status !== "owned") throw new Error(cliState.message ?? `Horsepower CLI link is not owned: ${topology.cli.path}`);
+    const integration = [topology.extension, topology.skill];
     for (const link of integration) await verifyTrustedPath(options.homeDir, link.path, true);
     const states = await Promise.all(integration.map(async (link) => ({ link, state: await linkState(link.path, link.target) })));
     const conflict = states.find(({ state }) => state.status === "conflict");
@@ -620,16 +634,22 @@ export function createCli(options: CliOptions) {
         failures.push(cause instanceof Error ? cause : new Error(String(cause)));
       }
     }
+    let restored = true;
     for (const item of before) {
       try {
         const actual = await linkState(item.link.path, item.link.target);
-        if (actual.status !== item.state.status) failures.push(new Error(`Rollback did not restore ${item.link.path}: expected ${item.state.status}, got ${actual.status}`));
+        if (actual.status !== item.state.status) {
+          restored = false;
+          failures.push(new Error(`Rollback did not restore ${item.link.path}: expected ${item.state.status}, got ${actual.status}`));
+        }
       } catch (cause) {
+        restored = false;
         failures.push(cause instanceof Error ? cause : new Error(String(cause)));
       }
     }
     if (failures.length === 1) throw failures[0]!;
-    throw new AggregateError(failures, `Integration operation failed and rollback was incomplete: ${failures.map(({ message }) => message).join("; ")}`);
+    const outcome = restored ? "rollback restored the original state" : "rollback was incomplete";
+    throw new AggregateError(failures, `Integration operation failed; ${outcome}: ${failures.map(({ message }) => message).join("; ")}`);
   }
   async function enable(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("enable accepts no arguments");
