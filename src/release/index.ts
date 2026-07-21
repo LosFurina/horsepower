@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { gzipSync, gunzipSync } from "node:zlib";
+import { gzipSync, inflateRawSync } from "node:zlib";
 import { parse as parseYaml } from "yaml";
 import { validateReleaseCompatibility, type ReleaseCompatibility } from "../release-manifest.js";
 
@@ -389,8 +389,39 @@ function createArchive(stageRoot: string): Promise<Buffer> {
   });
 }
 
+const canonicalGzipHeader = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x13]);
+
+function crc32(content: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of content) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function inspectCanonicalGzip(archive: Buffer): Buffer {
+  if (archive.length < canonicalGzipHeader.length + 8 || !archive.subarray(0, canonicalGzipHeader.length).equals(canonicalGzipHeader)) {
+    throw new Error("Invalid canonical gzip header");
+  }
+  let inflated: { buffer: Buffer; engine: { bytesWritten: number } };
+  try {
+    inflated = inflateRawSync(archive.subarray(canonicalGzipHeader.length), { info: true }) as unknown as typeof inflated;
+  } catch {
+    throw new Error("Invalid gzip deflate stream");
+  }
+  const tar = inflated.buffer;
+  const trailerOffset = canonicalGzipHeader.length + inflated.engine.bytesWritten;
+  if (trailerOffset + 8 !== archive.length) throw new Error("Invalid gzip member framing");
+  const expectedCrc = archive.readUInt32LE(trailerOffset);
+  const expectedSize = archive.readUInt32LE(trailerOffset + 4);
+  if (crc32(tar) !== expectedCrc) throw new Error("Invalid gzip trailer CRC32");
+  if ((tar.length >>> 0) !== expectedSize) throw new Error("Invalid gzip trailer ISIZE");
+  return tar;
+}
+
 export async function inspectReleaseArchive(path: string): Promise<{ entries: ArchiveEntry[] }> {
-  const tar = gunzipSync(await readFile(path));
+  const tar = inspectCanonicalGzip(await readFile(path));
   const entries: ArchiveEntry[] = [];
   let offset = 0;
   while (true) {
@@ -520,7 +551,7 @@ function isPlaceholder(value: string): boolean {
   if (/^<[^>]+>$/u.test(trimmed)) return true;
   const normalized = trimmed.toLowerCase().replace(/[^a-z0-9]/gu, "");
   return normalized.length === 0
-    || /^(?:your|example|sample|placeholder|replace|redacted|dummy|fake|test|change|todo|none|null)/u.test(normalized)
+    || /^(?:your|example|sample|placeholder|replace|redacted|dummy|fake|test|change|todo|none|null|neverprint)/u.test(normalized)
     || /^(?:provider|model|providermodel|providerjudge|providerutil|providerstrong|providercraft|providercheap|providervision|providerta|providerza|providermissing|projectcraft|mutatedmodel|othermodel|pm|unknownmodel|tokenvalue)$/u.test(normalized)
     || /^(?:remove|stale|malformed|incompatible|requested|notification|auth|array|global|project)[a-z]*(?:credential|secret|token|header)$/u.test(normalized)
     || /(?:here|changeme|redacted|placeholder)$/u.test(normalized);
@@ -568,13 +599,35 @@ function structuredDocument(path: string, text: string): unknown | undefined {
 }
 
 function isRuntimeReference(value: string): boolean {
-  return /^(?:new\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/u.test(value)
-    || /^[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\[\d+\]))+$/u.test(value);
+  if (/^(?:new\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/u.test(value)
+    || /^[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\[\s*(?:\d+|[A-Za-z_$][\w$]*|["'][^"']+["'])\s*\]))+$/u.test(value)
+    || /^`\s*(?:(?:bearer|basic)\s+)?\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}(?:-(?:settings-)?(?:secret|token|credential|password))?\s*`$/iu.test(value)) return true;
+  const coalescing = /^([A-Za-z_$][\w$]*)\s*\?\?\s*(.+)$/u.exec(value);
+  if (coalescing && isRuntimeReference(coalescing[2] ?? "")) return true;
+  if (value.startsWith("{")) {
+    const literals = [...value.matchAll(/(["'])(.*?)\1/gu)].map((match) => match[2] ?? "");
+    return literals.every((literal) => literal.length < 16 || isPlaceholder(literal));
+  }
+  return false;
+}
+
+function withoutComments(text: string): string {
+  return text.replace(/(["'`])(?:\\.|(?!\1)[\s\S])*\1|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/gu, (token) => {
+    if (!token.startsWith("/")) return token;
+    return token.replace(/[^\r\n]/gu, " ");
+  });
+}
+
+const typeAnnotation = String.raw`[A-Za-z_$][\w$]*(?:\s*<[^;={}]*>)?(?:\s*\[\s*\])?(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\s*<[^;={}]*>)?(?:\s*\[\s*\])?)*`;
+
+function assignmentPattern(keys: string): RegExp {
+  const start = String.raw`(?:^|[\n;,{}])\s*(?:(?:[-*]\s+)|(?:export\s+)?(?:const|let|var)\s+|export\s+)?(?:[A-Za-z_$][\w$]*\s*(?:\.\s*|\[\s*))?["']?`;
+  return new RegExp(`${start}(${keys})["']?\\s*\\]?\\s*(?::\\s*${typeAnnotation}\\s*=|[:=])\\s*`, "gimu");
 }
 
 function findTextualBinding(text: string): string | undefined {
-  const assignment = /(?:^|[\n;,{}])\s*(?:(?:[-*]\s+)|(?:export\s+)?(?:const|let|var)\s+|export\s+)?(?:[A-Za-z_$][\w$]*\s*(?:\.\s*|\[\s*))?["']?(providerMapping|providers?|models?|modelId|modelName|model)["']?\s*\]?\s*[:=]\s*/gimu;
-  for (const match of text.matchAll(assignment)) {
+  const assignment = assignmentPattern("providerMapping|providers?|models?|modelId|modelName|model");
+  for (const match of withoutComments(text).matchAll(assignment)) {
     const key = match[1]?.toLowerCase() ?? "";
     const tail = text.slice((match.index ?? 0) + match[0].length);
     const quoted = /^(["'])([^\r\n]*?)\1/u.exec(tail);
@@ -604,12 +657,14 @@ function findTextualBinding(text: string): string | undefined {
 }
 
 function hasLabeledCredential(text: string): boolean {
-  const assignment = /(?:^|[\n;,{}])\s*["']?(?:api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password|credential|authorization)["']?\s*[:=]\s*/gimu;
-  for (const match of text.matchAll(assignment)) {
+  const assignment = assignmentPattern("api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password|credential|authorization");
+  for (const match of withoutComments(text).matchAll(assignment)) {
     const tail = text.slice((match.index ?? 0) + match[0].length);
     const quoted = /^(["'])([A-Za-z0-9_./+= -]+?)\1/u.exec(tail)?.[2];
-    const expression = quoted ?? /^([^,;}\r\n]+)/u.exec(tail)?.[1] ?? "";
+    const template = /^`[^`\r\n]*`/u.exec(tail)?.[0];
+    const expression = quoted ?? template ?? /^([^,;}\r\n]+)/u.exec(tail)?.[1] ?? "";
     const value = expression.trim();
+    if (isRuntimeReference(value)) continue;
     const credential = /^(?:bearer|basic)\s+(.+)$/iu.exec(value)?.[1] ?? value;
     if (credential.length >= 16 && !isRuntimeReference(credential) && !isPlaceholder(credential)) return true;
   }
@@ -622,22 +677,40 @@ const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: "legacy-workflow", pattern: /\b(?:AgentFlow|Superpowers)\b/mu },
 ];
 
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const binarySignatures = [
+  Buffer.from("GIF87a", "ascii"), Buffer.from("GIF89a", "ascii"), Buffer.from("%PDF-", "ascii"),
+  Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  Buffer.from([0x1f, 0x8b]), Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+] as const;
+
+function decodePublicText(item: PublicContent): string {
+  if (item.content.includes(0) || binarySignatures.some((signature) => item.content.subarray(0, signature.length).equals(signature))) {
+    throw new Error(`Forbidden public content (invalid-text-encoding) in ${item.path}`);
+  }
+  try {
+    return fatalUtf8Decoder.decode(item.content);
+  } catch {
+    throw new Error(`Forbidden public content (invalid-text-encoding) in ${item.path}`);
+  }
+}
+
 export function scanPublicContent(contents: readonly PublicContent[]): void {
   for (const item of contents) {
     assertSafeRelativePath(item.path, "Public content path");
     for (const forbidden of forbiddenPathPatterns) {
       if (forbidden.pattern.test(item.path)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);
     }
-    const text = item.content.toString("utf8").replaceAll("\0", "\n");
+    const text = decodePublicText(item);
     if (/\.(?:json|ya?ml|md)$/iu.test(item.path)) {
       const binding = findStructuredBinding(structuredDocument(item.path, text));
       if (binding) throw new Error(`Forbidden public content (${binding}) in ${item.path}`);
     }
+    const definesPrivacyPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";
     const textualBinding = findTextualBinding(text);
-    if (textualBinding) throw new Error(`Forbidden public content (${textualBinding}) in ${item.path}`);
-    if (hasLabeledCredential(text)) throw new Error(`Forbidden public content (credential) in ${item.path}`);
+    if (textualBinding && !definesPrivacyPolicy) throw new Error(`Forbidden public content (${textualBinding}) in ${item.path}`);
+    if (hasLabeledCredential(text) && !definesPrivacyPolicy) throw new Error(`Forbidden public content (credential) in ${item.path}`);
     for (const forbidden of forbiddenPatterns) {
-      const definesPrivacyPolicy = item.path === "src/release/index.ts" || item.path === "test/unit/release.test.ts";
       const isApprovedPlanningHistory = item.path.startsWith("openspec/");
       if (forbidden.id === "legacy-workflow" && (definesPrivacyPolicy || isApprovedPlanningHistory)) continue;
       if (forbidden.pattern.test(text)) throw new Error(`Forbidden public content (${forbidden.id}) in ${item.path}`);

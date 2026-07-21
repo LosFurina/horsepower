@@ -202,6 +202,33 @@ test("strict staged validation rejects unexpected paths, links, and unsafe modes
   void repositoryRoot;
 });
 
+test("archive inspection requires one canonical gzip member and validates its trailer", async () => {
+  const root = await temporaryDirectory();
+  const canonical = makeHostileArchive({ name: "horsepower/file", content: Buffer.from("accepted") });
+  const mutations = [
+    ["filename private path", withGzipHeaderOption(canonical, 0x08, Buffer.from(`${["", "Users", "alice", "private"].join("/")}\0`))],
+    ["comment token", withGzipHeaderOption(canonical, 0x10, Buffer.from(`${["ghp", ""].join("_")}${"a".repeat(36)}\0`))],
+    ["extra metadata", withGzipHeaderOption(canonical, 0x04, Buffer.from([2, 0, 1, 2]))],
+    ["concatenated member", Buffer.concat([canonical, canonical])],
+    ["malformed CRC32", mutateGzipTrailer(canonical, -8)],
+    ["malformed ISIZE", mutateGzipTrailer(canonical, -4)],
+  ] as const;
+  for (const [label, bytes] of mutations) {
+    const archive = join(root, `${label}.tar.gz`);
+    await writeFile(archive, bytes);
+    await expect(inspectReleaseArchive(archive), label).rejects.toThrow(/gzip/u);
+  }
+
+  const generatedRoot = await fixtureRepository();
+  const generated = await buildRelease({
+    repositoryRoot: generatedRoot,
+    outputDir: join(root, "generated-canonical"),
+    version: "1.2.3-alpha.1",
+    runBuild: async () => {},
+  });
+  await expect(inspectReleaseArchive(generated.archivePath)).resolves.toMatchObject({ entries: expect.any(Array) });
+});
+
 test("archive inspection rejects hostile USTAR name/prefix combinations and malformed headers", async () => {
   const root = await temporaryDirectory();
   const samples = [
@@ -450,11 +477,48 @@ test("privacy scanner rejects language-agnostic concrete bindings and letter-onl
   }
 });
 
+test("privacy scanner rejects typed TypeScript bindings across whitespace and comments", () => {
+  const forbidden = [
+    ["typed model", `const model: string = "private-alpha";`],
+    ["generic provider", `const provider: Provider<string> = /* hidden */ "secret-cloud";`],
+    ["union api key", `const apiKey:
+  string | Secret
+  =
+  "${"a".repeat(28)}";`],
+    ["typed secret field", `class Config { secret /* gap */ : Secret | string /* gap */ = "${"b".repeat(28)}"; }`],
+  ] as const;
+  for (const [label, content] of forbidden) {
+    expect(() => scanPublicContent([{ path: `src/${label}.ts`, content: Buffer.from(content) }]), label).toThrow(/Forbidden public content/u);
+  }
+});
+
+test("privacy scanner rejects non-text encodings and accepts valid multibyte UTF-8", () => {
+  const utf16Token = Buffer.from(`${["api", "key"].join("_")} = '${"a".repeat(28)}'`, "utf16le");
+  const utf16Model = Buffer.from(`model = "private-alpha"`, "utf16le");
+  const utf16PrivatePath = Buffer.from(["", "Users", "alice", "private"].join("/"), "utf16le");
+  const utf16Be = Buffer.from(utf16Model);
+  utf16Be.swap16();
+  const rejected = [
+    ["utf16 token", utf16Token],
+    ["utf16 model", utf16Model],
+    ["utf16be model", utf16Be],
+    ["utf16 private path", utf16PrivatePath],
+    ["embedded NUL", Buffer.from("safe\0content")],
+    ["invalid UTF-8", Buffer.from([0x66, 0x80, 0x6f])],
+    ["binary magic", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    ["ASCII binary magic", Buffer.from("GIF89a")],
+  ] as const;
+  for (const [label, content] of rejected) {
+    expect(() => scanPublicContent([{ path: `docs/${label}.txt`, content }]), label).toThrow(/Forbidden public content \(invalid-text-encoding\)/u);
+  }
+  expect(() => scanPublicContent([{ path: "docs/i18n.md", content: Buffer.from("安全的语义槽位：craft ✅\n", "utf8") }])).not.toThrow();
+});
+
 test("privacy scanner permits semantic names, neutral prose, references, placeholders, and runtime-built fixtures", () => {
   const modelKey = ["mod", "el"].join("");
   const providerKey = ["provid", "er"].join("");
   const safe = [
-    ["src/slots.ts", `interface Binding { ${modelKey}: string; ${providerKey}?: unknown }\nconst modelSlot = 'craft';\nconst ${modelKey} = parsed.values.get(id);\nconst token = parsed.values.get('token');\nreturn { ${modelKey}: binding.${modelKey}, ${providerKey}: resolved.${providerKey}, ${modelKey}s: options.${modelKey}s, secret: authValue.secret };\n`],
+    ["src/slots.ts", `interface Binding { ${modelKey}: string; ${providerKey}?: unknown }\nconst typedModelSlot: string = 'craft';\nconst model: Model | undefined = binding.model;\nconst provider: Provider<string> = resolved.provider;\nconst apiKey: Secret = authValue.secret;\nconst secret: Secret = authValue.secret;\nconst modelSlot = 'craft';\nconst ${modelKey} = parsed.values.get(id);\nconst token = parsed.values.get('token');\nheaders.authorization = \`Bearer \${options.config.auth.token}\`;\nconst token: Token = props[i];\nconst credential: Credential = item[field];\nconst secret: Secret = error ?? stack.pop();\nconst password: Password = { source: authValue.secret };\nconst credential: Secret = \`\${scope}-settings-secret\`;\nreturn { ${modelKey}: binding.${modelKey}, ${providerKey}: resolved.${providerKey}, ${modelKey}s: options.${modelKey}s, secret: authValue.secret };\n`],
     ["docs/model-neutral.md", "Models and providers are selected through semantic slots. A model-neutral release has no concrete binding.\n"],
     ["config/example.env", "API_KEY=your_api_key_here\nTOKEN=<token>\nPASSWORD=changeme\n"],
     ["config/example.yaml", `${modelKey}: <model-name>\n${providerKey}: your-provider-here\n${modelKey}s: [provider/model, project/craft, p/m, unknown/model]\n`],
@@ -464,6 +528,18 @@ test("privacy scanner permits semantic names, neutral prose, references, placeho
     expect(() => scanPublicContent([{ path, content: Buffer.from(content) }]), path).not.toThrow();
   }
 });
+
+function withGzipHeaderOption(archive: Buffer, flag: number, metadata: Buffer): Buffer {
+  const header = Buffer.from(archive.subarray(0, 10));
+  header[3] = flag;
+  return Buffer.concat([header, metadata, archive.subarray(10)]);
+}
+
+function mutateGzipTrailer(archive: Buffer, offset: -8 | -4): Buffer {
+  const mutated = Buffer.from(archive);
+  mutated[mutated.length + offset] = (mutated[mutated.length + offset] ?? 0) ^ 1;
+  return mutated;
+}
 
 function makeHostileArchive(options: {
   name: string;
