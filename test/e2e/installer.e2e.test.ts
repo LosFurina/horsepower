@@ -69,6 +69,39 @@ async function runInteractiveInstaller(
   });
 }
 
+test("interactive external Skill audit defaults to No before activation and affirmative input continues", async () => {
+  const fixturePaths = await fixture();
+  const external = join(fixturePaths.root, ".pi/skills/external/SKILL.md");
+  await mkdir(dirname(external), { recursive: true });
+  await writeFile(external, "---\nname: external\ndescription: fixture\n---\nprivate body");
+  const managed = join(fixturePaths.home, ".pi", "agent", "horsepower");
+
+  const declineInput = join(fixturePaths.root, "tty-audit-decline"), declineOutput = join(fixturePaths.root, "tty-audit-decline-output");
+  await writeFile(declineInput, "\n"); await writeFile(declineOutput, "");
+  await expect(runInteractiveInstaller(fixturePaths, declineInput, declineOutput, ["--locale", "en"])).rejects.toMatchObject({ stderr: expect.stringContaining("Skill audit declined") });
+  expect(await readFile(declineOutput, "utf8")).toContain("external");
+  await expect(access(join(managed, "current"))).rejects.toThrow();
+  await expect(access(join(managed, "settings.json"))).rejects.toThrow();
+
+  const acceptInput = join(fixturePaths.root, "tty-audit-accept"), acceptOutput = join(fixturePaths.root, "tty-audit-accept-output");
+  await writeFile(acceptInput, "yes\n\n"); await writeFile(acceptOutput, "");
+  await expect(runInteractiveInstaller(fixturePaths, acceptInput, acceptOutput, ["--locale", "en"])).resolves.toMatchObject({ stdout: expect.stringContaining("installed successfully") });
+  expect(await readFile(acceptOutput, "utf8")).toContain("workers use --no-skills");
+  expect(await readlink(join(managed, "current"))).toBe(`versions/v${version}`);
+});
+
+test("non-interactive exposure warns on stderr and continues without changing Skill configuration", async () => {
+  const fixturePaths = await fixture();
+  const external = join(fixturePaths.root, ".pi/skills/external/SKILL.md");
+  await mkdir(dirname(external), { recursive: true });
+  await writeFile(external, "---\nname: external\ndescription: fixture\n---\nprivate body");
+  const result = await runInstaller(fixturePaths);
+  expect(result.stderr).toContain("Skill exposure audit");
+  expect(result.stderr).toContain('find "$HOME"');
+  expect(await readFile(external, "utf8")).toContain("private body");
+  expect(await readlink(join(fixturePaths.home, ".pi/agent/horsepower/current"))).toBe(`versions/v${version}`);
+});
+
 test("failed interactive setup restores the exact prior settings and existing topology", async () => {
   const fixturePaths = await fixture();
   await runInstaller(fixturePaths);

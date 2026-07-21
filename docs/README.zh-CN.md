@@ -21,6 +21,14 @@ horsepower setup
 
 bootstrap 下载 `horsepower-v<version>.tar.gz` 及 SHA-256 asset，验证精确布局和内部 digest，然后原子切换 `current`。它不使用 `sudo`、不修改 shell 启动文件、不复制 Pi resource。可使用 `--locale en` 或 `--locale zh-CN`；没有终端和既有设置时默认英文。
 
+## 技能隔离与暴露审计
+
+每个 Horsepower one-shot 和持久 worker 启动 Pi 时都使用 `--no-skills`；worker 不会发现全局、项目、settings、package 或 extension 动态提供的 Skill。这是指令边界，不是文件系统、凭据、网络或操作系统 sandbox。
+
+主 Captain 有意保留在用户正常且由用户控制的 Pi 环境中。安装程序在 staged preflight 之后、activation 之前审计静态启用的 Skill。交互安装发现外部暴露或审计不完整时，只接受明确的 `y`、`Y` 或 `yes`（默认 No）；无人值守安装向 stderr 警告后继续，且不修改 Pi Skill 配置。
+
+可在任意项目运行 `horsepower skill-audit` 或 `horsepower skill-audit --json`。只读审计涵盖全局和当前项目上下文；缺失 package 会跳过而不是安装，也不会加载 extension 或执行 Skill 内容。审计不会枚举 extension 动态提供的 Skill，也无法预测未来项目。命令会显示可选、可移植的 `find "$HOME" ...` 候选文件扫描命令，但绝不自动执行；找到候选文件不表示 Pi 已启用它。
+
 ## 模型能力 slot
 
 每次 worker 创建或 one-shot dispatch 都必须明确提供 `modelSlot`。必需 slot 为 `judgment`、`craft`、`utility`；内置 fallback 为 `speed -> utility`、`context -> judgment`，也支持自定义 slot。role 不绑定 provider/model。

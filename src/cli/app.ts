@@ -10,6 +10,7 @@ import { validateReleaseCompatibility } from "../release-manifest.js";
 import { createHandoffStore } from "../handoffs/store.js";
 import { message as localizedMessage, resolveOutputLocale, validateOutputLocale, type MessageId, type OutputLocale } from "../localization/index.js";
 import { createSlotRegistry, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
+import { auditSkillExposure, type StaticSkillResolver, type SkillAuditResult } from "../skills/audit.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
 interface CommandResult { data: unknown; ok?: boolean; exitCode?: number; message?: string }
@@ -25,6 +26,8 @@ export interface CliOptions {
   interactive?: boolean;
   confirm?: (message: string) => Promise<boolean | undefined>;
   writeConfigs?: (entries: readonly JsonWrite[]) => Promise<void>;
+  resolveSkills?: StaticSkillResolver;
+  openSpecVersion?: string;
   linkOperations?: {
     create(target: string, path: string): Promise<void>;
     remove(path: string): Promise<void>;
@@ -502,6 +505,22 @@ export function createCli(options: CliOptions) {
     }
     throw new UsageError(`Unknown webhook command: ${action}`);
   }
+  async function skillAudit(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
+    only(parsed, ["locale"], []);
+    if (parsed.positionals.length) throw new UsageError("skill-audit accepts no arguments");
+    if (parsed.values.has("locale")) {
+      try { validateOutputLocale(parsed.values.get("locale")); } catch { throw new UsageError(`OUTPUT_LOCALE_INVALID: ${parsed.values.get("locale")}`); }
+    }
+    let openSpecVersion = options.openSpecVersion;
+    if (!openSpecVersion) {
+      try {
+        const version = await options.runOpenSpec(["--version"], { cwd: options.cwd });
+        if (version.code === 0) openSpecVersion = /^(\d+\.\d+\.\d+)\s*$/u.exec(version.stdout)?.[1];
+      } catch { /* unverifiable OpenSpec-like Skills remain external */ }
+    }
+    const data = await auditSkillExposure({ homeDir: options.homeDir, cwd: options.cwd, ...(options.resolveSkills ? { resolveStatic: options.resolveSkills } : {}), ...(openSpecVersion ? { openSpecVersion } : {}) });
+    return { data };
+  }
   async function openspecCheck(outputLocale: OutputLocale) {
     try {
       const result = await validateOpenSpecInstallation({ run: options.runOpenSpec, readText: (path) => readFile(path, "utf8") }, options.cwd);
@@ -706,6 +725,7 @@ export function createCli(options: CliOptions) {
     unset: { run: unsetSlot, requiresPlatform: true, summaryId: completed },
     webhook: { run: webhook, requiresPlatform: true, summaryId: completed },
     handoff: { run: handoff, summaryId: completed },
+    "skill-audit": { run: skillAudit, summaryId: "audit.summary", summaryVariables: () => ({ status: "", count: 0 }) },
     doctor: { run: doctor, summaryId: "doctor.healthy" },
     preflight: { run: preflight, requiresPlatform: true, summaryId: completed },
     enable: { run: (parsed) => setIntegrationState(parsed, "enabled"), requiresPlatform: true, summaryId: "cli.enabled" },
@@ -729,11 +749,18 @@ export function createCli(options: CliOptions) {
       const requiresPlatform = typeof definition.requiresPlatform === "function" ? definition.requiresPlatform(parsed) : definition.requiresPlatform === true;
       if (requiresPlatform) requireSupportedPlatform();
       const result = await definition.run(parsed);
-      try { locale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* doctor and diagnostics retain their structured evidence */ }
+      try { locale = command === "skill-audit" && parsed.values.has("locale") ? validateOutputLocale(parsed.values.get("locale")) : await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* doctor and diagnostics retain their structured evidence */ }
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1);
       const summaryId = typeof definition.summaryId === "function" ? definition.summaryId(parsed) : definition.summaryId;
-      const summary = localizedMessage(locale, summaryId, { command: commandName, ...definition.summaryVariables?.(parsed) });
-      return machine ? { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" } : { exitCode, stdout: `${summary}\n`, stderr: "" };
+      const audit = command === "skill-audit" ? result.data as SkillAuditResult : undefined;
+      const summary = audit ? localizedMessage(locale, "audit.summary", { status: audit.status, count: audit.externalCount }) : localizedMessage(locale, summaryId, { command: commandName, ...definition.summaryVariables?.(parsed) });
+      if (machine) return { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" };
+      if (audit) {
+        const rows = audit.skills.map((skill) => `- ${skill.name} | ${skill.scope} | ${skill.source} | ${skill.path} | ${skill.evidence}`);
+        const text = [summary, ...rows, localizedMessage(locale, "audit.boundary"), localizedMessage(locale, "audit.scope"), ...(audit.status === "complete" ? [] : [localizedMessage(locale, "audit.incomplete")]), localizedMessage(locale, "audit.candidates"), audit.candidateScanCommand].join("\n");
+        return { exitCode, stdout: `${text}\n`, stderr: "" };
+      }
+      return { exitCode, stdout: `${summary}\n`, stderr: "" };
     } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(locale === "zh-CN" ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }
   } };
 }

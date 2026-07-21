@@ -556,6 +556,7 @@ slotPolicy:
     expect(() => scanPublicContent([{ path, content: Buffer.from(content) }]), path).not.toThrow();
   }
   expect(() => scanPublicContent([{ path: "bin/horsepower", content: Buffer.from("return {\n  model: binding.model,\n  provider: resolved.provider,\n};\n") }])).not.toThrow();
+  expect(() => scanPublicContent([{ path: "bin/horsepower", content: Buffer.from("settings.provider={...runtimeProvider??{},maxRetryDelayMs:retry.maxDelayMs}") }])).not.toThrow();
 });
 
 test("privacy scanner policy source and tests are themselves scannable", async () => {

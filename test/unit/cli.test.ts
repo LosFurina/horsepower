@@ -62,6 +62,36 @@ test("every command uses its metadata-owned localized completion summary", async
   expect(configured).toMatchObject({ outputLocale: "zh-CN", summary: "输出语言已设置为 zh-CN。" });
 });
 
+test("skill-audit is observation-only with stable JSON, localized human output, and strict options", async () => {
+  const writes: unknown[] = [];
+  const { cwd, run } = await harness({
+    writeConfigs: async (entries: unknown[]) => { writes.push(entries); },
+    resolveSkills: async () => ({ skills: [{ path: join(cwd, ".pi/skills/external/SKILL.md"), enabled: true, metadata: { source: "settings", scope: "project", origin: "top-level" } }] }),
+  });
+  await mkdir(join(cwd, ".pi/skills/external"), { recursive: true });
+  await writeFile(join(cwd, ".pi/skills/external/SKILL.md"), "---\nname: external\ndescription: fixture\n---\nprivate body");
+  const machine = JSON.parse((await run(["skill-audit", "--json"])).stdout);
+  expect(machine).toMatchObject({ ok: true, outputLocale: "en", data: { status: "complete", externalCount: 1, dynamicExtensionsEnumerated: false, skills: [{ name: "external", scope: "project", source: "settings", evidence: "resolved" }] } });
+  expect(JSON.stringify(machine)).not.toContain("private body");
+  expect((await run(["skill-audit"])).stdout).toContain("Skill exposure audit: complete");
+  let officialPath = "";
+  const officialHarness = await harness({ resolveSkills: async () => ({ skills: [{ path: officialPath, enabled: true, metadata: { source: "settings", scope: "project", origin: "top-level" } }] }) });
+  officialPath = join(officialHarness.cwd, ".pi/skills/openspec-apply-change/SKILL.md");
+  await mkdir(dirname(officialPath), { recursive: true });
+  await writeFile(officialPath, '---\nname: openspec-apply-change\ndescription: fixture\nauthor: openspec\ngeneratedBy: "1.6.0"\nallowed-tools: Bash(openspec:*)\n---\n');
+  const officialAudit = JSON.parse((await officialHarness.run(["skill-audit", "--json"])).stdout).data;
+  expect(officialAudit).toMatchObject({ externalCount: 0, excludedCount: 1 });
+  expect((await run(["skill-audit", "--locale", "zh-CN"])).stdout).toContain("技能暴露审计：complete");
+  expect((await run(["skill-audit", "--locale", "fr"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["skill-audit", "extra"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["skill-audit", "--bogus"]))).toMatchObject({ exitCode: 2 });
+  expect(writes).toEqual([]);
+
+  const zh = await harness({ resolveSkills: async () => ({ skills: [] }) });
+  await zh.run(["configure", "--locale", "zh-CN", "--json"]);
+  expect((await zh.run(["skill-audit"])).stdout).toContain("技能暴露审计：complete");
+});
+
 test("strictly parses commands and emits deterministic JSON with stable exit codes", async () => {
   const { run } = await harness();
   expect(await run(["unknown", "--json"])).toEqual({

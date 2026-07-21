@@ -21,6 +21,14 @@ horsepower setup
 
 The bootstrap downloads `horsepower-v<version>.tar.gz` and its SHA-256 asset, validates the exact layout and internal digests, then atomically switches `current`. It never uses `sudo`, edits shell startup files, or copies Pi resources. Use `--locale en` or `--locale zh-CN`; without a terminal or prior setting, English is used.
 
+## Skill isolation and exposure audit
+
+Every Horsepower one-shot and persistent worker starts Pi with `--no-skills`; workers do not discover global, project, settings, package, or extension-contributed Skills. This is an instruction boundary, not a filesystem, credential, network, or OS sandbox.
+
+The main Captain intentionally remains in the user's normal, user-controlled Pi environment. Installation audits enabled static Skill resources after staged preflight and before activation. External exposure or an incomplete audit requires explicit `y`, `Y`, or `yes` in interactive installation (default No); unattended installation warns on stderr and continues without changing Pi Skill configuration.
+
+Run `horsepower skill-audit` or `horsepower skill-audit --json` from any project. The observation-only audit covers global and current-project context, skips unavailable packages rather than installing them, and never loads extensions or Skill content. Dynamic extension-contributed Skills are not enumerated, and future project exposure cannot be predicted. For a broader candidate-file scan, the command prints an optional portable `find "$HOME" ...` command but never executes it; candidate files are not necessarily enabled by Pi.
+
 ## Model capability slots
 
 Every worker creation or one-shot dispatch explicitly names a `modelSlot`. Required slots are `judgment`, `craft`, and `utility`. Built-in fallbacks are `speed -> utility` and `context -> judgment`; custom slots are supported. Roles remain provider/model-neutral.

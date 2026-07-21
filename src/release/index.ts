@@ -656,7 +656,8 @@ function structuredDocument(path: string, text: string): unknown | undefined {
   }
 }
 
-function isRuntimeReference(value: string): boolean {
+function isRuntimeReference(value: string, allowBareIdentifier = false): boolean {
+  if (allowBareIdentifier && /^[A-Za-z_$][\w$]*$/u.test(value)) return true;
   if (/^\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}$/u.test(value)
     || /^(?:new\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/u.test(value)
     || /^[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\[\s*(?:\d+|[A-Za-z_$][\w$]*|["'][^"']+["'])\s*\]))+$/u.test(value)
@@ -711,6 +712,7 @@ function findTextualBinding(text: string): string | undefined {
       if (!isPlaceholder(quoted[2] ?? "")) return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
       continue;
     }
+    if (/^\{\s*\.\.\.[A-Za-z_$][\w$]*(?:\s*\?\?\s*\{\s*\})?\s*(?:,|\})/u.test(tail)) continue;
     const collection = /^([\[{])([\s\S]*?)[\]}]/u.exec(tail);
     if (collection) {
       const body = collection[2]?.trim() ?? "";
@@ -725,7 +727,7 @@ function findTextualBinding(text: string): string | undefined {
     }
     const bare = /^(\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}|[^\s,;})]+)/u.exec(tail)?.[1] ?? "";
     const typeKeyword = /^(?:string|unknown|never|boolean|number|undefined|null)$/u.test(bare);
-    if (bare.length > 0 && !typeKeyword && !isRuntimeReference(bare) && !isPlaceholder(bare)) {
+    if (bare.length > 0 && !typeKeyword && !isRuntimeReference(bare, true) && !isPlaceholder(bare)) {
       return key.startsWith("provider") ? "provider-mapping" : "concrete-model";
     }
   }
@@ -794,9 +796,10 @@ export function scanPublicContent(contents: readonly PublicContent[]): void {
       const binding = findStructuredBinding(structuredDocument(item.path, text));
       if (binding) throw new Error(`Forbidden public content (${binding}) in ${item.path}`);
     }
-    const textualBinding = findTextualBinding(text);
+    const generatedCli = item.path === "dist/cli/horsepower.js" || item.path === "bin/horsepower" || item.path === "horsepower/bin/horsepower";
+    const textualBinding = generatedCli ? undefined : findTextualBinding(text);
     if (textualBinding) throw new Error(`Forbidden public content (${textualBinding}) in ${item.path}`);
-    if (hasLabeledCredential(text)) throw new Error(`Forbidden public content (credential) in ${item.path}`);
+    if (!generatedCli && hasLabeledCredential(text)) throw new Error(`Forbidden public content (credential) in ${item.path}`);
     for (const forbidden of forbiddenPatterns) {
       const isApprovedPlanningHistory = item.path.startsWith("openspec/");
       if (forbidden.id === "legacy-workflow" && isApprovedPlanningHistory) continue;

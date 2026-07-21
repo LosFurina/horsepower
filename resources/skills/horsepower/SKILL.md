@@ -18,4 +18,6 @@ Use `horsepower_subagent` only for work the Captain explicitly chooses to dispat
 - Dispatch only the requested `single`, `parallel`, `chain`, or persistent action.
 - Keep proposal, design, specs, tasks, verification, and archive facts in official OpenSpec artifacts.
 - Do not ask workers to create other workers.
+- Every one-shot and persistent worker runs with `--no-skills`: no global, project, settings, package, or extension-contributed Skill is discovered by workers, and there is no Skill allowlist escape hatch.
+- The main Captain remains in the user's normal, user-controlled Pi environment. `horsepower skill-audit` observes only statically resolvable global/current-project exposure; it does not load extensions, change Skill configuration, or predict future projects.
 - Treat workers as process-isolated, not security-isolated; they share the user's filesystem, environment, credentials, and network.

@@ -155,6 +155,25 @@ mkdir -p "$TMP/preflight-home"
 HOME="$TMP/preflight-home" "$STAGED/bin/horsepower" preflight "$STAGED" --version "$VERSION" --json >/dev/null \
   || fail "staged release preflight failed"
 
+AUDIT_JSON="$TMP/skill-audit.json"
+HOME="$HOME_DIR" "$STAGED/bin/horsepower" skill-audit --json >"$AUDIT_JSON" \
+  || fail "staged Skill audit failed"
+AUDIT_GATE=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).data;process.stdout.write(r.status!=="complete"||r.externalCount>0?"warn":"clean")' "$AUDIT_JSON") \
+  || fail "invalid staged Skill audit output"
+if [ "$AUDIT_GATE" = "warn" ]; then
+  AUDIT_TEXT="$TMP/skill-audit.txt"
+  HOME="$HOME_DIR" "$STAGED/bin/horsepower" skill-audit --locale "$LOCALE" >"$AUDIT_TEXT" || fail "unable to render staged Skill audit"
+  if [ "$INTERACTIVE" -eq 1 ]; then
+    cat "$AUDIT_TEXT" >&4
+    if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "Worker 使用 --no-skills，但主 Captain 仍可能受这些技能影响。继续？[y/N]：" >&4
+    else printf '%s ' "Horsepower workers use --no-skills, but the main Captain may still be influenced. Continue? [y/N]:" >&4; fi
+    IFS= read -r AUDIT_CONFIRM <&3 || AUDIT_CONFIRM=""
+    case "$AUDIT_CONFIRM" in y|Y|yes) ;; *) fail "Skill audit declined before activation" ;; esac
+  else
+    cat "$AUDIT_TEXT" >&2
+  fi
+fi
+
 for pair in "$EXTENSION_LINK|$EXTENSION_TARGET" "$SKILL_LINK|$SKILL_TARGET" "$CLI_LINK|$CLI_TARGET"; do
   link=${pair%%|*}; target=${pair#*|}
   if [ -L "$link" ]; then [ "$(readlink "$link")" = "$target" ] || fail "conflicting path: $link"

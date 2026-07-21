@@ -1,5 +1,13 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { build } from "esbuild";
+
+const narrowPiSdk = {
+  name: "narrow-pi-static-resolver",
+  setup(build) {
+    build.onResolve({ filter: /^@earendil-works\/pi-coding-agent$/ }, () => ({ path: resolve("src/skills/pi-static-sdk.ts") }));
+  },
+};
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/cli", { recursive: true });
@@ -13,7 +21,10 @@ await build({
   platform: "node",
   format: "esm",
   target: "node22",
-  banner: { js: "#!/usr/bin/env node" },
+  plugins: [narrowPiSdk],
+  minify: true,
+  legalComments: "none",
+  banner: { js: "#!/usr/bin/env node\nimport { createRequire as __horsepowerCreateRequire } from 'node:module'; const require = __horsepowerCreateRequire(import.meta.url);" },
 });
 
 await build({
