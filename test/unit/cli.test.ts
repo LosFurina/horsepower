@@ -644,6 +644,37 @@ test("preflight rejects every symlinked stable-link parent component", async () 
   }
 });
 
+test("preflight rejects an existing immutable version destination without modifying it", async () => {
+  for (const collision of ["foreign-directory", "matching-release", "symlink"] as const) {
+    const { homeDir, root, run } = await harness();
+    const staged = join(root, `staged-${collision}`);
+    await writeRelease(staged, "0.1.0");
+    const destination = join(homeDir, ".pi/agent/horsepower/versions/v0.1.0");
+    const external = join(root, `external-${collision}`);
+    await mkdir(dirname(destination), { recursive: true });
+
+    if (collision === "foreign-directory") {
+      await mkdir(destination);
+      await writeFile(join(destination, "keep"), "foreign data");
+    } else if (collision === "matching-release") {
+      await writeRelease(destination, "0.1.0");
+    } else {
+      await mkdir(external);
+      await writeFile(join(external, "keep"), "external data");
+      await symlink(external, destination);
+    }
+
+    const result = await run(["preflight", staged, "--version", "0.1.0", "--json"]);
+    expect(result, collision).toMatchObject({ exitCode: 1, stdout: "" });
+    if (collision === "foreign-directory") expect(await readFile(join(destination, "keep"), "utf8")).toBe("foreign data");
+    if (collision === "matching-release") expect(JSON.parse(await readFile(join(destination, "release-manifest.json"), "utf8"))).toMatchObject({ version: "0.1.0" });
+    if (collision === "symlink") {
+      expect(await readlink(destination)).toBe(external);
+      expect(await readFile(join(external, "keep"), "utf8")).toBe("external data");
+    }
+  }
+});
+
 test("preflight rejects symlinked destination ancestors and versions without touching external paths", async () => {
   for (const hostile of ["ancestor", "versions"] as const) {
     const { homeDir, root, run } = await harness();
@@ -710,6 +741,28 @@ test("uninstall refuses regular, unrelated, and hostile symlink targets without 
   expect(await readFile(extension, "utf8")).toBe("foreign");
   expect(await readFile(join(outside, "keep"), "utf8")).toBe("safe");
   expect(await readlink(join(hp, "current"))).toBe(outside);
+});
+
+test("preflight enforces semantic release compatibility boundaries", async () => {
+  for (const [name, compatibility, expectedExit] of [
+    ["boundaries", { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.6.0" }, 0],
+    ["arbitrary-node", { node: "supported", pi: "0.80.10", openspec: ">=1.6.0" }, 1],
+    ["old-node", { node: ">=22.18.0", pi: "0.80.10", openspec: ">=1.6.0" }, 1],
+    ["arbitrary-pi", { node: ">=22.19.0", pi: "compatible", openspec: ">=1.6.0" }, 1],
+    ["old-pi", { node: ">=22.19.0", pi: "0.80.9", openspec: ">=1.6.0" }, 1],
+    ["arbitrary-openspec", { node: ">=22.19.0", pi: "0.80.10", openspec: "latest" }, 1],
+    ["old-openspec", { node: ">=22.19.0", pi: "0.80.10", openspec: ">=1.5.9" }, 1],
+  ] as const) {
+    const { root, run } = await harness();
+    const staged = join(root, `staged-${name}`);
+    await writeRelease(staged, "0.1.0");
+    const manifestPath = join(staged, "release-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.compatibility = compatibility;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    expect(await run(["preflight", staged, "--version", "0.1.0", "--json"]), name).toMatchObject({ exitCode: expectedExit });
+  }
 });
 
 test("doctor reports malformed managed release topology as actionable installation checks", async () => {
@@ -881,6 +934,34 @@ test("uninstall refuses an unowned versions tree and never follows a versions sy
       expect((await run(["uninstall", "--json"])).exitCode).toBe(1);
       expect(await readFile(join(hp, "versions/not-a-managed-release/keep"), "utf8")).toBe("safe");
     }
+  }
+});
+
+test("purge refuses while any installed code or stable link remains and preserves all data", async () => {
+  for (const remaining of ["owned-link-and-versions", "unowned-link"] as const) {
+    const { homeDir, cwd, run } = await harness();
+    const hp = join(homeDir, ".pi/agent/horsepower");
+    const projectData = join(cwd, ".pi/horsepower/keep");
+    const extension = join(homeDir, ".pi/agent/extensions/horsepower");
+    await mkdir(dirname(projectData), { recursive: true });
+    await writeFile(projectData, "project data");
+    await mkdir(join(hp, "memory"), { recursive: true });
+    await writeFile(join(hp, "memory/keep"), "global data");
+    await mkdir(dirname(extension), { recursive: true });
+
+    if (remaining === "owned-link-and-versions") {
+      await writeRelease(join(hp, "versions/v0.1.0"), "0.1.0");
+      await symlink(join(hp, "current/pi/extensions/horsepower"), extension);
+    } else {
+      await symlink("/unrelated", extension);
+    }
+
+    const result = await run(["purge", "--yes", "--json"]);
+    expect(result, remaining).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(result.stderr).toContain("uninstall");
+    expect(await readFile(join(hp, "memory/keep"), "utf8")).toBe("global data");
+    expect(await readFile(projectData, "utf8")).toBe("project data");
+    expect(await readlink(extension)).toBe(remaining === "owned-link-and-versions" ? join(hp, "current/pi/extensions/horsepower") : "/unrelated");
   }
 });
 

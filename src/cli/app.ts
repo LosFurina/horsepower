@@ -6,6 +6,7 @@ import { resolveHorsepowerPaths } from "../config/paths.js";
 import { parseWebhookSettings, redactCredentials, validateWebhookSettingsShape, validateWebhookUrl } from "../config/webhook.js";
 import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-notifier.js";
 import { validateOpenSpecInstallation } from "../openspec/boundary.js";
+import { validateReleaseCompatibility } from "../release-manifest.js";
 import { createSlotRegistry, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
@@ -176,10 +177,8 @@ async function readManagedManifest(release: string): Promise<JsonObject> {
     await verifyNoSymlinkPath(release, manifestPath, "file");
     const manifest = await readJsonObject(manifestPath);
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new ManagedTopologyError("Invalid release manifest version");
-    const compatibility = object(manifest.compatibility);
-    if (typeof compatibility.node !== "string" || !compatibility.node || typeof compatibility.pi !== "string" || !compatibility.pi || typeof compatibility.openspec !== "string" || !compatibility.openspec) {
-      throw new ManagedTopologyError("Invalid release manifest compatibility");
-    }
+    try { validateReleaseCompatibility(manifest.compatibility); }
+    catch (cause) { throw new ManagedTopologyError((cause as Error).message); }
     const entries = object(manifest.entryPoints);
     const digests = object(manifest.digests);
     for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) {
@@ -200,7 +199,12 @@ async function readManagedManifest(release: string): Promise<JsonObject> {
   }
 }
 
-async function verifyInstallDestination(home: string, root: string, versions: string): Promise<void> {
+async function requireAbsent(path: string, message: string): Promise<void> {
+  try { await lstat(path); throw new ManagedTopologyError(message); }
+  catch (cause) { if (!absent(cause)) throw cause; }
+}
+
+async function verifyInstallDestination(home: string, root: string, versions: string, destination: string): Promise<void> {
   await verifyTrustedPath(home, root);
   let rootInfo;
   try { rootInfo = await lstat(root); } catch (cause) { if (absent(cause)) return; throw cause; }
@@ -211,6 +215,7 @@ async function verifyInstallDestination(home: string, root: string, versions: st
   } catch (cause) {
     if (!absent(cause)) throw cause;
   }
+  await requireAbsent(destination, `Release destination already exists: ${destination}`);
 }
 
 async function managedRootState(root: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
@@ -469,7 +474,7 @@ export function createCli(options: CliOptions) {
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid staged manifest version");
     if (manifest.version !== expected) throw new Error(`Staged manifest version mismatch: expected ${expected}`); const entries = object(manifest.entryPoints);
     for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); try { await verifyNoSymlinkPath(root, join(root, candidate), "file"); } catch { throw new Error(`Missing staged ${name}: ${candidate}`); } }
-    await verifyInstallDestination(options.homeDir, topology.root, topology.versions);
+    await verifyInstallDestination(options.homeDir, topology.root, topology.versions, join(topology.versions, `v${expected}`));
     for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true);
     const managedRoot = await managedRootState(topology.root); if (managedRoot.status === "conflict") throw new Error(managedRoot.message ?? "Installation ownership conflict");
     const current = await currentState(topology.root, topology.current); const links = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); const conflict = [current, ...links].find((state) => state.status === "conflict"); if (conflict) throw new Error(conflict.message ?? "Installation ownership conflict");
@@ -481,7 +486,7 @@ export function createCli(options: CliOptions) {
   }
   async function purge(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); const confirmed = await options.confirm("Permanently remove Horsepower user data? Type yes to continue: "); if (confirmed === undefined) throw new UsageError("Purge requires --yes when no controlling terminal is available"); if (!confirmed) return { data: { purged: false }, message: "Purge canceled; no data changed" }; }
-    await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); if (current.status !== "absent") throw new Error("Run horsepower uninstall before purge"); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
+    await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const codePaths = [topology.current, topology.versions, ...topology.links.map((link) => link.path)]; for (const path of codePaths) await requireAbsent(path, `Run horsepower uninstall before purge; installed code or link remains: ${path}`); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
   }
 
   return { async run(argv: readonly string[]): Promise<CliResult> {
