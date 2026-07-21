@@ -3,3 +3,5 @@ dist/
 /release/
 *.tgz
 .DS_Store
+
+.worktrees/
