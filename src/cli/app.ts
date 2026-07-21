@@ -188,6 +188,19 @@ async function readManagedManifest(release: string): Promise<JsonObject> {
   }
 }
 
+async function verifyInstallDestination(home: string, root: string, versions: string): Promise<void> {
+  await verifyTrustedPath(home, root);
+  let rootInfo;
+  try { rootInfo = await lstat(root); } catch (cause) { if (absent(cause)) return; throw cause; }
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new ManagedTopologyError(`Refusing unowned Horsepower root: ${root}`);
+  try {
+    const versionsInfo = await lstat(versions);
+    if (versionsInfo.isSymbolicLink() || !versionsInfo.isDirectory()) throw new ManagedTopologyError(`Refusing unowned versions path: ${versions}`);
+  } catch (cause) {
+    if (!absent(cause)) throw cause;
+  }
+}
+
 async function managedRootState(root: string): Promise<{ status: "absent" | "owned" | "conflict"; message?: string }> {
   try { const info = await lstat(root); return info.isDirectory() && !info.isSymbolicLink() ? { status: "owned" } : { status: "conflict", message: `Refusing unowned Horsepower root: ${root}` }; }
   catch (cause) { if (absent(cause)) return { status: "absent" }; throw cause; }
@@ -358,17 +371,42 @@ export function createCli(options: CliOptions) {
       return { id: "openspec", status: "error", message, action };
     }
   }
-  async function installationCheck() { const current = await currentState(topology.root, topology.current); const states = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); return current.status === "owned" && states.every((state) => state.status === "owned") ? { id: "installation", status: "ok", message: "Managed symlink topology is owned" } : { id: "installation", status: "error", message: [current, ...states].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Install or repair Horsepower from an official release" }; }
+  async function installationCheck() {
+    try {
+      const current = await currentState(topology.root, topology.current);
+      const states = await Promise.all(topology.links.map((link) => linkState(link.path, link.target)));
+      return current.status === "owned" && states.every((state) => state.status === "owned")
+        ? { id: "installation", status: "ok", message: "Managed symlink topology is owned" }
+        : { id: "installation", status: "error", message: [current, ...states].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Install or repair Horsepower from an official release" };
+    } catch {
+      return { id: "installation", status: "error", message: "Unable to inspect the managed installation topology", action: "Inspect destination permissions, then install or repair Horsepower from an official release" };
+    }
+  }
+  async function doctorSettings(path: string): Promise<{ value?: JsonObject; error?: string }> {
+    try { return { value: await optionalObject(path) }; }
+    catch (cause) {
+      const message = cause instanceof Error && (cause.message.startsWith("Malformed JSON in ") || cause.message.startsWith("Expected a JSON object in "))
+        ? cause.message
+        : `Unable to read settings at ${path}`;
+      return { error: message };
+    }
+  }
   async function doctor(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []); const checks: Array<Record<string, unknown>> = [];
     try { const data = await slotsData(); checks.push({ id: "configuration", status: "ok", message: `Slots revision ${data.revision}` }); } catch (cause) { checks.push({ id: "configuration", status: "error", message: (cause as Error).message, action: "Run horsepower setup" }); }
-    const globalSettings = await optionalObject(paths.global.settings);
-    const projectSettings = await optionalObject(paths.project.settings);
-    try {
-      const configured = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook);
-      checks.push(configured ? { id: "notification", status: "ok", message: `Webhook enabled (${configured.config.auth.mode})` } : { id: "notification", status: "skipped", message: "Webhook disabled" });
-    } catch (cause) {
-      checks.push({ id: "notification", status: "error", message: (cause as Error).message, action: "Run horsepower webhook configure or webhook disable" });
+    const globalSettings = await doctorSettings(paths.global.settings);
+    const projectSettings = await doctorSettings(paths.project.settings);
+    const settingsErrors = [globalSettings.error, projectSettings.error].filter((message): message is string => message !== undefined);
+    if (settingsErrors.length > 0) {
+      const invalidPaths = [globalSettings.error ? paths.global.settings : undefined, projectSettings.error ? paths.project.settings : undefined].filter((path): path is string => path !== undefined);
+      checks.push({ id: "notification", status: "error", message: settingsErrors.join("; "), action: `Repair or remove invalid settings: ${invalidPaths.join(", ")}` });
+    } else {
+      try {
+        const configured = parseWebhookSettings(globalSettings.value!.webhook, projectSettings.value!.webhook);
+        checks.push(configured ? { id: "notification", status: "ok", message: `Webhook enabled (${configured.config.auth.mode})` } : { id: "notification", status: "skipped", message: "Webhook disabled" });
+      } catch (cause) {
+        checks.push({ id: "notification", status: "error", message: (cause as Error).message, action: "Run horsepower webhook configure or webhook disable" });
+      }
     }
     checks.push(await openspecCheck()); checks.push(options.models ? { id: "model-registry", status: "ok", message: "Slot models validated" } : { id: "model-registry", status: "skipped", message: "Pi model registry unavailable; validation skipped" }); checks.push(await installationCheck());
     return { data: { checks }, ok: !checks.some((check) => check.status === "error"), exitCode: checks.some((check) => check.status === "error") ? 1 : 0 };
@@ -381,6 +419,7 @@ export function createCli(options: CliOptions) {
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid staged manifest version");
     if (manifest.version !== expected) throw new Error(`Staged manifest version mismatch: expected ${expected}`); const entries = object(manifest.entryPoints);
     for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); try { await verifyNoSymlinkPath(root, join(root, candidate), "file"); } catch { throw new Error(`Missing staged ${name}: ${candidate}`); } }
+    await verifyInstallDestination(options.homeDir, topology.root, topology.versions);
     const managedRoot = await managedRootState(topology.root); if (managedRoot.status === "conflict") throw new Error(managedRoot.message ?? "Installation ownership conflict");
     const current = await currentState(topology.root, topology.current); const links = await Promise.all(topology.links.map((link) => linkState(link.path, link.target))); const conflict = [current, ...links].find((state) => state.status === "conflict"); if (conflict) throw new Error(conflict.message ?? "Installation ownership conflict");
     return { data: { eligible: true, root, version: expected }, message: "Staged release eligible" };

@@ -374,6 +374,58 @@ test("doctor reports configuration, notifications, OpenSpec, skipped models, and
   ]));
 });
 
+test("doctor absorbs malformed global and project settings into stable redacted checks", async () => {
+  for (const scope of ["global", "project"] as const) {
+    const { homeDir, cwd, run } = await harness();
+    await run(setupArgs);
+    const settingsPath = scope === "global"
+      ? join(homeDir, ".pi/agent/horsepower/settings.json")
+      : join(cwd, ".pi/horsepower/settings.json");
+    await mkdir(dirname(settingsPath), { recursive: true });
+    const secret = `${scope}-settings-secret`;
+    await writeFile(settingsPath, `{"webhook":{"auth":{"token":"${secret}"}`);
+
+    const first = await run(["doctor", "--json"]);
+    const second = await run(["doctor", "--json"]);
+    expect(first, scope).toEqual(second);
+    expect(first, scope).toMatchObject({ exitCode: 1, stderr: "" });
+    expect(first.stdout, scope).not.toContain(secret);
+    const checks = JSON.parse(first.stdout).data.checks;
+    expect(checks.map((check: { id: string }) => check.id), scope).toEqual([
+      "configuration", "notification", "openspec", "model-registry", "installation",
+    ]);
+    expect(checks.find((check: { id: string }) => check.id === "notification"), scope).toMatchObject({
+      status: "error",
+      message: `Malformed JSON in ${settingsPath}`,
+      action: expect.stringContaining(settingsPath),
+    });
+  }
+});
+
+test("doctor absorbs unreadable global and project settings into path-specific checks", async () => {
+  for (const scope of ["global", "project"] as const) {
+    const { homeDir, cwd, run } = await harness();
+    await run(setupArgs);
+    const settingsPath = scope === "global"
+      ? join(homeDir, ".pi/agent/horsepower/settings.json")
+      : join(cwd, ".pi/horsepower/settings.json");
+    await rm(settingsPath, { force: true });
+    await mkdir(settingsPath, { recursive: true });
+
+    const result = await run(["doctor", "--json"]);
+    expect(result, scope).toMatchObject({ exitCode: 1, stderr: "" });
+    const checks = JSON.parse(result.stdout).data.checks;
+    expect(checks.map((check: { id: string }) => check.id), scope).toEqual([
+      "configuration", "notification", "openspec", "model-registry", "installation",
+    ]);
+    expect(checks.find((check: { id: string }) => check.id === "notification"), scope).toMatchObject({
+      status: "error",
+      message: expect.stringContaining(settingsPath),
+      action: expect.stringContaining(settingsPath),
+    });
+  }
+});
+
 test("doctor distinguishes healthy, missing, stale, and unofficial OpenSpec integration", async () => {
   for (const [kind, expected] of [["healthy", "ok"], ["missing", "error"], ["stale", "error"], ["unofficial", "error"]] as const) {
     const { cwd, run } = await harness();
@@ -451,6 +503,31 @@ test("preflight rejects symlinked manifests, intermediate directories, and inval
     }
     const expected = hostile === "expected-version" ? "01.0.0" : hostile === "manifest-version" ? "0.1.0" : manifestVersion;
     expect(await run(["preflight", staged, "--version", expected, "--json"]), hostile).toMatchObject({ exitCode: hostile === "expected-version" ? 2 : 1 });
+  }
+});
+
+test("preflight rejects symlinked destination ancestors and versions without touching external paths", async () => {
+  for (const hostile of ["ancestor", "versions"] as const) {
+    const { homeDir, root, run } = await harness();
+    const staged = join(root, `staged-${hostile}`);
+    await writeRelease(staged, "0.1.0");
+    const external = join(root, `external-${hostile}`);
+    await mkdir(external, { recursive: true });
+    const marker = join(external, "keep");
+    await writeFile(marker, "external data");
+
+    if (hostile === "ancestor") {
+      await mkdir(homeDir, { recursive: true });
+      await symlink(external, join(homeDir, ".pi"));
+    } else {
+      const horsepowerRoot = join(homeDir, ".pi/agent/horsepower");
+      await mkdir(horsepowerRoot, { recursive: true });
+      await symlink(external, join(horsepowerRoot, "versions"));
+    }
+
+    const result = await run(["preflight", staged, "--version", "0.1.0", "--json"]);
+    expect(result, hostile).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(await readFile(marker, "utf8"), hostile).toBe("external data");
   }
 });
 
