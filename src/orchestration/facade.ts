@@ -39,6 +39,8 @@ export interface OrchestrationOptions {
   reportDispatchTerminal: (report: DispatchTerminalReport) => Promise<unknown>;
   reportChangeTerminal?: (report: ChangeTerminalReport) => Promise<unknown>;
   identityForRun?: (runId: string) => { changeId: string; projectId: string };
+  projectId?: string;
+  trackSettlement?: (settlement: Promise<unknown>) => void;
 }
 
 function required(input: Record<string, unknown>, field: string): string {
@@ -144,7 +146,7 @@ export function createOrchestration(options: OrchestrationOptions) {
     const invocations = resolved.map((item) => item.invocation);
     const slots = resolved.map((item) => item.slot);
     const executor = dependency(options.oneShot, "oneShot");
-    const run = options.beginDispatch({ changeId, projectId: cwd, summary: `${action} ${invocations.length}` });
+    const run = options.beginDispatch({ changeId, projectId: options.projectId ?? cwd, summary: `${action} ${invocations.length}` });
     try {
       const result = action === "single"
         ? await executor.single(invocations[0]!)
@@ -189,14 +191,14 @@ export function createOrchestration(options: OrchestrationOptions) {
       if (action === "doctor") return dependency(options.doctor, "doctor")();
 
       if (action === "begin_change") {
-        return dependency(options.beginChange, "beginChange")({ changeId: changeId!, projectId: cwd });
+        return dependency(options.beginChange, "beginChange")({ changeId: changeId!, projectId: options.projectId ?? cwd });
       }
 
       if (action === "report_terminal") {
         const report = dependency(options.reportChangeTerminal, "reportChangeTerminal");
         const runId = required(rawInput, "runId");
         const identity = dependency(options.identityForRun, "identityForRun")(runId);
-        if (identity.projectId !== cwd) {
+        if (identity.projectId !== (options.projectId ?? cwd)) {
           throw new Error(`Run ${runId} belongs to another project`);
         }
         if (identity.changeId !== changeId) {
@@ -226,7 +228,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         const slot = options.resolveSlot(modelSlot);
         options.validateModel(slot);
         const agent = options.getAgent(agentName);
-        const run = options.beginDispatch({ changeId: changeId!, projectId: cwd, summary: `create ${name}` });
+        const run = options.beginDispatch({ changeId: changeId!, projectId: options.projectId ?? cwd, summary: `create ${name}` });
         try {
           const worker = await options.createWorker({
             name,
@@ -260,7 +262,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         const sendWorker = dependency(options.sendWorker, "sendWorker");
         const waitForMessage = dependency(options.waitForMessage, "waitForMessage");
         const messageStatus = dependency(options.messageStatus, "messageStatus");
-        const run = options.beginDispatch({ changeId: changeId!, projectId: cwd, summary: `${action} ${workerId}` });
+        const run = options.beginDispatch({ changeId: changeId!, projectId: options.projectId ?? cwd, summary: `${action} ${workerId}` });
         let immediate: unknown;
         try {
           immediate = await sendWorker({
@@ -298,6 +300,7 @@ export function createOrchestration(options: OrchestrationOptions) {
           }
         };
         const settlement = settle();
+        options.trackSettlement?.(settlement);
         if (rawInput.wait === true) {
           if (typeof rawInput.timeoutMs === "number") {
             let timeout: NodeJS.Timeout | undefined;

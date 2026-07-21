@@ -39,19 +39,31 @@ test("stale cleanup cannot destroy or remove a replacement generation", async ()
   expect(host[RUNTIME_SYMBOL]).toBe(replacement.record);
 });
 
-test("cleanup removes its generation first and is idempotent under concurrent calls", async () => {
+test("all leases for a generation share its pending cleanup", async () => {
   const { acquireGlobalRuntime, RUNTIME_SYMBOL } = await import("../../src/runtime/global-runtime.js");
   const host: Record<PropertyKey, unknown> = {};
   const stopped = deferred();
   const value = { shutdown: vi.fn(() => stopped.promise), abandon: vi.fn() };
-  const lease = acquireGlobalRuntime({ host, create: () => value });
+  const firstLease = acquireGlobalRuntime({ host, create: () => value });
+  const secondLease = acquireGlobalRuntime({ host, create: () => value });
 
-  const first = lease.cleanup();
-  const second = lease.cleanup();
+  const first = firstLease.cleanup();
+  const second = secondLease.cleanup();
+  let firstSettled = false;
+  let secondSettled = false;
+  void first.then(() => { firstSettled = true; });
+  void second.then(() => { secondSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+
   expect(host[RUNTIME_SYMBOL]).toBeUndefined();
   expect(value.shutdown).toHaveBeenCalledTimes(1);
+  expect(firstSettled).toBe(false);
+  expect(secondSettled).toBe(false);
+
   stopped.resolve();
   await Promise.all([first, second]);
+  expect(firstSettled).toBe(true);
+  expect(secondSettled).toBe(true);
   expect(value.shutdown).toHaveBeenCalledTimes(1);
 });
 

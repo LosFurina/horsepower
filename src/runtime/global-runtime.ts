@@ -93,8 +93,8 @@ async function cleanupGeneration<T extends GlobalRuntimeValue>(
   record: RuntimeRecord<T>,
   events: ProcessEvents,
 ): Promise<void> {
-  if (current(host) !== record || record.abandoned) return;
   if (record.cleanup) return record.cleanup;
+  if (current(host) !== record || record.abandoned) return;
   delete host[RUNTIME_SYMBOL];
   // Signals are no longer useful once graceful cleanup begins, but exit must
   // remain as a synchronous backstop until shutdown settles.
