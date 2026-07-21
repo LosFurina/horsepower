@@ -16,7 +16,8 @@ import { createOneShotExecutor } from "../runtime/one-shot.js";
 import { createPiJsonRunner } from "../runtime/one-shot-runner.js";
 import { PersistentWorkerManager } from "../runtime/persistent-manager.js";
 import { createPersistentWorkerStarter } from "../runtime/persistent-worker-connection.js";
-import { createSlotRegistry, thinkingLevels, type ModelCatalog, type SlotConfiguration } from "../slots/registry.js";
+import { createPiModelCatalog } from "../capabilities/model-catalog.js";
+import { createSlotRegistry, type SlotConfiguration } from "../slots/registry.js";
 
 export interface HorsepowerRuntimeContext {
   captain: boolean;
@@ -51,13 +52,6 @@ async function optionalJson(path: string, readText: (path: string) => Promise<st
     if (cause instanceof SyntaxError) throw new Error(`Malformed JSON in ${path}`);
     throw cause;
   }
-}
-
-function modelCatalog(registry: HorsepowerRuntimeContext["modelRegistry"]): ModelCatalog {
-  return Object.fromEntries(registry.getAll().map((model) => {
-    const levels = model.reasoning ? thinkingLevels : ["off"] as const;
-    return [`${model.provider}/${model.id}`, { thinkingLevels: levels }];
-  }));
 }
 
 export class HorsepowerRuntime {
@@ -153,10 +147,11 @@ export class HorsepowerRuntime {
           projectDir: paths.project.agents,
         }),
       ]);
+      const piCatalog = createPiModelCatalog(context.modelRegistry);
       slots = createSlotRegistry({
         global: globalSlots as SlotConfiguration,
         project: projectSlots as SlotConfiguration,
-        models: modelCatalog(context.modelRegistry),
+        ...(piCatalog.status === "available" ? { models: piCatalog.models } : {}),
       });
       catalog = new Map(agents.map((agent) => [agent.name, agent]));
     }

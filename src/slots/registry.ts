@@ -28,7 +28,7 @@ export interface SlotConfiguration {
 }
 
 export interface ModelCapabilities {
-  thinkingLevels: readonly ThinkingLevel[];
+  thinkingLevels: readonly ThinkingLevel[] | undefined;
 }
 
 export type ModelCatalog = Readonly<Record<string, ModelCapabilities>>;
@@ -159,7 +159,7 @@ function validateEffectiveConfiguration(
     if (models) {
       const capabilities = models[binding.model];
       if (!capabilities) throw new Error(`Unknown model for slot ${slot}: ${binding.model}`);
-      if (!capabilities.thinkingLevels.includes(binding.thinking)) {
+      if (capabilities.thinkingLevels && !capabilities.thinkingLevels.includes(binding.thinking)) {
         throw new Error(
           `Thinking level ${binding.thinking} is not supported by model ${binding.model} for slot ${slot}`,
         );
