@@ -14,13 +14,36 @@ function settingObject(value: unknown, label: string): JsonObject {
   return value;
 }
 
-function hasUrlUserinfo(value: string): boolean {
+function sensitiveQueryKey(value: string): boolean {
+  let decoded: string;
+  try { decoded = decodeURIComponent(value.replaceAll("+", " ")); }
+  catch { decoded = value; }
+  const compact = decoded.toLowerCase().replaceAll(/[^a-z0-9]/gu, "");
+  return compact === "token" || compact === "secret" || compact === "key" || compact === "apikey"
+    || compact === "accesstoken" || /^auth(?:entication|orization)?(?:token|key|secret)?$/u.test(compact);
+}
+
+function redactUrl(value: string): string {
   try {
     const parsed = new URL(value);
-    return parsed.username.length > 0 || parsed.password.length > 0;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return value;
+    if (parsed.username) parsed.username = SECRET;
+    if (parsed.password) parsed.password = SECRET;
+    if (parsed.search.length > 1) {
+      parsed.search = `?${parsed.search.slice(1).split("&").map((parameter) => {
+        const separator = parameter.indexOf("=");
+        const name = separator < 0 ? parameter : parameter.slice(0, separator);
+        return sensitiveQueryKey(name) ? `${name}=${encodeURIComponent(SECRET)}` : parameter;
+      }).join("&")}`;
+    }
+    return parsed.toString();
   } catch {
-    return false;
+    return value;
   }
+}
+
+function redactUrls(value: string): string {
+  return value.replaceAll(/https?:\/\/[^\s"'<>]+/giu, (url) => redactUrl(url));
 }
 
 export function redactCredentials(value: unknown, key = "", insideAuth = false): unknown {
@@ -33,7 +56,7 @@ export function redactCredentials(value: unknown, key = "", insideAuth = false):
       if (normalizedKey === "mode" && (value === "none" || value === "hmac" || value === "bearer")) return value;
       return SECRET;
     }
-    return typeof value === "string" && hasUrlUserinfo(value) ? SECRET : value;
+    return typeof value === "string" ? redactUrls(value) : value;
   }
   return Object.fromEntries(Object.entries(value).map(([nestedKey, nested]) => [
     nestedKey,

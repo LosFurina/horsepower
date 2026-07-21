@@ -340,6 +340,35 @@ test("CLI webhook settings exactly match runtime parsing and disabled settings r
   expect(disabled).not.toHaveProperty("auth");
 });
 
+test("CLI output redacts sensitive URL query parameters while preserving safe URL structure", async () => {
+  const { homeDir, run } = await harness();
+  await run(setupArgs);
+  const receiver = "https://example.test/hooks/team?region=us&ToKeN=one-secret&api_key=two-secret&%61ccess_token=three%20secret&AUTHORIZATION=four-secret&note=keep#delivery";
+
+  const configured = await run(["webhook", "configure", "--url", receiver, "--auth", "none", "--json"]);
+  expect(configured).toMatchObject({ exitCode: 0, stderr: "" });
+  for (const secret of ["one-secret", "two-secret", "three%20secret", "four-secret"]) {
+    expect(configured.stdout).not.toContain(secret);
+  }
+  expect(configured.stdout).toContain("https://example.test/hooks/team?");
+  expect(configured.stdout).toContain("region=us");
+  expect(configured.stdout).toContain("note=keep");
+  expect(configured.stdout).toContain("#delivery");
+  expect(configured.stdout.match(/REDACTED/gu)).toHaveLength(4);
+
+  const persisted = JSON.parse(await readFile(join(homeDir, ".pi/agent/horsepower/settings.json"), "utf8"));
+  expect(persisted.webhook.url).toBe(receiver);
+
+  const errorUrl = "https://example.test/hook?key=error-secret&safe=visible";
+  for (const argv of [[errorUrl], [errorUrl, "--json"]]) {
+    const result = await run(argv);
+    expect(result.stderr).not.toContain("error-secret");
+    expect(result.stderr).toContain("https://example.test/hook?");
+    expect(result.stderr).toContain("safe=visible");
+    expect(result.stderr).toContain("REDACTED");
+  }
+});
+
 test("webhook diagnostics recursively redact malformed and future credential fields", async () => {
   const { homeDir, run } = await harness();
   await run(setupArgs);
@@ -428,6 +457,42 @@ test("doctor and webhook test use effective project-over-global webhook settings
     expect(invalid.stdout + invalid.stderr).not.toContain("incompatible-project-token");
     expect(JSON.parse(invalid.stdout).data.checks.find((check: { id: string }) => check.id === "notification")).toMatchObject({ status: "error" });
   }
+});
+
+test("webhook disable defaults to the effective active project and removes project credentials", async () => {
+  const { homeDir, cwd, run } = await harness();
+  await run(setupArgs);
+  const globalPath = join(homeDir, ".pi/agent/horsepower/settings.json");
+  const projectPath = join(cwd, ".pi/horsepower/settings.json");
+  await mkdir(dirname(projectPath), { recursive: true });
+  const global = { webhook: { enabled: true, url: "https://global.test/hook", auth: { mode: "none" }, future: { global: true } } };
+  await writeFile(globalPath, JSON.stringify(global));
+  await writeFile(projectPath, JSON.stringify({
+    projectTopLevel: { keep: true },
+    webhook: {
+      enabled: true,
+      url: "https://project.test/hook",
+      auth: { mode: "bearer", token: "project-secret-token" },
+      headers: { Authorization: "project-secret-header", safe: "keep" },
+      future: { project: true },
+    },
+  }));
+
+  const result = await run(["webhook", "disable", "--json"]);
+  expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+  expect(await readFile(globalPath, "utf8")).toBe(JSON.stringify(global));
+  const persistedBytes = await readFile(projectPath, "utf8");
+  expect(persistedBytes).not.toContain("project-secret-token");
+  expect(persistedBytes).not.toContain("project-secret-header");
+  expect(JSON.parse(persistedBytes)).toMatchObject({
+    projectTopLevel: { keep: true },
+    webhook: { enabled: false, headers: { safe: "keep" }, future: { project: true } },
+  });
+  expect(JSON.parse(persistedBytes).webhook).not.toHaveProperty("url");
+  expect(JSON.parse(persistedBytes).webhook).not.toHaveProperty("auth");
+
+  const { parseWebhookSettings } = await import("../../src/config/webhook.js");
+  expect(parseWebhookSettings(global.webhook, JSON.parse(persistedBytes).webhook)).toBeUndefined();
 });
 
 test("webhook test sends HMAC and Bearer authentication headers", async () => {
@@ -809,6 +874,43 @@ test("doctor reports malformed managed release topology as actionable installati
     expect(result.exitCode, hostile).toBe(1);
     expect(JSON.parse(result.stdout).data.checks.find((check: { id: string }) => check.id === "installation"), hostile).toMatchObject({
       status: "error",
+      action: "Install or repair Horsepower from an official release",
+    });
+  }
+});
+
+test("doctor rejects extra foreign data anywhere in an otherwise valid managed versions tree", async () => {
+  for (const foreign of ["directory", "file", "symlink", "malformed-release"] as const) {
+    const { homeDir, root, run } = await harness();
+    const hp = join(homeDir, ".pi/agent/horsepower");
+    await writeRelease(join(hp, "versions/v0.1.0"), "0.1.0");
+    await symlink("versions/v0.1.0", join(hp, "current"));
+    for (const [path, target] of [
+      [join(homeDir, ".pi/agent/extensions/horsepower"), join(hp, "current/pi/extensions/horsepower")],
+      [join(homeDir, ".pi/agent/skills/horsepower"), join(hp, "current/pi/skills/horsepower")],
+      [join(homeDir, ".local/bin/horsepower"), join(hp, "current/bin/horsepower")],
+    ] as const) {
+      await mkdir(dirname(path), { recursive: true });
+      await symlink(target, path);
+    }
+    const foreignPath = join(hp, "versions", foreign === "malformed-release" ? "v0.2.0" : `foreign-${foreign}`);
+    if (foreign === "directory") await mkdir(foreignPath);
+    if (foreign === "file") await writeFile(foreignPath, "foreign");
+    if (foreign === "symlink") {
+      const outside = join(root, "outside-version");
+      await mkdir(outside);
+      await symlink(outside, foreignPath);
+    }
+    if (foreign === "malformed-release") {
+      await mkdir(foreignPath);
+      await writeFile(join(foreignPath, "release-manifest.json"), JSON.stringify({ version: "0.2.0" }));
+    }
+
+    const result = await run(["doctor", "--json"]);
+    expect(result, foreign).toMatchObject({ exitCode: 1, stderr: "" });
+    expect(JSON.parse(result.stdout).data.checks.find((check: { id: string }) => check.id === "installation"), foreign).toMatchObject({
+      status: "error",
+      message: expect.stringContaining(foreignPath),
       action: "Install or repair Horsepower from an official release",
     });
   }

@@ -406,12 +406,15 @@ export function createCli(options: CliOptions) {
     const action = parsed.positionals[0]; if (!action || parsed.positionals.length !== 1) throw new UsageError("webhook requires configure, skip, disable, or test");
     if (action === "disable" || action === "skip") {
       only(parsed, [], []);
-      const current = await trustedOptionalObject(options.homeDir, paths.global.settings);
+      const globalSettings = await trustedOptionalObject(options.homeDir, paths.global.settings);
+      const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings);
+      const scope = Object.keys(object(projectSettings.webhook)).length > 0 ? "project" : "global";
+      const current = scope === "project" ? projectSettings : globalSettings;
       const preserved = withoutCredentials(object(current.webhook));
       delete preserved.url;
       const next = { ...current, webhook: { ...preserved, enabled: false } };
-      await writeConfigs([{ path: paths.global.settings, value: next }]);
-      return { data: redactSettings(next), message: "Webhook disabled" };
+      await writeConfigs([{ path: scope === "project" ? paths.project.settings : paths.global.settings, value: next }]);
+      return { data: redactSettings(next), message: `Webhook disabled (${scope})` };
     }
     if (action === "configure") {
       only(parsed, ["url", "auth", "secret", "token"], ["dispatch", "no-dispatch", "change", "no-change"]);
@@ -470,10 +473,11 @@ export function createCli(options: CliOptions) {
   async function installationCheck() {
     try {
       const current = await currentState(topology.root, topology.current);
+      const versions = await versionsState(topology.versions);
       const states = await Promise.all(topology.links.map((link) => linkState(link.path, link.target)));
-      return current.status === "owned" && states.every((state) => state.status === "owned")
+      return current.status === "owned" && versions.status === "owned" && states.every((state) => state.status === "owned")
         ? { id: "installation", status: "ok", message: "Managed symlink topology is owned" }
-        : { id: "installation", status: "error", message: [current, ...states].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Install or repair Horsepower from an official release" };
+        : { id: "installation", status: "error", message: [current, versions, ...states].filter((state) => state.status !== "owned").map((state) => state.message ?? state.status).join("; "), action: "Install or repair Horsepower from an official release" };
     } catch {
       return { id: "installation", status: "error", message: "Unable to inspect the managed installation topology", action: "Inspect destination permissions, then install or repair Horsepower from an official release" };
     }
