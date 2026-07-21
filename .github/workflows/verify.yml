@@ -23,6 +23,10 @@ jobs:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
+      - name: Install the supported official OpenSpec CLI
+        run: |
+          npm install --global @fission-ai/openspec@1.6.0
+          test "$(openspec --version)" = "1.6.0"
       - run: npm run check
       - name: Build and scan deterministic release
         run: npm run release
