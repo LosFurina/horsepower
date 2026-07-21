@@ -11,7 +11,7 @@ test("authorizes this repository through the real official OpenSpec CLI and Pi i
     readText: (path) => readFile(path, "utf8"),
   });
 
-  const changeId = "isolate-workers-from-external-skills";
+  const changeId = "add-live-model-capability-setup";
   await expect(boundary.authorize({
     action: "create",
     changeId,
