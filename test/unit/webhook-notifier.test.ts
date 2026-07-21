@@ -12,6 +12,16 @@ const event = {
   evidenceRefs: ["npm run e2e: exit 0"],
 };
 
+test("Chinese webhook localizes only the human summary and preserves machine fields", async () => {
+  let body: Record<string, unknown> | undefined;
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({ config: { url: "https://example.test", auth: { mode: "none" } }, fetch: async (_url, init) => { body = JSON.parse(String(init?.body)); return new Response(null, { status: 204 }); } });
+  const { changeId: _changeId, ...dispatchEvent } = event;
+  await notifier.notify({ ...dispatchEvent, scope: "dispatch", outputLocale: "zh-CN", summary: "任务已完成。" });
+  expect(body).toMatchObject({ scope: "dispatch", status: "completed", outputLocale: "zh-CN", summary: "dispatch 已完成。" });
+  expect(body?.runId).toMatch(/^run-/u);
+});
+
 test("signs a redacted canonical HMAC notification", async () => {
   const requests: Array<{ body: string; headers: Record<string, string> }> = [];
   const module = await import("../../src/lifecycle/webhook-notifier.js").catch(() => undefined);
@@ -32,7 +42,8 @@ test("signs a redacted canonical HMAC notification", async () => {
     runId: `run-${createHash("sha256").update(event.runId).digest("hex")}`,
     changeId: `change-${createHash("sha256").update(event.changeId!).digest("hex")}`,
     status: "completed",
-    summary: "change completed",
+    outputLocale: "en",
+    summary: "change completed.",
     evidenceRefs: [
       `evidence-${createHash("sha256").update(event.evidenceRefs[0]!).digest("hex")}`,
     ],

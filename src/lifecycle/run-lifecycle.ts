@@ -1,5 +1,6 @@
 import type { CompletionEvidence, VerificationDecision } from "./verification-gate.js";
 import { verifyCompletion } from "./verification-gate.js";
+import type { OutputLocale } from "../localization/index.js";
 import type {
   TerminalScope,
   TerminalStatus,
@@ -24,6 +25,7 @@ export interface RunRecord {
 
 export interface RunNotificationBinding {
   enabled: boolean;
+  outputLocale?: OutputLocale;
   notify?: (event: TerminalWebhookEvent) => Promise<WebhookDeliveryResult>;
 }
 
@@ -146,6 +148,7 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
           runId: run.runId,
           changeId: run.changeId,
           status: report.status,
+          outputLocale: notification.outputLocale ?? "en",
           summary: webhookText(report.summary, 500),
           evidenceRefs: [...(report.evidenceRefs ?? [])].slice(0, 20)
             .map((reference) => webhookText(reference, 200)),

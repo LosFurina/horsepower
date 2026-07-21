@@ -8,6 +8,7 @@ import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-no
 import { validateOpenSpecInstallation } from "../openspec/boundary.js";
 import { validateReleaseCompatibility } from "../release-manifest.js";
 import { createHandoffStore } from "../handoffs/store.js";
+import { message as localizedMessage, resolveOutputLocale, validateOutputLocale, type OutputLocale } from "../localization/index.js";
 import { createSlotRegistry, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
@@ -385,8 +386,22 @@ export function createCli(options: CliOptions) {
     } catch (cause) { throw new UsageError((cause as Error).message); }
   }
   async function configure(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
-    const values = ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"];
+    const values = ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking", "locale", "scope"];
     only(parsed, values, []); if (parsed.positionals.length) throw new UsageError("configure accepts no positional arguments");
+    if (parsed.values.has("locale")) {
+      let locale: OutputLocale;
+      try { locale = validateOutputLocale(parsed.values.get("locale")); } catch { throw new UsageError(`OUTPUT_LOCALE_INVALID: ${parsed.values.get("locale")}`); }
+      const scope = parsed.values.get("scope") ?? "global";
+      if (scope !== "global" && scope !== "project") throw new UsageError(`Invalid scope: ${scope}`);
+      if (parsed.values.size !== (parsed.values.has("scope") ? 2 : 1)) throw new UsageError("--locale cannot be combined with slot configuration");
+      const trustedRoot = scope === "project" ? options.cwd : options.homeDir;
+      const path = scope === "project" ? paths.project.settings : paths.global.settings;
+      const current = await trustedOptionalObject(trustedRoot, path);
+      const next = { ...current, outputLocale: locale };
+      await writeConfigs([{ path, value: next }]);
+      return { data: redactSettings(next), message: localizedMessage(locale, "cli.localeConfigured", { locale }) };
+    }
+    if (parsed.values.has("scope")) throw new UsageError("--scope requires --locale");
     if (parsed.values.size === 0) return { data: redactSettings(await trustedOptionalObject(options.homeDir, paths.global.settings)) };
     const current = await trustedOptionalObject(options.homeDir, paths.global.modelSlots); const slots = { ...object(current.slots) } as Record<string, unknown>;
     for (const id of ["judgment", "craft", "utility"] as const) {
@@ -577,6 +592,9 @@ export function createCli(options: CliOptions) {
 
   return { async run(argv: readonly string[]): Promise<CliResult> {
     let machine = argv.includes("--json");
+    const commandName = argv.find((argument) => !argument.startsWith("--")) ?? "horsepower";
+    let locale: OutputLocale = "en";
+    try { locale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* invalid settings remain observable by commands */ }
     try {
       const jsonCount = argv.filter((argument) => argument === "--json").length;
       if (jsonCount > 1) throw new UsageError("Duplicate option: --json");
@@ -586,7 +604,16 @@ export function createCli(options: CliOptions) {
       if (mutatesOrManagesInstallation) requireSupportedPlatform();
       if (command === "setup") result = await setup(parsed); else if (command === "configure") result = await configure(parsed); else if (command === "slots") { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); result = { data: await slotsData() }; }
       else if (command === "set") result = await setSlot(parsed); else if (command === "unset") result = await unsetSlot(parsed); else if (command === "webhook") result = await webhook(parsed); else if (command === "handoff") result = await handoff(parsed); else if (command === "doctor") result = await doctor(parsed); else if (command === "preflight") result = await preflight(parsed); else if (command === "uninstall") result = await uninstall(parsed); else if (command === "purge") result = await purge(parsed); else throw new UsageError(`Unknown command: ${command}`);
-      const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1); return machine ? { exitCode, stdout: json({ data: result.data, ok }), stderr: "" } : { exitCode, stdout: `${result.message ?? (ok ? "OK" : "FAILED")}\n`, stderr: "" };
-    } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const message = String(redactCredentials(rawMessage)); return machine ? { exitCode, stdout: "", stderr: json({ error: { code: usage ? "USAGE" : "FAILED", message }, ok: false }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}\n` }; }
+      try { locale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* doctor and diagnostics retain their structured evidence */ }
+      const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1);
+      const summary = locale === "zh-CN"
+        ? commandName === "doctor"
+          ? localizedMessage(locale, "doctor.healthy")
+          : commandName === "configure" && parsed.values.has("locale") && result.message
+            ? result.message
+            : localizedMessage(locale, "cli.commandCompleted", { command: commandName })
+        : result.message ?? (ok ? "OK" : "FAILED");
+      return machine ? { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" } : { exitCode, stdout: `${summary}\n`, stderr: "" };
+    } catch (cause) { const usage = cause instanceof UsageError; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(locale === "zh-CN" ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }
   } };
 }

@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { message, validateOutputLocale, type OutputLocale } from "../localization/index.js";
 
 export type TerminalScope = "change" | "dispatch";
 export type TerminalStatus = "completed" | "blocked_needs_human" | "failed" | "canceled";
@@ -10,6 +11,7 @@ export interface TerminalWebhookEvent {
   runId: string;
   changeId?: string;
   status: TerminalStatus;
+  outputLocale?: OutputLocale;
   summary: string;
   evidenceRefs: readonly string[];
 }
@@ -46,7 +48,7 @@ function normalizeEvent(value: unknown, authenticationValue?: string): TerminalW
   if (value === null || Array.isArray(value) || typeof value !== "object") return undefined;
   const raw = value as Record<string, unknown>;
   const allowed = new Set([
-    "eventId", "timestamp", "scope", "runId", "changeId", "status", "summary", "evidenceRefs",
+    "eventId", "timestamp", "scope", "runId", "changeId", "status", "outputLocale", "summary", "evidenceRefs",
   ]);
   if (Object.keys(raw).some((key) => !allowed.has(key))) return undefined;
   if (typeof raw.eventId !== "string" || typeof raw.timestamp !== "string" ||
@@ -69,6 +71,8 @@ function normalizeEvent(value: unknown, authenticationValue?: string): TerminalW
 
   const opaque = (prefix: string, input: string) =>
     `${prefix}-${createHash("sha256").update(input).digest("hex")}`;
+  let outputLocale: OutputLocale;
+  try { outputLocale = raw.outputLocale === undefined ? "en" : validateOutputLocale(raw.outputLocale); } catch { return undefined; }
   const event: TerminalWebhookEvent = {
     eventId: opaque("evt", raw.eventId),
     timestamp: raw.timestamp,
@@ -76,10 +80,11 @@ function normalizeEvent(value: unknown, authenticationValue?: string): TerminalW
     runId: opaque("run", raw.runId),
     ...(raw.changeId === undefined ? {} : { changeId: opaque("change", raw.changeId) }),
     status: raw.status,
-    summary: `${raw.scope} ${raw.status}`,
+    outputLocale,
+    summary: message(outputLocale, `webhook.${raw.status}` as "webhook.completed" | "webhook.blocked_needs_human" | "webhook.failed" | "webhook.canceled", { scope: raw.scope }),
     evidenceRefs: raw.evidenceRefs.map((reference) => opaque("evidence", reference)),
   };
-  const allValues = [event.eventId, event.timestamp, event.scope, event.status, event.runId,
+  const allValues = [event.eventId, event.timestamp, event.scope, event.status, event.outputLocale ?? "", event.runId,
     event.changeId ?? "", event.summary, ...event.evidenceRefs];
   if (authenticationValue && allValues.some((item) => item.includes(authenticationValue))) return undefined;
   if (Buffer.byteLength(JSON.stringify(event), "utf8") > 8 * 1024) return undefined;

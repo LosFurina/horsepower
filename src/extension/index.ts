@@ -7,6 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { resolveHorsepowerPaths } from "../config/paths.js";
 import { parseWebhookSettings } from "../config/webhook.js";
 import { horsepowerSubagentSchema } from "../orchestration/schema.js";
+import { message, resolveOutputLocale, type OutputLocale } from "../localization/index.js";
 import { acquireGlobalRuntime, type RuntimeLease } from "../runtime/global-runtime.js";
 import type { CreateHorsepowerRuntimeOptions, HorsepowerRuntime, HorsepowerRuntimeContext } from "./runtime.js";
 import { createHorsepowerRuntime } from "./runtime.js";
@@ -25,6 +26,7 @@ interface ExtensionLease {
 
 export interface HorsepowerExtensionDependencies {
   acquireRuntime(ctx?: ExtensionContext): ExtensionLease;
+  resolveOutputLocale?: (cwd: string) => Promise<OutputLocale>;
 }
 
 const MAX_CONTENT_BYTES = 50 * 1024;
@@ -94,7 +96,13 @@ export function registerHorsepowerExtension(
     parameters: horsepowerSubagentSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const input = { ...(params as Record<string, unknown>), cwd: ctx.cwd };
-      return textResult(await runtime(ctx).execute(input, runtimeContext(ctx)));
+      const data = await runtime(ctx).execute(input, runtimeContext(ctx));
+      if (!dependencies.resolveOutputLocale) return textResult(data);
+      const outputLocale = await dependencies.resolveOutputLocale(ctx.cwd);
+      const action = String((params as Record<string, unknown>).action ?? "operation");
+      const status = data !== null && typeof data === "object" && "status" in data ? String((data as { status: unknown }).status) : "completed";
+      const id = status === "failed" ? "dispatch.failed" : status === "canceled" ? "dispatch.canceled" : "dispatch.completed";
+      return textResult({ data, outputLocale, summary: message(outputLocale, id, { action }) });
     },
   });
 
@@ -203,5 +211,12 @@ function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
 }
 
 export default function horsepowerExtension(pi: ExtensionAPI): void {
-  registerHorsepowerExtension(pi, { acquireRuntime: defaultLease });
+  const homeDir = homedir();
+  registerHorsepowerExtension(pi, {
+    acquireRuntime: defaultLease,
+    resolveOutputLocale: async (cwd) => {
+      const paths = resolveHorsepowerPaths({ homeDir, projectDir: cwd });
+      return resolveOutputLocale(paths.global.settings, paths.project.settings);
+    },
+  });
 }

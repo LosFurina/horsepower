@@ -75,6 +75,21 @@ test("user commands create implementation mode and bounded reviewer authorizatio
   expect(authorizeImplementationReviewer).toHaveBeenCalledWith({ campaignId: "implementation-1", projectId: "/active/project", reviewCampaignId: "review-1", acceptanceScope: "OpenSpec 4.8", budget: 1 });
 });
 
+test("tool localizes principal conclusions while preserving English evidence and machine fields", async () => {
+  const pi = fakePi();
+  const execute = vi.fn(async () => ({ status: "completed", runId: "run-1", rawEvidence: "English worker report" }));
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, {
+    acquireRuntime: () => ({ value: { execute }, cleanup: vi.fn(), abandon: vi.fn() }),
+    resolveOutputLocale: async () => "zh-CN",
+  });
+  const tool = pi.tools[0] as { execute(...args: unknown[]): Promise<{ details: Record<string, unknown>; content: Array<{ text: string }> }> };
+  const result = await tool.execute("call", { action: "status", workerId: "w" }, undefined, undefined, context());
+  expect(result.details).toEqual({ data: { status: "completed", runId: "run-1", rawEvidence: "English worker report" }, outputLocale: "zh-CN", summary: "status 已完成。" });
+  expect(result.content[0]!.text).toContain("status 已完成");
+  expect(JSON.stringify(result.details)).toContain("English worker report");
+});
+
 test("tool passes explicit Captain capability, active cwd, and model registry", async () => {
   const pi = fakePi();
   const execute = vi.fn(async () => ({ ok: true }));

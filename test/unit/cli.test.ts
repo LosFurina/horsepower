@@ -80,7 +80,7 @@ test("strictly parses commands and emits deterministic JSON with stable exit cod
   expect(await run(["unknown", "--json"])).toEqual({
     exitCode: 2,
     stdout: "",
-    stderr: '{"error":{"code":"USAGE","message":"Unknown command: unknown"},"ok":false}\n',
+    stderr: '{"error":{"code":"USAGE","message":"Unknown command: unknown"},"ok":false,"outputLocale":"en","summary":"Unknown command: unknown"}\n',
   });
   expect((await run(setupArgs)).stdout).toBe((await run(setupArgs)).stdout);
   expect((await run(["slots", "--bogus"]))).toMatchObject({ exitCode: 2 });
@@ -123,6 +123,28 @@ test("setup initializes missing private files and later writes preserve unknown 
   await writeFile(join(root, "model-slots.json"), JSON.stringify({ future: { keep: true }, slots: JSON.parse(await readFile(join(root, "model-slots.json"), "utf8")).slots }));
   expect((await run(["set", "vision", "--fallback", "utility", "--json"])).exitCode).toBe(0);
   expect(JSON.parse(await readFile(join(root, "model-slots.json"), "utf8"))).toMatchObject({ future: { keep: true }, slots: { vision: { fallback: "utility" } } });
+});
+
+test("configure sets global or project output locale with localized structured conclusions", async () => {
+  const { run, homeDir: home, cwd } = await harness();
+  const chinese = await run(["configure", "--locale", "zh-CN", "--json"]);
+  expect(JSON.parse(chinese.stdout)).toMatchObject({ ok: true, outputLocale: "zh-CN", summary: "输出语言已设置为 zh-CN。" });
+  expect(JSON.parse(await readFile(join(home, ".pi", "agent", "horsepower", "settings.json"), "utf8"))).toMatchObject({ outputLocale: "zh-CN" });
+  const project = await run(["configure", "--locale", "en", "--scope", "project", "--json"]);
+  expect(JSON.parse(project.stdout)).toMatchObject({ ok: true, outputLocale: "en", summary: "Output language set to en." });
+  expect(JSON.parse(await readFile(join(cwd, ".pi", "horsepower", "settings.json"), "utf8"))).toMatchObject({ outputLocale: "en" });
+  const before = await readFile(join(cwd, ".pi", "horsepower", "settings.json"), "utf8");
+  expect((await run(["configure", "--locale", "fr", "--scope", "project", "--json"])).exitCode).toBe(2);
+  expect(await readFile(join(cwd, ".pi", "horsepower", "settings.json"), "utf8")).toBe(before);
+});
+
+test("Chinese CLI doctor and errors use Chinese principal conclusions with stable evidence", async () => {
+  const { run } = await harness();
+  await run(["configure", "--locale", "zh-CN", "--json"]);
+  const doctor = JSON.parse((await run(["doctor", "--json"])).stdout);
+  expect(doctor).toMatchObject({ outputLocale: "zh-CN", summary: "Horsepower 诊断已完成。" });
+  const failed = JSON.parse((await run(["unknown", "--json"])).stderr);
+  expect(failed).toMatchObject({ outputLocale: "zh-CN", summary: "unknown 命令执行失败。", error: { code: "USAGE", rawEvidence: "Unknown command: unknown" } });
 });
 
 test("configure transactionally updates selected global bindings", async () => {

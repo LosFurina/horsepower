@@ -12,6 +12,7 @@ Use `horsepower_subagent` only for work the Captain explicitly chooses to dispat
 - In `main_agent` mode, do not dispatch a worker unless the user separately authorizes a bounded reviewer with `/horsepower-review-authorize`; reviewer output never authorizes a fixer or another review.
 - In `multi_agent` mode, delegate substantive work explicitly; the Captain retains scope, budget, finding deduplication, verification, and final judgment.
 - Include the active `implementationCampaignId`, exact `taskScope`, and `workKind` in every work-producing dispatch.
+- Present principal user-facing conclusions in the `outputLocale` returned by Horsepower (`en` or `zh-CN`), even when worker briefs, reports, reviewer discussion, or raw evidence are English. Preserve machine fields, commands, paths, IDs, digests, artifact references, and raw evidence verbatim.
 - Name every requested `modelSlot`; Horsepower never selects a model from an agent role.
 - Dispatch only the requested `single`, `parallel`, `chain`, or persistent action.
 - Keep proposal, design, specs, tasks, verification, and archive facts in official OpenSpec artifacts.

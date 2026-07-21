@@ -7,6 +7,7 @@ import { createHandoffStore } from "../handoffs/store.js";
 import { createRunLifecycle } from "../lifecycle/run-lifecycle.js";
 import { createReviewCampaignManager } from "../lifecycle/review-campaign.js";
 import { createImplementationCampaignManager, type ImplementationMode, type WorkKind } from "../lifecycle/implementation-campaign.js";
+import { resolveOutputLocale } from "../localization/index.js";
 import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary } from "../openspec/boundary.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
@@ -159,17 +160,19 @@ export class HorsepowerRuntime {
       });
       catalog = new Map(agents.map((agent) => [agent.name, agent]));
     }
+    const outputLocale = await resolveOutputLocale(paths.global.settings, paths.project.settings);
     const oneShot = this.#options.oneShot ?? createOneShotExecutor({ run: createPiJsonRunner() });
     const handoffs = createHandoffStore({ stateRoot: resolve(paths.global.root, "state") });
     const bindNotification = (scope: "change" | "dispatch") => {
       const webhook = this.#options.resolveWebhook?.(cwd);
       if (!webhook) return undefined;
       const enabled = webhook.notifications?.[scope] ?? (scope === "change");
-      if (!enabled) return { enabled: false };
+      if (!enabled) return { enabled: false, outputLocale };
       const active = createWebhookNotifier(webhook);
       this.#notifiers.add(active);
       return {
         enabled: true,
+        outputLocale,
         notify: async (event: Parameters<ReturnType<typeof createWebhookNotifier>["notify"]>[0]) => {
           try {
             return await active.notify(event);
