@@ -48,6 +48,30 @@ test("advancing actions report official OpenSpec gating before dispatch configur
   expect(runOpenSpec).toHaveBeenCalledWith(["--version"], { cwd: "/active/project" });
 });
 
+test("campaign creation binds only to a resolved existing OpenSpec change", async () => {
+  const runOpenSpec = vi.fn(async (args: readonly string[], options: { cwd: string }) => {
+    if (args[0] === "--version") return { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false };
+    if (args[0] === "doctor") return { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: options.cwd } }), stderr: "", truncated: false };
+    if (args[0] === "status" && args[2] === "real-change") return { code: 0, stdout: JSON.stringify({ changeName: "real-change", isComplete: true }), stderr: "", truncated: false };
+    if (args[0] === "validate" && args[1] === "real-change") return { code: 0, stdout: JSON.stringify({ summary: { totals: { failed: 0 } } }), stderr: "", truncated: false };
+    return { code: 1, stdout: "", stderr: "Change not found", truncated: false };
+  });
+  const readText = vi.fn(async (path: string) => path.endsWith("SKILL.md")
+    ? "name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: 1.6.0\n"
+    : "Implement tasks from an OpenSpec change");
+  const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
+  const runtime = createHorsepowerRuntime({
+    homeDir: "/missing-home", bundledAgentsDir: "/missing-agents", runOpenSpec, readText,
+  });
+
+  await expect(runtime.beginImplementationCampaign({
+    changeId: "你来决定", projectId: "/project", taskScopes: ["1.1"], mode: "multi_agent",
+  })).rejects.toThrow();
+  await expect(runtime.beginImplementationCampaign({
+    changeId: "real-change", projectId: "/project", taskScopes: ["1.1"], mode: "multi_agent",
+  })).resolves.toMatchObject({ changeId: "real-change" });
+});
+
 test("shares process-local capability evidence across one-shot and persistent creation", async () => {
   const root = await mkdtemp(join(tmpdir(), "horsepower-capability-gate-"));
   const home = join(root, "home");
@@ -452,7 +476,10 @@ test("advancing actions use official OpenSpec checks in the active cwd", async (
     implementationCampaignId: campaign.campaignId, taskScope: "cwd", workKind: "implementation",
   }, { captain: true, cwd: project, modelRegistry: modelRegistry as never });
 
-  expect(calls.map((call) => call.args[0])).toEqual(["--version", "doctor", "status", "validate"]);
+  expect(calls.map((call) => call.args[0])).toEqual([
+    "--version", "doctor", "status", "validate",
+    "--version", "doctor", "status", "validate",
+  ]);
   expect(calls.every((call) => call.cwd === project)).toBe(true);
   expect(manager.create).toHaveBeenCalledWith(expect.objectContaining({ cwd: project, name: "w" }));
 });

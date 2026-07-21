@@ -13,6 +13,11 @@ export async function writeFixtureRelease(root: string, version: string): Promis
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), `owned:${path}\n`);
   }
+  await mkdir(join(root, "resources", "agents"), { recursive: true });
+  await writeFile(join(root, "resources", "agents", "coder.md"), [
+    "---", "name: coder", "role: Implement scoped changes", "recommendedSlots: [craft]",
+    "tools: [read, edit]", "standards: [correctness]", "---", "Implement directly.", "",
+  ].join("\n"));
   const digests = Object.fromEntries(await Promise.all(Object.values(fixtureReleaseEntryPoints).map(async (path) => [
     path,
     createHash("sha256").update(await readFile(join(root, path))).digest("hex"),

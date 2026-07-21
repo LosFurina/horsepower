@@ -530,7 +530,6 @@ test("privacy scanner rejects structured bindings, standalone credentials, NUL c
     ["machine path", ["", "Users", "alice", "work", "private"].join("/")],
     ["home path", ["", "home", "alice", ".config", "private"].join("/")],
     ["legacy reference", `${["Agent", "Flow"].join("")} runtime`],
-    ["forbidden workflow", `${["Super", "powers"].join("")} process`],
   ] as const;
   for (const [label, content] of forbidden) {
     const extension = /provider|model/u.test(label) ? "yaml" : "txt";
@@ -601,7 +600,7 @@ test("privacy scanner applies every policy check to scanner policy files", () =>
   const policyPaths = ["src/release/index.ts", "test/unit/release.test.ts"];
   const bindingKey = ["mod", "el"].join("");
   const credentialKey = ["api", "key"].join("_");
-  const legacyNames = [["Agent", "Flow"].join(""), ["Super", "powers"].join("")];
+  const legacyNames = [["Agent", "Flow"].join("")];
   for (const path of policyPaths) {
     expect(() => scanPublicContent([{
       path,

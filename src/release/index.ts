@@ -752,7 +752,7 @@ const githubCredentialPattern = new RegExp(
   String.raw`(?:\bgh[pousr]_[A-Za-z0-9]{36}\b|(?:^|[^A-Za-z0-9_])${githubFineGrainedPrefix}_[A-Za-z0-9_]{82}(?![A-Za-z0-9_]))`,
   "mu",
 );
-const legacyWorkflowNames = [["Agent", "Flow"].join(""), ["Super", "powers"].join("")];
+const legacyWorkflowNames = [["Agent", "Flow"].join("")];
 
 const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: "credential", pattern: githubCredentialPattern },

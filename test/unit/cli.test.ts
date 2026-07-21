@@ -63,6 +63,56 @@ test("every command uses its metadata-owned localized completion summary", async
   expect(configured).toMatchObject({ outputLocale: "zh-CN", summary: "输出语言已设置为 zh-CN。" });
 });
 
+test("configure --interactive runs the complete ordered journey while locale-only remains compatible", async () => {
+  const calls: string[] = [];
+  const setupTerminal = {
+    chooseLocale: vi.fn(async () => "zh-CN" as const), setLocale: vi.fn((locale: string) => calls.push(`locale:${locale}`)),
+    showSkillBoundary: vi.fn(() => calls.push("boundary")), showSkillAudit: vi.fn(() => calls.push("audit")),
+    confirmSkillRisk: vi.fn(async () => true), chooseWebhookAction: vi.fn(async () => "skip" as const), readWebhookConfiguration: vi.fn(),
+    chooseModelAction: vi.fn(async () => "skip" as const), showConfigurationSummary: vi.fn(() => calls.push("summary")),
+    showModels: vi.fn(), chooseModel: vi.fn(), chooseThinking: vi.fn(), chooseProbeAction: vi.fn(),
+  };
+  const { homeDir, cwd, run } = await harness({
+    terminal: setupTerminal, configurationTerminal: setupTerminal,
+    resolveSkills: async () => ({ skills: [] }), openSpecVersion: "1.6.0",
+  });
+  await mkdir(join(cwd, ".pi/horsepower"), { recursive: true });
+  await writeFile(join(cwd, ".pi/horsepower/settings.json"), JSON.stringify({ outputLocale: "en" }));
+
+  const complete = JSON.parse((await run(["configure", "--interactive", "--json"])).stdout);
+
+  expect(complete).toMatchObject({
+    ok: true, outputLocale: "zh-CN",
+    data: { status: "incomplete", locale: { status: "configured", value: "zh-CN" }, webhook: { status: "skipped" } },
+  });
+  expect(complete.data[["mod", "els"].join("")]).toMatchObject({ status: "skipped", followUp: "horsepower setup --interactive" });
+  expect(calls).toEqual(["locale:zh-CN", "boundary", "audit", "summary"]);
+  expect(JSON.parse(await readFile(join(homeDir, ".pi/agent/horsepower/settings.json"), "utf8"))).toMatchObject({ outputLocale: "zh-CN" });
+  expect(await run(["configure", "--locale", "en", "--json"])).toMatchObject({ exitCode: 0 });
+});
+
+test("configure --interactive without a terminal changes no configuration", async () => {
+  const { homeDir, run } = await harness();
+  const result = await run(["configure", "--interactive", "--json"]);
+  expect(result).toMatchObject({ exitCode: 2, stdout: "" });
+  await expect(readFile(join(homeDir, ".pi/agent/horsepower/settings.json"))).rejects.toThrow();
+});
+
+test("unavailable controlling terminal returns localized stable machine evidence", async () => {
+  const unavailable = {
+    isAvailable: vi.fn(async () => false), chooseLocale: vi.fn(), setLocale: vi.fn(), showSkillBoundary: vi.fn(), showSkillAudit: vi.fn(),
+    confirmSkillRisk: vi.fn(), chooseWebhookAction: vi.fn(), readWebhookConfiguration: vi.fn(), chooseModelAction: vi.fn(), showConfigurationSummary: vi.fn(),
+    showModels: vi.fn(), chooseModel: vi.fn(), chooseThinking: vi.fn(), chooseProbeAction: vi.fn(),
+  };
+  const { run } = await harness({ terminal: unavailable, configurationTerminal: unavailable });
+  const result = await run(["configure", "--interactive", "--json"]);
+  expect(result).toMatchObject({ exitCode: 1, stdout: "" });
+  expect(JSON.parse(result.stderr)).toMatchObject({
+    error: { code: "CONTROLLING_TERMINAL_UNAVAILABLE", status: "unavailable", evidenceCode: "no_controlling_terminal" },
+    outputLocale: "en",
+  });
+});
+
 test("skill-audit is observation-only with stable JSON, localized human output, and strict options", async () => {
   const writes: unknown[] = [];
   const { cwd, run } = await harness({
@@ -114,6 +164,17 @@ test("strictly parses commands and emits deterministic JSON with stable exit cod
     ["--auth", "bearer", "--token", "token-byte", "--secret", "secret-byte"],
   ]) {
     expect((await run(["webhook", "configure", "--url", "https://example.test", ...incompatible, "--json"]))).toMatchObject({ exitCode: 2 });
+  }
+});
+
+test("CLI help distinguishes complete configuration from model-only setup", async () => {
+  const { run } = await harness();
+  for (const args of [["--help"], ["configure", "--help"]]) {
+    const result = await run(args);
+    expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(result.stdout).toContain("horsepower configure --interactive");
+    expect(result.stdout).toContain("complete locale, Skill, webhook, and model journey");
+    expect(result.stdout).toContain("horsepower setup --interactive  # model slots only");
   }
 });
 
@@ -858,6 +919,24 @@ test("installation-only doctor verifies owned active topology without requiring 
   await installManagedFixture(homeDir, "enabled");
   const result = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout);
   expect(result).toMatchObject({ ok: true, data: { checks: [{ id: "installation", status: "ok" }] } });
+});
+
+test("doctor reports a missing bundled agent catalog before the first dispatch", async () => {
+  const { homeDir, run } = await harness();
+  const { managed } = await installManagedFixture(homeDir, "enabled");
+  await rm(join(managed, "versions/v0.1.0/resources/agents"), { recursive: true });
+
+  const result = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout);
+
+  expect(result).toMatchObject({
+    ok: false,
+    data: { checks: [{
+      id: "installation", status: "error",
+      message: "Horsepower installation is invalid.",
+      action: "Install or repair Horsepower from an official release.",
+      rawEvidence: expect.stringContaining("Bundled agent catalog"),
+    }] },
+  });
 });
 
 test("Chinese doctor localizes integration findings while preserving status and commands", async () => {

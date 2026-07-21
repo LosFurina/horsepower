@@ -80,6 +80,7 @@ BASE_URL=${HORSEPOWER_RELEASE_BASE_URL:-"$REPOSITORY/releases/download/v$VERSION
 TTY_INPUT=${HORSEPOWER_TTY_INPUT:-/dev/tty}
 TTY_OUTPUT=${HORSEPOWER_TTY_OUTPUT:-/dev/tty}
 INTERACTIVE=0
+TTY_CONSUMED=0
 if [ "$NO_SETUP" -eq 0 ] && (exec 3<"$TTY_INPUT" 4>>"$TTY_OUTPUT") 2>/dev/null; then
   exec 3<"$TTY_INPUT" 4>>"$TTY_OUTPUT"
   INTERACTIVE=1
@@ -90,6 +91,7 @@ fi
 if [ -z "$LOCALE" ] && [ "$INTERACTIVE" -eq 1 ]; then
   printf '%s\n' "Choose language / 选择语言: 1) English  2) 简体中文" >&4
   IFS= read -r LANGUAGE_CHOICE <&3 || LANGUAGE_CHOICE=""
+  TTY_CONSUMED=$((TTY_CONSUMED + 1))
   case "$LANGUAGE_CHOICE" in 2|zh-CN) LOCALE=zh-CN ;; *) LOCALE=en ;; esac
 fi
 if [ -z "$LOCALE" ]; then LOCALE=en; fi
@@ -167,6 +169,13 @@ HOME="$HOME_DIR" "$STAGED/bin/horsepower" skill-audit --json >"$AUDIT_JSON" \
   || fail "staged Skill audit failed"
 AUDIT_GATE=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).data;process.stdout.write(r.status!=="complete"||r.externalCount>0?"warn":"clean")' "$AUDIT_JSON") \
   || fail "invalid staged Skill audit output"
+if [ "$INTERACTIVE" -eq 1 ]; then
+  if [ "$LOCALE" = "zh-CN" ]; then
+    printf '%s\n' "Superpowers 等外部技能仍由用户管理；主 Captain 遵循 Pi 的正常发现规则，Horsepower worker 始终使用 --no-skills。" >&4
+  else
+    printf '%s\n' "External Skills such as Superpowers remain user-managed; the main Captain follows normal Pi discovery, and Horsepower workers always use --no-skills." >&4
+  fi
+fi
 if [ "$AUDIT_GATE" = "warn" ]; then
   AUDIT_TEXT="$TMP/skill-audit.txt"
   HOME="$HOME_DIR" "$STAGED/bin/horsepower" skill-audit --locale "$LOCALE" >"$AUDIT_TEXT" || fail "unable to render staged Skill audit"
@@ -175,6 +184,7 @@ if [ "$AUDIT_GATE" = "warn" ]; then
     if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "Worker 使用 --no-skills，但主 Captain 仍可能受这些技能影响。继续？[y/N]：" >&4
     else printf '%s ' "Horsepower workers use --no-skills, but the main Captain may still be influenced. Continue? [y/N]:" >&4; fi
     IFS= read -r AUDIT_CONFIRM <&3 || AUDIT_CONFIRM=""
+    TTY_CONSUMED=$((TTY_CONSUMED + 1))
     case "$AUDIT_CONFIRM" in y|Y|yes) ;; *) fail "Skill audit declined before activation" ;; esac
   else
     cat "$AUDIT_TEXT" >&2
@@ -234,60 +244,38 @@ done
 [ -x "$CLI_LINK" ] || fail "post-install CLI is not executable"
 HOME="$HOME_DIR" "$CLI_LINK" doctor --installation-only --json >/dev/null \
   || fail "post-install doctor failed"
-
-HOME="$HOME_DIR" "$CLI_LINK" configure --locale "$LOCALE" --json >/dev/null \
-  || fail "unable to persist output locale"
-if [ "$INTERACTIVE" -eq 1 ]; then
-  if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "Webhook URL（留空跳过）：" >&4
-  else printf '%s ' "Webhook URL (leave empty to skip):" >&4; fi
-  IFS= read -r WEBHOOK_URL <&3 || WEBHOOK_URL=""
-  if [ -z "$WEBHOOK_URL" ]; then
-    HOME="$HOME_DIR" "$CLI_LINK" webhook skip --json >/dev/null || fail "unable to skip webhook setup"
-  else
-    if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "认证方式 [hmac/bearer/none]（推荐 hmac）：" >&4
-    else printf '%s ' "Authentication [hmac/bearer/none] (hmac recommended):" >&4; fi
-    IFS= read -r WEBHOOK_AUTH <&3 || WEBHOOK_AUTH=""
-    [ -n "$WEBHOOK_AUTH" ] || WEBHOOK_AUTH=hmac
-    case "$WEBHOOK_AUTH" in hmac|bearer|none) ;; *) fail "invalid webhook authentication mode" ;; esac
-    WEBHOOK_CREDENTIAL=""
-    if [ "$WEBHOOK_AUTH" = "hmac" ]; then
-      if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "HMAC secret：" >&4; else printf '%s ' "HMAC secret:" >&4; fi
-      IFS= read -r WEBHOOK_CREDENTIAL <&3 || WEBHOOK_CREDENTIAL=""
-      [ -n "$WEBHOOK_CREDENTIAL" ] || fail "HMAC secret is required"
-    elif [ "$WEBHOOK_AUTH" = "bearer" ]; then
-      if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "Bearer token：" >&4; else printf '%s ' "Bearer token:" >&4; fi
-      IFS= read -r WEBHOOK_CREDENTIAL <&3 || WEBHOOK_CREDENTIAL=""
-      [ -n "$WEBHOOK_CREDENTIAL" ] || fail "Bearer token is required"
-    fi
-    if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "启用 dispatch 通知？[y/N]：" >&4
-    else printf '%s ' "Enable dispatch notifications? [y/N]:" >&4; fi
-    IFS= read -r WEBHOOK_DISPATCH <&3 || WEBHOOK_DISPATCH=""
-    case "$WEBHOOK_DISPATCH" in y|Y|yes|YES) DISPATCH_FLAG=--dispatch ;; *) DISPATCH_FLAG=--no-dispatch ;; esac
-    if [ "$WEBHOOK_AUTH" = "hmac" ]; then
-      HOME="$HOME_DIR" "$CLI_LINK" webhook configure --url "$WEBHOOK_URL" --auth hmac --secret "$WEBHOOK_CREDENTIAL" --change "$DISPATCH_FLAG" --json >/dev/null || fail "unable to configure webhook"
-    elif [ "$WEBHOOK_AUTH" = "bearer" ]; then
-      HOME="$HOME_DIR" "$CLI_LINK" webhook configure --url "$WEBHOOK_URL" --auth bearer --token "$WEBHOOK_CREDENTIAL" --change "$DISPATCH_FLAG" --json >/dev/null || fail "unable to configure webhook"
-    else
-      HOME="$HOME_DIR" "$CLI_LINK" webhook configure --url "$WEBHOOK_URL" --auth none --change "$DISPATCH_FLAG" --json >/dev/null || fail "unable to configure webhook"
-    fi
-    WEBHOOK_CREDENTIAL=""
-  fi
-fi
 activate_failed=0
 trap cleanup EXIT HUP INT TERM
 
 MODEL_SETUP_COMPLETE=0
+CONFIGURATION_COMPLETE=0
+LOCALE_PERSISTED=0
+if HOME="$HOME_DIR" "$CLI_LINK" configure --locale "$LOCALE" --json >/dev/null; then LOCALE_PERSISTED=1; fi
 if [ "$INTERACTIVE" -eq 1 ]; then
-  if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "现在设置必需的模型 slot？[y/N]：" >&4
-  else printf '%s ' "Set up required model slots now? [y/N]:" >&4; fi
-  IFS= read -r MODEL_SETUP_CONFIRM <&3 || MODEL_SETUP_CONFIRM=""
-  case "$MODEL_SETUP_CONFIRM" in
-    y|Y|yes|YES)
-      if HOME="$HOME_DIR" HORSEPOWER_TTY_INPUT="$TTY_INPUT" HORSEPOWER_TTY_OUTPUT="$TTY_OUTPUT" "$CLI_LINK" setup --interactive --json >/dev/null; then
-        MODEL_SETUP_COMPLETE=1
-      fi
-      ;;
-  esac
+  CONFIGURATION_JSON="$TMP/configuration.json"
+  CONFIGURATION_ERROR="$TMP/configuration.error"
+  if [ "$LOCALE_PERSISTED" -eq 1 ]; then
+    INSTALLER_NONCE=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))') || fail "unable to create installer context"
+    INSTALLER_CONTEXT="$TMP/installer-context.fifo"
+    mkfifo "$INSTALLER_CONTEXT" || fail "unable to create installer context"
+    (printf '{"nonce":"%s","parentPid":%s}' "$INSTALLER_NONCE" "$$" >"$INSTALLER_CONTEXT") &
+    INSTALLER_CONTEXT_WRITER=$!
+    if HOME="$HOME_DIR" HORSEPOWER_INSTALLER_CONTEXT_FD=9 HORSEPOWER_INSTALLER_NONCE="$INSTALLER_NONCE" HORSEPOWER_TTY_INPUT="$TTY_INPUT" HORSEPOWER_TTY_OUTPUT="$TTY_OUTPUT" HORSEPOWER_TTY_INPUT_OFFSET="$TTY_CONSUMED" "$CLI_LINK" configure --interactive --json 9<"$INSTALLER_CONTEXT" >"$CONFIGURATION_JSON" 2>"$CONFIGURATION_ERROR"; then
+      CONFIGURATION_COMPLETE=1
+      MODEL_STATUS=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(String(r.data.models.status))' "$CONFIGURATION_JSON" 2>/dev/null || printf unknown)
+      [ "$MODEL_STATUS" = "configured" ] && MODEL_SETUP_COMPLETE=1
+    fi
+    wait "$INSTALLER_CONTEXT_WRITER" || true
+    INSTALLER_NONCE=""
+  fi
+fi
+
+if [ "$LOCALE_PERSISTED" -eq 0 ]; then
+  if [ "$LOCALE" = "zh-CN" ]; then printf '%s\n' "警告：输出语言未能持久化；安装代码仍然有效。" >&2
+  else printf '%s\n' "Warning: output locale could not be persisted; installed code remains valid." >&2; fi
+elif [ "$INTERACTIVE" -eq 1 ] && [ "$CONFIGURATION_COMPLETE" -eq 0 ]; then
+  if [ "$LOCALE" = "zh-CN" ]; then printf '%s\n' "完整配置未完成；安装代码仍然有效，请运行 horsepower configure --interactive 重试。" >&2
+  else printf '%s\n' "Complete configuration did not finish; installed code remains valid. Retry horsepower configure --interactive." >&2; fi
 fi
 
 if [ "$LOCALE" = "zh-CN" ]; then
@@ -298,6 +286,7 @@ if [ "$LOCALE" = "zh-CN" ]; then
     printf '%s\n' "模型设置未完成。"
     printf '%s\n' "下一步：horsepower setup --interactive"
   fi
+  if [ "$INTERACTIVE" -eq 0 ] || [ "$CONFIGURATION_COMPLETE" -eq 0 ]; then printf '%s\n' "完整配置：horsepower configure --interactive"; fi
 else
   printf '%s\n' "Horsepower installed successfully."
   if [ "$MODEL_SETUP_COMPLETE" -eq 1 ]; then
@@ -306,5 +295,6 @@ else
     printf '%s\n' "Model setup incomplete."
     printf '%s\n' "Next: horsepower setup --interactive"
   fi
+  if [ "$INTERACTIVE" -eq 0 ] || [ "$CONFIGURATION_COMPLETE" -eq 0 ]; then printf '%s\n' "Complete configuration: horsepower configure --interactive"; fi
   if [ "$NO_SETUP" -eq 1 ]; then printf '%s\n' "Chinese output: horsepower configure --locale zh-CN"; fi
 fi

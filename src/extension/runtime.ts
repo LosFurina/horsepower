@@ -14,6 +14,7 @@ import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
 import { createOrchestration } from "../orchestration/facade.js";
 import { createOneShotExecutor } from "../runtime/one-shot.js";
 import { createPiJsonRunner } from "../runtime/one-shot-runner.js";
+import { capabilityRejectionError } from "../runtime/capability-rejection.js";
 import { PersistentWorkerManager } from "../runtime/persistent-manager.js";
 import { createPersistentWorkerStarter } from "../runtime/persistent-worker-connection.js";
 import { createCapabilityEvidenceCache } from "../capabilities/evidence-cache.js";
@@ -43,6 +44,13 @@ export interface CreateHorsepowerRuntimeOptions {
   }) | undefined;
   oneShot?: ReturnType<typeof createOneShotExecutor>;
   capabilityProbe?: ModelCapabilityProbe;
+}
+
+interface ToolFailureMetadata { code: string; boundary: string; remediation: string }
+function toolFailure(metadata: ToolFailureMetadata, cause: unknown): Error & { horsepowerFailure: ToolFailureMetadata } {
+  if (cause instanceof Error && "horsepowerFailure" in cause) return cause as Error & { horsepowerFailure: ToolFailureMetadata };
+  if (cause instanceof Error) return Object.assign(cause, { horsepowerFailure: metadata });
+  return Object.assign(new Error(String(cause), { cause }), { horsepowerFailure: metadata });
 }
 
 async function optionalJson(path: string, readText: (path: string) => Promise<string>): Promise<Record<string, unknown>> {
@@ -93,7 +101,9 @@ export class HorsepowerRuntime {
   }
 
   async beginImplementationCampaign(input: { changeId: string; projectId: string; taskScopes: string[]; mode: ImplementationMode }) {
-    const projectId = await realpath(resolve(input.projectId)).catch(() => resolve(input.projectId));
+    const requestedProjectId = resolve(input.projectId);
+    const projectId = await realpath(requestedProjectId).catch(() => requestedProjectId);
+    await this.#boundary.authorize({ action: "begin_change", cwd: requestedProjectId, changeId: input.changeId });
     return this.#implementations.begin({ ...input, projectId });
   }
 
@@ -126,11 +136,15 @@ export class HorsepowerRuntime {
     const lifecycleOnly = new Set(["begin_change", "report_terminal", "begin_review_campaign", "record_review_finding", "extend_review_campaign", "end_review_campaign"]);
     if (!safe.has(String(raw.action))) {
       if (!context.captain) throw new Error(`Captain capability is required for ${String(raw.action)}`);
-      await this.#boundary.authorize({
-        action: raw.action as never,
-        cwd,
-        ...(typeof raw.changeId === "string" ? { changeId: raw.changeId } : {}),
-      });
+      try {
+        await this.#boundary.authorize({
+          action: raw.action as never,
+          cwd,
+          ...(typeof raw.changeId === "string" ? { changeId: raw.changeId } : {}),
+        });
+      } catch (cause) {
+        throw toolFailure({ code: "OPENSPEC_BOUNDARY_FAILED", boundary: "openspec", remediation: "Run openspec doctor and resolve the reported project problem before retrying." }, cause);
+      }
     }
     const workProducing = new Set(["single", "parallel", "chain", "create", "send", "steer"]);
     if (workProducing.has(String(raw.action))) {
@@ -138,17 +152,25 @@ export class HorsepowerRuntime {
       const taskScope = typeof raw.taskScope === "string" ? raw.taskScope : "";
       const workKind = typeof raw.workKind === "string" ? raw.workKind as WorkKind : undefined;
       if (!campaignId || !taskScope || !workKind) {
-        throw new Error("Work requires a user-selected implementation campaign: choose multi_agent or main_agent with /horsepower-campaign");
+        throw toolFailure(
+          { code: "CAMPAIGN_AUTHORIZATION_FAILED", boundary: "campaign", remediation: "Select a valid implementation campaign and retry with an authorized change and task scope." },
+          new Error("Work requires a user-selected implementation campaign: choose multi_agent or main_agent with /horsepower-campaign"),
+        );
       }
-      this.#implementations.authorizeDispatch({
-        campaignId, changeId: String(raw.changeId), projectId, taskScope, workKind,
-        ...(typeof raw.reviewCampaignId === "string" ? { reviewCampaignId: raw.reviewCampaignId } : {}),
-      });
+      try {
+        this.#implementations.authorizeDispatch({
+          campaignId, changeId: String(raw.changeId), projectId, taskScope, workKind,
+          ...(typeof raw.reviewCampaignId === "string" ? { reviewCampaignId: raw.reviewCampaignId } : {}),
+        });
+      } catch (cause) {
+        throw toolFailure({ code: "CAMPAIGN_AUTHORIZATION_FAILED", boundary: "campaign", remediation: "Select a valid implementation campaign and retry with an authorized change and task scope." }, cause);
+      }
     }
     let slots: ReturnType<typeof createSlotRegistry> | undefined;
     let piCatalog: ReturnType<typeof createPiModelCatalog> | undefined;
     let catalog: Map<string, AgentDefinition> | undefined;
     if (!safe.has(String(raw.action)) && !lifecycleOnly.has(String(raw.action))) {
+      const agentFailure = { code: "AGENT_CATALOG_FAILED", boundary: "agent_catalog", remediation: "Run horsepower doctor --json and repair the bundled or overridden agent catalog before retrying." };
       const [globalSlots, projectSlots, agents] = await Promise.all([
         optionalJson(paths.global.modelSlots, readText),
         optionalJson(paths.project.modelSlots, readText),
@@ -156,7 +178,7 @@ export class HorsepowerRuntime {
           bundledDir: this.#options.bundledAgentsDir,
           globalDir: paths.global.agents,
           projectDir: paths.project.agents,
-        }),
+        }).catch((cause) => { throw toolFailure(agentFailure, cause); }),
       ]);
       piCatalog = createPiModelCatalog(context.modelRegistry);
       slots = createSlotRegistry({
@@ -167,7 +189,13 @@ export class HorsepowerRuntime {
       catalog = new Map(agents.map((agent) => [agent.name, agent]));
     }
     const outputLocale = await resolveOutputLocale(paths.global.settings, paths.project.settings);
-    const oneShot = this.#options.oneShot ?? createOneShotExecutor({ run: createPiJsonRunner() });
+    const oneShotSource = this.#options.oneShot ?? createOneShotExecutor({ run: createPiJsonRunner() });
+    const processFailure = { code: "WORKER_PROCESS_FAILED", boundary: "process", remediation: "Run horsepower doctor --json, inspect the process evidence, and retry the dispatch." };
+    const oneShot = {
+      single: async (invocation: Parameters<typeof oneShotSource.single>[0]) => oneShotSource.single(invocation).catch((cause) => { throw capabilityRejectionError(cause) ?? toolFailure(processFailure, cause); }),
+      parallel: async (invocations: Parameters<typeof oneShotSource.parallel>[0]) => oneShotSource.parallel(invocations).catch((cause) => { throw capabilityRejectionError(cause) ?? toolFailure(processFailure, cause); }),
+      chain: async (invocations: Parameters<typeof oneShotSource.chain>[0]) => oneShotSource.chain(invocations).catch((cause) => { throw capabilityRejectionError(cause) ?? toolFailure(processFailure, cause); }),
+    };
     const handoffs = createHandoffStore({ stateRoot: resolve(paths.global.root, "state") });
     const bindNotification = (scope: "change" | "dispatch") => {
       const webhook = this.#options.resolveWebhook?.(cwd);
@@ -191,29 +219,39 @@ export class HorsepowerRuntime {
     const orchestration = createOrchestration({
       authorize: async () => undefined,
       resolveSlot: (slot) => {
-        if (!slots) throw new Error("Model slots are unavailable for this action");
-        return slots.resolve(slot);
+        try {
+          if (!slots) throw new Error("Model slots are unavailable for this action");
+          return slots.resolve(slot);
+        } catch (cause) {
+          throw toolFailure({ code: "MODEL_CONFIGURATION_FAILED", boundary: "model_configuration", remediation: "Run horsepower setup --interactive to configure the required model slot before retrying." }, cause);
+        }
       },
       validateModel: () => undefined,
       validateCapability: async (slot) => {
-        if (!piCatalog || piCatalog.status !== "available") {
-          throw new Error("MODEL_CATALOG_UNAVAILABLE: current Pi model catalog cannot be established");
+        const modelFailure = { code: "MODEL_CAPABILITY_FAILED", boundary: "model_capability", remediation: "Run horsepower setup --interactive to validate or reconfigure the selected model slot." };
+        try {
+          if (!piCatalog || piCatalog.status !== "available") {
+            throw new Error("MODEL_CATALOG_UNAVAILABLE: current Pi model catalog cannot be established");
+          }
+          await this.#capabilityGate.ensure(
+            { model: slot.model, thinking: slot.thinking, catalogRevision: piCatalog.revision },
+            piCatalog.models[slot.model]?.thinkingLevels,
+          );
+        } catch (cause) {
+          throw toolFailure(modelFailure, cause);
         }
-        await this.#capabilityGate.ensure(
-          { model: slot.model, thinking: slot.thinking, catalogRevision: piCatalog.revision },
-          piCatalog.models[slot.model]?.thinkingLevels,
-        );
       },
       handleWorkerCapabilityRejection: (slot, cause) => {
         if (!piCatalog || piCatalog.status !== "available") return undefined;
-        return this.#capabilityGate.handleWorkerRejection(
+        const failure = this.#capabilityGate.handleWorkerRejection(
           { model: slot.model, thinking: slot.thinking, catalogRevision: piCatalog.revision },
           cause,
         );
+        return failure ? toolFailure({ code: "MODEL_CAPABILITY_FAILED", boundary: "model_capability", remediation: "Run horsepower setup --interactive to validate or reconfigure the selected model slot." }, failure) : undefined;
       },
       getAgent: (name) => {
         const agent = catalog?.get(name);
-        if (!agent) throw new Error(`Unknown agent: ${name}`);
+        if (!agent) throw toolFailure({ code: "AGENT_CATALOG_FAILED", boundary: "agent_catalog", remediation: "Run horsepower doctor --json and repair the bundled or overridden agent catalog before retrying." }, new Error(`Unknown agent: ${name}`));
         return agent;
       },
       createWorker: (worker) => this.#manager.create(worker),
@@ -234,10 +272,10 @@ export class HorsepowerRuntime {
       reportChangeTerminal: (report) => this.#lifecycle.reportChangeTerminal(report),
       identityForRun: (runId) => this.#lifecycle.identity(runId),
       projectId,
-      createHandoff: (input) => handoffs.create(input),
-      prepareHandoffMessage: (input) => handoffs.prepareMessage(input),
-      validateHandoffReport: (input) => handoffs.validateReport(input),
-      recordHandoffTerminal: (input) => handoffs.recordTerminal(input),
+      createHandoff: (input) => handoffs.create(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),
+      prepareHandoffMessage: (input) => handoffs.prepareMessage(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),
+      validateHandoffReport: (input) => handoffs.validateReport(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),
+      recordHandoffTerminal: (input) => handoffs.recordTerminal(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),
       beginReviewCampaign: (input) => this.#reviews.begin(input),
       consumeReviewCampaign: (input) => this.#reviews.consume(input),
       recordReviewFinding: (input) => this.#reviews.recordFinding(input),

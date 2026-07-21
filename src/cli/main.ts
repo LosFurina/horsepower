@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import { fstatSync, readFileSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
@@ -27,6 +28,19 @@ async function confirm(message: string): Promise<boolean | undefined> {
   finally { prompt.close(); await tty?.close(); }
 }
 
+async function verifiedInstallerContext(): Promise<boolean> {
+  const descriptorText = process.env.HORSEPOWER_INSTALLER_CONTEXT_FD;
+  const expectedNonce = process.env.HORSEPOWER_INSTALLER_NONCE;
+  if (!descriptorText || !/^\d+$/u.test(descriptorText) || !expectedNonce) return false;
+  try {
+    const descriptor = Number(descriptorText);
+    if (!Number.isSafeInteger(descriptor) || descriptor < 3 || descriptor > 64 || !fstatSync(descriptor).isFIFO()) return false;
+    const proof = JSON.parse(readFileSync(descriptor, "utf8")) as { nonce?: unknown; parentPid?: unknown };
+    return typeof proof.nonce === "string" && proof.nonce.length >= 32 && proof.nonce === expectedNonce
+      && proof.parentPid === process.ppid;
+  } catch { return false; }
+}
+
 const interactive = Boolean((process.stdin.isTTY && process.stderr.isTTY) || process.platform !== "win32");
 let modelCatalog;
 try {
@@ -37,6 +51,7 @@ try {
 } catch {
   modelCatalog = { status: "unavailable" as const, reason: "registry-error" as const };
 }
+const terminal = createSetupTerminal();
 const cli = createCli({
   homeDir: homedir(),
   cwd: process.cwd(),
@@ -46,7 +61,9 @@ const cli = createCli({
   confirm,
   modelCatalog,
   capabilityProbe: createPiCapabilityProbe(),
-  terminal: createSetupTerminal(),
+  terminal,
+  configurationTerminal: terminal,
+  installerContext: await verifiedInstallerContext(),
 });
 const result = await cli.run(process.argv.slice(2));
 if (result.stdout) process.stdout.write(result.stdout);

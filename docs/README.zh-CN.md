@@ -15,17 +15,20 @@ Horsepower 是 Pi 的显式、模型中立多 Agent runtime。它协调持久 Pi
 
 ```sh
 curl -fsSLO https://github.com/LosFurina/horsepower/raw/main/install.sh
-sh install.sh --version 0.1.0-alpha.1 --locale zh-CN --no-setup
-horsepower setup --interactive
+sh install.sh --version 0.1.0-alpha.1 --locale zh-CN
 ```
 
-bootstrap 下载 `horsepower-v<version>.tar.gz` 及 SHA-256 asset，验证精确布局和内部 digest，然后原子切换 `current`。它不使用 `sudo`、不修改 shell 启动文件、不复制 Pi resource。可使用 `--locale en` 或 `--locale zh-CN`；没有终端和既有设置时默认英文。
+交互安装是首选路径。bootstrap 下载 `horsepower-v<version>.tar.gz` 及 SHA-256 asset，验证精确布局和内部 digest，执行激活前 Skill gate，原子切换 `current`，再启动语言、Skill 边界、webhook 与模型的完整配置。它不使用 `sudo`、不修改 shell 启动文件、不复制 Pi resource。可使用 `--locale en` 或 `--locale zh-CN`；没有终端和既有设置时默认英文。
+
+无人值守安装使用 `sh install.sh --version 0.1.0-alpha.1 --locale zh-CN --no-setup`。它跳过全部交互配置问题，但仍执行只读审计并显示警告。安装后运行 `horsepower configure --interactive` 完成完整配置；`horsepower setup --interactive` 只用于模型 slot 选择或重新验证。
 
 ## 技能隔离与暴露审计
 
 每个 Horsepower one-shot 和持久 worker 启动 Pi 时都使用 `--no-skills`；worker 不会发现全局、项目、settings、package 或 extension 动态提供的 Skill。这是指令边界，不是文件系统、凭据、网络或操作系统 sandbox。
 
-主 Captain 有意保留在用户正常且由用户控制的 Pi 环境中。安装程序在 staged preflight 之后、activation 之前审计静态启用的 Skill。交互安装发现外部暴露或审计不完整时，只接受明确的 `y`、`Y` 或 `yes`（默认 No）；无人值守安装向 stderr 警告后继续，且不修改 Pi Skill 配置。
+主 Captain 有意保留在用户正常且由用户控制的 Pi 环境中。Superpowers 等外部 Skill 由用户管理；Horsepower 绝不会安装、删除、启用、禁用或配置它们。安装程序在 staged preflight 之后、activation 之前审计静态启用的 Skill。交互安装发现外部暴露或审计不完整时，只接受明确的 `y`、`Y` 或 `yes`（默认 No）；无人值守安装向 stderr 警告后继续，且不修改 Pi Skill 配置。
+
+可随时运行 `horsepower configure --interactive` 进行完整配置：输出语言、Captain/worker Skill 边界与当前上下文审计、可选 webhook、必需模型 slot。后续步骤跳过或取消时，先前已确认的独立配置会保留，并显示精确的后续命令。
 
 可在任意项目运行 `horsepower skill-audit` 或 `horsepower skill-audit --json`。只读审计涵盖全局和当前项目上下文；缺失 package 会跳过而不是安装，也不会加载 extension 或执行 Skill 内容。审计不会枚举 extension 动态提供的 Skill，也无法预测未来项目。命令会显示可选、可移植的 `find "$HOME" ...` 候选文件扫描命令，但绝不自动执行；找到候选文件不表示 Pi 已启用它。
 

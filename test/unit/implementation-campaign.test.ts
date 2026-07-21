@@ -42,6 +42,26 @@ test("multi-Agent mode permits explicit delegation and records Captain-direct su
     .toMatchObject({ captainDirect: [{ taskScope: "4.7", reason: "Small integration edit avoids worker context setup" }] });
 });
 
+test("authorized task ranges permit narrower bounded delegation but reject expansion", () => {
+  const campaigns = createImplementationCampaignManager({ makeId: () => "implementation-1" });
+  const campaign = campaigns.begin({
+    changeId: "change-a", projectId: "/project", taskScopes: ["1.1-5.4"], mode: "multi_agent",
+  });
+
+  expect(campaigns.authorizeDispatch({
+    campaignId: campaign.campaignId, changeId: "change-a", projectId: "/project",
+    taskScope: "1.1-2.4", workKind: "implementation",
+  })).toMatchObject({ dispatches: [{ taskScope: "1.1-2.4", workKind: "implementation" }] });
+  expect(campaigns.authorizeDispatch({
+    campaignId: campaign.campaignId, changeId: "change-a", projectId: "/project",
+    taskScope: "3.2", workKind: "test",
+  })).toMatchObject({ dispatches: expect.arrayContaining([{ taskScope: "3.2", workKind: "test" }]) });
+  expect(() => campaigns.authorizeDispatch({
+    campaignId: campaign.campaignId, changeId: "change-a", projectId: "/project",
+    taskScope: "5.4-6.1", workKind: "implementation",
+  })).toThrow("does not include task scope 5.4-6.1");
+});
+
 test("switch, end, and process replacement invalidate prior authorization", () => {
   let id = 0;
   const campaigns = createImplementationCampaignManager({ makeId: () => `implementation-${++id}` });

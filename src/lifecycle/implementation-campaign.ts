@@ -36,6 +36,41 @@ function positive(value: number, label: string): number {
 }
 function copy(campaign: ImplementationCampaign): ImplementationCampaign { return structuredClone(campaign); }
 
+function taskPoint(value: string): number[] | undefined {
+  if (!/^\d+(?:\.\d+)*$/u.test(value)) return undefined;
+  return value.split(".").map(Number);
+}
+
+function compareTaskPoints(left: readonly number[], right: readonly number[]): number {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function taskRange(value: string): { start: number[]; end: number[] } | undefined {
+  const parts = value.split("-");
+  if (parts.length > 2) return undefined;
+  const start = taskPoint(parts[0]!);
+  const end = taskPoint(parts[1] ?? parts[0]!);
+  if (!start || !end || compareTaskPoints(start, end) > 0) return undefined;
+  return { start, end };
+}
+
+function includesTaskScope(authorized: readonly string[], requested: string): boolean {
+  if (authorized.includes(requested)) return true;
+  const requestedRange = taskRange(requested);
+  if (!requestedRange) return false;
+  return authorized.some((scope) => {
+    const allowed = taskRange(scope);
+    return allowed !== undefined
+      && compareTaskPoints(allowed.start, requestedRange.start) <= 0
+      && compareTaskPoints(allowed.end, requestedRange.end) >= 0;
+  });
+}
+
 export function createImplementationCampaignManager(options: ImplementationCampaignManagerOptions = {}) {
   const campaigns = new Map<string, ImplementationCampaign>();
   const makeId = options.makeId ?? (() => randomUUID());
@@ -53,7 +88,7 @@ export function createImplementationCampaignManager(options: ImplementationCampa
     const campaign = owned(id, projectId);
     if (campaign.status !== "active") throw new Error(`Implementation campaign ${id} is not active`);
     if (campaign.changeId !== changeId) throw new Error(`Implementation campaign ${id} belongs to change ${campaign.changeId}`);
-    if (!campaign.taskScopes.includes(taskScope)) throw new Error(`Implementation campaign ${id} does not include task scope ${taskScope}`);
+    if (!includesTaskScope(campaign.taskScopes, taskScope)) throw new Error(`Implementation campaign ${id} does not include task scope ${taskScope}`);
     return campaign;
   }
   return {

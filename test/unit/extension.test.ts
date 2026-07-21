@@ -107,10 +107,12 @@ test("tool passes explicit Captain capability, active cwd, and model registry", 
   );
 });
 
-test("safe commands remain usable while advancing actions retain runtime OpenSpec gating", async () => {
+test("safe commands remain usable while advancing failures return structured actionable results", async () => {
   const pi = fakePi();
   const execute = vi.fn(async (input: { action: string }) => {
-    if (input.action === "create") throw new Error("OpenSpec project is not healthy");
+    if (input.action === "create") throw Object.assign(new Error("OpenSpec project is not healthy"), {
+      horsepowerFailure: { code: "OPENSPEC_BOUNDARY_FAILED", boundary: "openspec", remediation: "Run openspec doctor and resolve the reported project problem before retrying." },
+    });
     return [{ workerId: "worker-1" }];
   });
   const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
@@ -124,7 +126,52 @@ test("safe commands remain usable while advancing actions retain runtime OpenSpe
     .resolves.toMatchObject({ details: [{ workerId: "worker-1" }] });
   await expect(tool.execute("advance", {
     action: "create", cwd: "/wrong", changeId: "x", name: "w", agent: "coder", modelSlot: "craft",
-  }, undefined, undefined, ctx)).rejects.toThrow("OpenSpec project is not healthy");
+  }, undefined, undefined, ctx)).resolves.toMatchObject({
+    details: {
+      status: "failed",
+      action: "create",
+      failure: {
+        code: "OPENSPEC_BOUNDARY_FAILED",
+        boundary: "openspec",
+        message: "OpenSpec project is not healthy",
+        remediation: "Run openspec doctor and resolve the reported project problem before retrying.",
+      },
+    },
+  });
+});
+
+test("one-shot process failures never collapse to an empty tool result", async () => {
+  const pi = fakePi();
+  const execute = vi.fn(async () => { throw Object.assign(new Error("Pi JSON worker exited without an assistant result"), {
+    horsepowerFailure: { code: "WORKER_PROCESS_FAILED", boundary: "process", remediation: "Run horsepower doctor --json, inspect the process evidence, and retry the dispatch." },
+  }); });
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, {
+    acquireRuntime: () => ({ value: { execute }, cleanup: vi.fn(), abandon: vi.fn() }),
+    resolveOutputLocale: async () => "en",
+  });
+  const tool = pi.tools[0] as { execute(...args: unknown[]): Promise<{ details: Record<string, unknown>; content: Array<{ text: string }> }> };
+
+  const result = await tool.execute("dispatch", { action: "single" }, undefined, undefined, context());
+
+  expect(result.details).toMatchObject({
+    data: {
+      status: "failed", action: "single",
+      failure: {
+        code: "WORKER_PROCESS_FAILED", boundary: "process",
+        remediation: "Run horsepower doctor --json, inspect the process evidence, and retry the dispatch.",
+      },
+    },
+    outputLocale: "en",
+  });
+  expect(result.content[0]!.text).toContain("Pi JSON worker exited without an assistant result");
+  expect(result.content[0]!.text.trim()).not.toBe("");
+});
+
+test("resolves bundled agents beside the immutable release root", async () => {
+  const { bundledAgentsDirectory } = await import("../../src/extension/index.js");
+  expect(bundledAgentsDirectory("file:///release/pi/extensions/horsepower/index.js"))
+    .toBe("/release/resources/agents");
 });
 
 test("acquires lazily and two extension instances reuse the process-global runtime", async () => {

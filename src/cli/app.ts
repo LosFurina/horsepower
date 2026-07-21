@@ -14,9 +14,11 @@ import { auditSkillExposure, type StaticSkillResolver, type SkillAuditResult } f
 import type { PiModelCatalog } from "../capabilities/model-catalog.js";
 import type { ModelCapabilityProbe } from "../runtime/model-capability-probe.js";
 import { collectGuidedSetup, commitSetup, requiredSetupSlots, SetupFailure, type SetupTerminal } from "./setup.js";
+import { discoverAgents } from "../agents/catalog.js";
+import { ConfigurationFailure, runCompleteConfiguration, type CompleteConfigurationTerminal, type WebhookConfigurationInput } from "./configuration.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
-interface CommandResult { data: unknown; ok?: boolean; exitCode?: number; message?: string; summaryId?: MessageId }
+interface CommandResult { data: unknown; ok?: boolean; exitCode?: number; message?: string; summaryId?: MessageId; outputLocale?: OutputLocale }
 interface RunResult { code: number; stdout: string; stderr: string }
 export interface CliOptions {
   homeDir: string;
@@ -31,6 +33,8 @@ export interface CliOptions {
     rawEvidence: string;
   }[];
   terminal?: SetupTerminal;
+  configurationTerminal?: CompleteConfigurationTerminal & SetupTerminal;
+  installerContext?: boolean;
   runOpenSpec(args: readonly string[], options: { cwd: string }): Promise<RunResult>;
   fetch?: typeof fetch;
   now?: () => Date;
@@ -351,7 +355,7 @@ export function createCli(options: CliOptions) {
     const modelIds = Object.keys(options.models).sort();
     return { status: "available", modelIds, models: options.models, revision: createHash("sha256").update(JSON.stringify(options.models)).digest("hex") };
   }
-  async function setup(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
+  async function setup(parsed: ReturnType<typeof flags>, localeOverride?: OutputLocale): Promise<CommandResult> {
     only(parsed, ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"], ["interactive"]);
     if (parsed.positionals.length) throw new UsageError("setup accepts no positional arguments");
     if (parsed.switches.has("interactive") && parsed.values.size > 0) throw new UsageError("--interactive cannot be combined with explicit slot options");
@@ -359,6 +363,8 @@ export function createCli(options: CliOptions) {
     let selections: Record<(typeof requiredSetupSlots)[number], { model: string; thinking: ThinkingLevel }>;
     let prevalidated;
     if (parsed.switches.has("interactive")) {
+      const setupLocale = localeOverride ?? await resolveOutputLocale(paths.global.settings, paths.project.settings);
+      (options.terminal as SetupTerminal & { setLocale?: (locale: OutputLocale) => void }).setLocale?.(setupLocale);
       const guided = await collectGuidedSetup(setupCatalog(), options.capabilityProbe, options.terminal!);
       if (guided.status !== "selected") return { data: guided, ok: guided.status === "skipped", exitCode: guided.status === "skipped" ? 0 : 1, summaryId: guided.status === "skipped" ? "setup.skipped" : "setup.canceled" };
       selections = guided.selections;
@@ -426,7 +432,49 @@ export function createCli(options: CliOptions) {
   }
   async function configure(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     const values = ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking", "locale", "scope"];
-    only(parsed, values, []); if (parsed.positionals.length) throw new UsageError("configure accepts no positional arguments");
+    only(parsed, values, ["interactive"]); if (parsed.positionals.length) throw new UsageError("configure accepts no positional arguments");
+    if (parsed.switches.has("interactive")) {
+      if (parsed.values.size > 0) throw new UsageError("--interactive cannot be combined with configure options");
+      const terminal = options.configurationTerminal;
+      if (!terminal) throw new UsageError("Complete interactive configuration requires a controlling terminal");
+      if (terminal.isAvailable && !(await terminal.isAvailable())) {
+        throw new ConfigurationFailure("CONTROLLING_TERMINAL_UNAVAILABLE", {
+          status: "unavailable", evidenceCode: "no_controlling_terminal",
+        }, "Complete interactive configuration requires a controlling terminal");
+      }
+      const initialLocale = await resolveOutputLocale(paths.global.settings, paths.project.settings);
+      const [globalSettings, projectSettings] = await Promise.all([
+        trustedOptionalObject(options.homeDir, paths.global.settings), trustedOptionalObject(options.cwd, paths.project.settings),
+      ]);
+      let existingWebhook = false;
+      try { existingWebhook = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook) !== undefined; }
+      catch (cause) { throw new UsageError((cause as Error).message); }
+      const data = await runCompleteConfiguration({
+        initialLocale, terminal, installerContext: options.installerContext === true, existingWebhook,
+        persistLocale: async (locale) => {
+          const current = await trustedOptionalObject(options.homeDir, paths.global.settings);
+          await writeConfigs([{ path: paths.global.settings, value: { ...current, outputLocale: locale } }]);
+        },
+        auditSkills: async () => (await skillAudit(flags([]))).data as SkillAuditResult,
+        applyWebhook: async (action, configuration?: WebhookConfigurationInput) => {
+          if (action === "preserve") return "preserved";
+          if (action === "skip") { await webhook(flags(["skip"])); return "skipped"; }
+          if (action === "disable") { await webhook(flags(["disable"])); return "disabled"; }
+          if (!configuration) throw new UsageError("Webhook configuration was canceled");
+          const args = ["configure", "--url", configuration.url, "--auth", configuration.auth.mode, "--change", configuration.dispatch ? "--dispatch" : "--no-dispatch"];
+          if (configuration.auth.mode === "hmac") args.push("--secret", configuration.auth.secret);
+          if (configuration.auth.mode === "bearer") args.push("--token", configuration.auth.token);
+          await webhook(flags(args));
+          return "configured";
+        },
+        setupModels: async (locale) => {
+          const result = await setup(flags(["--interactive"]), locale);
+          const status = (result.data as { status?: unknown }).status;
+          return status === "configured" ? "configured" : status === "skipped" ? "skipped" : "canceled";
+        },
+      });
+      return { data, ok: data.status !== "canceled", exitCode: data.status === "canceled" ? 1 : 0, summaryId: "configure.summary", outputLocale: data.locale.value };
+    }
     if (parsed.values.has("locale")) {
       let locale: OutputLocale;
       try { locale = validateOutputLocale(parsed.values.get("locale")); } catch { throw new UsageError(`OUTPUT_LOCALE_INVALID: ${parsed.values.get("locale")}`); }
@@ -579,6 +627,10 @@ export function createCli(options: CliOptions) {
       ]);
       const coreFailure = [current, versions, cli].find((state) => state.status !== "owned");
       if (coreFailure) return { id: "installation", status: "error", integrationStatus: "conflict", message: localizedMessage(outputLocale, "doctor.installationInvalid"), action: localizedMessage(outputLocale, "doctor.installationRepairAction"), rawEvidence: coreFailure.message ?? coreFailure.status };
+      const bundledAgents = await discoverAgents({ bundledDir: join(topology.current, "resources", "agents") });
+      if (!bundledAgents.some((agent) => agent.scope === "bundled")) {
+        throw new ManagedTopologyError("Bundled agent catalog is missing or empty in the active release");
+      }
       const integrationStatus = extension.status === "owned" && skill.status === "owned" ? "enabled"
         : extension.status === "absent" && skill.status === "absent" ? "disabled"
           : extension.status === "conflict" || skill.status === "conflict" ? "conflict" : "partially_enabled";
@@ -782,6 +834,18 @@ export function createCli(options: CliOptions) {
     only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); const confirmed = await options.confirm("Permanently remove Horsepower user data? Type yes to continue: "); if (confirmed === undefined) throw new UsageError("Purge requires --yes when no controlling terminal is available"); if (!confirmed) return { data: { purged: false }, message: "Purge canceled; no data changed" }; }
     await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const codePaths = [topology.current, topology.versions, ...topology.links.map((link) => link.path)]; for (const path of codePaths) await requireAbsent(path, `Run horsepower uninstall before purge; installed code or link remains: ${path}`); const root = await purgeRootState(topology.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory", standards: "directory", workflows: "directory", personas: "directory", memory: "directory", state: "directory" }); const projectRoot = await purgeRootState(paths.project.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory" }); for (const state of [root, projectRoot]) if (state.status === "conflict") throw new Error(state.message); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
   }
+  async function help(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
+    only(parsed, [], []);
+    if (parsed.positionals.length) throw new UsageError("help accepts no positional arguments");
+    return { data: {
+      commands: [
+        "horsepower configure --interactive  # complete locale, Skill, webhook, and model journey",
+        "horsepower configure --locale en|zh-CN [--scope global|project]  # locale only",
+        "horsepower setup --interactive  # model slots only",
+        "horsepower skill-audit [--json]", "horsepower doctor [--json]",
+      ],
+    } };
+  }
 
   type ParsedFlags = ReturnType<typeof flags>;
   type CommandDefinition = {
@@ -792,11 +856,12 @@ export function createCli(options: CliOptions) {
   };
   const completed = "cli.commandCompleted" as const;
   const commands = {
+    help: { run: help, summaryId: completed },
     setup: { run: setup, requiresPlatform: true, summaryId: "cli.setupCompleted" },
     configure: {
       run: configure,
-      requiresPlatform: (parsed) => parsed.values.size > 0,
-      summaryId: (parsed) => parsed.values.has("locale") ? "cli.localeConfigured" : "cli.configured",
+      requiresPlatform: (parsed) => parsed.values.size > 0 || parsed.switches.has("interactive"),
+      summaryId: (parsed) => parsed.switches.has("interactive") ? "configure.summary" : parsed.values.has("locale") ? "cli.localeConfigured" : "cli.configured",
       summaryVariables: (parsed) => ({ locale: parsed.values.get("locale") ?? "" }),
     },
     slots: { run: async (parsed) => { only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("slots accepts no arguments"); return { data: await slotsData() }; }, summaryId: completed },
@@ -814,32 +879,35 @@ export function createCli(options: CliOptions) {
   } satisfies Record<string, CommandDefinition>;
 
   return { async run(argv: readonly string[]): Promise<CliResult> {
-    let machine = argv.includes("--json");
+    const helpRequested = argv.includes("--help") || argv.includes("-h");
+    const effectiveArgv = helpRequested ? ["help", ...(argv.includes("--json") ? ["--json"] : [])] : argv;
+    let machine = effectiveArgv.includes("--json");
     const commandName = argv.find((argument) => !argument.startsWith("--")) ?? "horsepower";
     let locale: OutputLocale = "en";
     try { locale = await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* invalid settings remain observable by commands */ }
     try {
-      const jsonCount = argv.filter((argument) => argument === "--json").length;
+      const jsonCount = effectiveArgv.filter((argument) => argument === "--json").length;
       if (jsonCount > 1) throw new UsageError("Duplicate option: --json");
-      const normalizedArgv = argv.filter((argument) => argument !== "--json");
+      const normalizedArgv = effectiveArgv.filter((argument) => argument !== "--json");
       const command = normalizedArgv[0]; if (!command || command.startsWith("--")) throw new UsageError("A command is required"); const parsed = flags([...normalizedArgv.slice(1), ...(machine ? ["--json"] : [])]); machine = parsed.switches.has("json");
       const definition = commands[command as keyof typeof commands] as CommandDefinition | undefined;
       if (!definition) throw new UsageError(`Unknown command: ${command}`);
       const requiresPlatform = typeof definition.requiresPlatform === "function" ? definition.requiresPlatform(parsed) : definition.requiresPlatform === true;
       if (requiresPlatform) requireSupportedPlatform();
       const result = await definition.run(parsed);
-      try { locale = command === "skill-audit" && parsed.values.has("locale") ? validateOutputLocale(parsed.values.get("locale")) : await resolveOutputLocale(paths.global.settings, paths.project.settings); } catch { /* doctor and diagnostics retain their structured evidence */ }
+      try { locale = result.outputLocale ?? (command === "skill-audit" && parsed.values.has("locale") ? validateOutputLocale(parsed.values.get("locale")) : await resolveOutputLocale(paths.global.settings, paths.project.settings)); } catch { /* doctor and diagnostics retain their structured evidence */ }
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1);
       const summaryId = result.summaryId ?? (typeof definition.summaryId === "function" ? definition.summaryId(parsed) : definition.summaryId);
       const audit = command === "skill-audit" ? result.data as SkillAuditResult : undefined;
       const summary = audit ? localizedMessage(locale, "audit.summary", { status: audit.status, count: audit.externalCount }) : localizedMessage(locale, summaryId, { command: commandName, ...definition.summaryVariables?.(parsed) });
       if (machine) return { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" };
+      if (command === "help") return { exitCode, stdout: `${(result.data as { commands: string[] }).commands.join("\n")}\n`, stderr: "" };
       if (audit) {
         const rows = audit.skills.map((skill) => `- ${skill.name} | ${skill.scope} | ${skill.source} | ${skill.path} | ${skill.evidence}`);
         const text = [summary, ...rows, localizedMessage(locale, "audit.boundary"), localizedMessage(locale, "audit.scope"), ...(audit.status === "complete" ? [] : [localizedMessage(locale, "audit.incomplete")]), localizedMessage(locale, "audit.candidates"), audit.candidateScanCommand].join("\n");
         return { exitCode, stdout: `${text}\n`, stderr: "" };
       }
       return { exitCode, stdout: `${summary}\n`, stderr: "" };
-    } catch (cause) { const usage = cause instanceof UsageError; const setupFailure = cause instanceof SetupFailure ? cause : undefined; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : setupFailure ? localizedMessage(locale, setupFailure.code === "MODEL_CAPABILITY_UNSUPPORTED" ? "setup.unsupported" : setupFailure.code === "SETUP_COMMIT_FAILED" ? "setup.writeFailed" : setupFailure.code === "SETUP_CANCELED" ? "setup.canceled" : "setup.inconclusive") : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = setupFailure ? setupFailure.code : rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(setupFailure ? setupFailure.fields : {}), ...((locale === "zh-CN" || setupFailure) ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }
+    } catch (cause) { const usage = cause instanceof UsageError; const setupFailure = cause instanceof SetupFailure ? cause : undefined; const configurationFailure = cause instanceof ConfigurationFailure ? cause : undefined; const exitCode = usage ? 2 : 1; const rawMessage = cause instanceof Error ? cause.message : "Unknown error"; const human = rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? localizedMessage(locale, "error.localeInvalid", { locale: rawMessage.split(": ")[1] ?? "unknown" }) : configurationFailure ? localizedMessage(locale, "configure.ttyUnavailable") : setupFailure ? localizedMessage(locale, setupFailure.code === "MODEL_CAPABILITY_UNSUPPORTED" ? "setup.unsupported" : setupFailure.code === "SETUP_COMMIT_FAILED" ? "setup.writeFailed" : setupFailure.code === "SETUP_CANCELED" ? "setup.canceled" : "setup.inconclusive") : locale === "zh-CN" ? localizedMessage(locale, "cli.commandFailed", { command: commandName }) : rawMessage; const message = String(redactCredentials(human)); const rawEvidence = String(redactCredentials(rawMessage)); const code = configurationFailure?.code ?? setupFailure?.code ?? (rawMessage.startsWith("OUTPUT_LOCALE_INVALID") ? "OUTPUT_LOCALE_INVALID" : usage ? "USAGE" : "FAILED"); const fields = configurationFailure?.fields ?? setupFailure?.fields; return machine ? { exitCode, stdout: "", stderr: json({ error: { code, message, ...(fields ?? {}), ...((locale === "zh-CN" || fields) ? { rawEvidence } : {}) }, ok: false, outputLocale: locale, summary: message }) } : { exitCode, stdout: "", stderr: `horsepower: ${message}${locale === "zh-CN" ? ` (${rawEvidence})` : ""}\n` }; }
   } };
 }

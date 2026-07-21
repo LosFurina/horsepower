@@ -73,6 +73,30 @@ function textResult(result: unknown) {
   };
 }
 
+interface StructuredFailure {
+  status: "failed";
+  action: string;
+  failure: {
+    code: string;
+    boundary: string;
+    message: string;
+    remediation: string;
+  };
+}
+
+function structuredFailure(action: string, cause: unknown): StructuredFailure {
+  const failureMessage = cause instanceof Error ? cause.message : String(cause);
+  const typed = cause !== null && typeof cause === "object" && "horsepowerFailure" in cause
+    ? (cause as { horsepowerFailure?: unknown }).horsepowerFailure : undefined;
+  const classified = typed !== null && typeof typed === "object"
+    && typeof (typed as { code?: unknown }).code === "string"
+    && typeof (typed as { boundary?: unknown }).boundary === "string"
+    && typeof (typed as { remediation?: unknown }).remediation === "string"
+    ? typed as { code: string; boundary: string; remediation: string }
+    : { code: "DISPATCH_FAILED", boundary: "dispatch", remediation: "Run horsepower doctor --json and retry after resolving the reported failure." };
+  return { status: "failed", action, failure: { ...classified, message: failureMessage } };
+}
+
 function runtimeContext(ctx: ExtensionContext): HorsepowerRuntimeContext {
   return { captain: true, cwd: ctx.cwd, modelRegistry: ctx.modelRegistry };
 }
@@ -96,10 +120,15 @@ export function registerHorsepowerExtension(
     parameters: horsepowerSubagentSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const input = { ...(params as Record<string, unknown>), cwd: ctx.cwd };
-      const data = await runtime(ctx).execute(input, runtimeContext(ctx));
+      const action = String((params as Record<string, unknown>).action ?? "operation");
+      let data: unknown;
+      try {
+        data = await runtime(ctx).execute(input, runtimeContext(ctx));
+      } catch (cause) {
+        data = structuredFailure(action, cause);
+      }
       if (!dependencies.resolveOutputLocale) return textResult(data);
       const outputLocale = await dependencies.resolveOutputLocale(ctx.cwd);
-      const action = String((params as Record<string, unknown>).action ?? "operation");
       const status = data !== null && typeof data === "object" && "status" in data ? String((data as { status: unknown }).status) : "completed";
       const id = status === "failed" ? "dispatch.failed" : status === "canceled" ? "dispatch.canceled" : "dispatch.completed";
       return textResult({ data, outputLocale, summary: message(outputLocale, id, { action }) });
@@ -169,6 +198,10 @@ export function registerHorsepowerExtension(
   });
 }
 
+export function bundledAgentsDirectory(moduleUrl: string = import.meta.url): string {
+  return join(dirname(fileURLToPath(moduleUrl)), "..", "..", "..", "resources", "agents");
+}
+
 function readSettings(path: string): Record<string, unknown> {
   let text: string;
   try {
@@ -199,7 +232,7 @@ export function webhookOptions(homeDir: string, projectDir: string): CreateHorse
 
 function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
   const homeDir = homedir();
-  const bundledAgentsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "resources", "agents");
+  const bundledAgentsDir = bundledAgentsDirectory();
   return acquireGlobalRuntime({
     create: () => createHorsepowerRuntime({
       homeDir,

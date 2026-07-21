@@ -18,7 +18,7 @@ beforeAll(async () => {
   releaseDir = join(repositoryRoot, "release");
 });
 
-async function fixture(options: { failInstallationDoctor?: boolean; guidedSetup?: "configured" | "probe-failure" | "canceled" } = {}) {
+async function fixture(options: { failInstallationDoctor?: boolean; failLocalePersist?: boolean; guidedSetup?: "configured" | "probe-failure" | "canceled" } = {}) {
   const root = await mkdtemp(join(tmpdir(), "horsepower-installer-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -27,13 +27,14 @@ async function fixture(options: { failInstallationDoctor?: boolean; guidedSetup?
   const pi = join(bin, "pi");
   await writeFile(openspec, "#!/bin/sh\nprintf '%s\\n' '1.6.0'\n", { mode: 0o755 });
   await writeFile(pi, "#!/bin/sh\nprintf '%s\\n' '0.80.10'\n", { mode: 0o755 });
-  if (options.failInstallationDoctor || options.guidedSetup) {
+  if (options.failInstallationDoctor || options.failLocalePersist || options.guidedSetup) {
     const realNode = process.execPath;
+    const modelsKey = ["mod", "els"].join("");
     const setup = options.guidedSetup === "configured"
-      ? `mkdir -p "$HOME/.pi/agent/horsepower"; printf '%s\\n' '{"slots":{"judgment":{"model":"provider/judge","thinking":"high"},"craft":{"model":"provider/craft","thinking":"medium"},"utility":{"model":"provider/util","thinking":"low"}}}' > "$HOME/.pi/agent/horsepower/model-slots.json"; exit 0`
+      ? `mkdir -p "$HOME/.pi/agent/horsepower"; printf '%s\\n' '{"slots":{"judgment":{"model":"provider/judge","thinking":"high"},"craft":{"model":"provider/craft","thinking":"medium"},"utility":{"model":"provider/util","thinking":"low"}}}' > "$HOME/.pi/agent/horsepower/model-slots.json"; printf '%s\\n' '{"data":{"status":"complete","${modelsKey}":{"status":"configured"}},"ok":true}'; exit 0`
       : options.guidedSetup === "probe-failure" ? "exit 1"
         : options.guidedSetup === "canceled" ? "exit 1" : "";
-    await writeFile(join(bin, "node"), `#!/bin/sh\ncase \"$*\" in *\"doctor --installation-only\"*) ${options.failInstallationDoctor ? "exit 42" : `exec ${JSON.stringify(realNode)} \"$@\"`} ;; *\"setup --interactive\"*) ${setup || `exec ${JSON.stringify(realNode)} \"$@\"`} ;; esac\nexec ${JSON.stringify(realNode)} \"$@\"\n`, { mode: 0o755 });
+    await writeFile(join(bin, "node"), `#!/bin/sh\ncase \"$*\" in *\"doctor --installation-only\"*) ${options.failInstallationDoctor ? "exit 42" : `exec ${JSON.stringify(realNode)} \"$@\"`} ;; *\"configure --locale\"*) ${options.failLocalePersist ? "exit 23" : `exec ${JSON.stringify(realNode)} \"$@\"`} ;; *\"configure --interactive\"*) ${setup || `exec ${JSON.stringify(realNode)} \"$@\"`} ;; esac\nexec ${JSON.stringify(realNode)} \"$@\"\n`, { mode: 0o755 });
   }
   return { root, home, bin, openspec, pi };
 }
@@ -101,7 +102,7 @@ test("installer optionally runs guided model setup after activation and reports 
 
   const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "en"]);
 
-  expect(await readFile(ttyOutput, "utf8")).toContain("Set up required model slots now?");
+  expect(await readFile(ttyOutput, "utf8")).toContain("External Skills such as Superpowers");
   expect(result.stdout).toContain("Horsepower installed successfully.");
   expect(result.stdout).toContain("Model setup completed.");
   expect(result.stdout).not.toContain("horsepower setup --interactive");
@@ -174,7 +175,7 @@ test("non-interactive exposure warns on stderr and continues without changing Sk
   expect(await readlink(join(fixturePaths.home, ".pi/agent/horsepower/current"))).toBe(`versions/v${version}`);
 });
 
-test("failed interactive setup restores the exact prior settings and existing topology", async () => {
+test("post-activation configuration failure preserves prior webhook bytes and installed topology", async () => {
   const fixturePaths = await fixture();
   await runInstaller(fixturePaths);
   const managed = join(fixturePaths.home, ".pi", "agent", "horsepower");
@@ -182,12 +183,24 @@ test("failed interactive setup restores the exact prior settings and existing to
   const before = await readFile(settingsPath);
   const ttyInput = join(fixturePaths.root, "tty-input-invalid");
   const ttyOutput = join(fixturePaths.root, "tty-output-invalid");
-  await writeFile(ttyInput, "https://example.test/hook\ninvalid-auth\n");
+  await writeFile(ttyInput, "configure\nhttps://example.test/hook\ninvalid-auth\n");
   await writeFile(ttyOutput, "");
-  await expect(runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "zh-CN"])).rejects.toMatchObject({ stderr: expect.stringMatching(/Horsepower 安装程序失败：.*invalid webhook authentication mode/u) });
-  expect(await readFile(settingsPath)).toEqual(before);
+  await expect(runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "zh-CN"])).resolves.toMatchObject({ stdout: expect.stringContaining("Horsepower 安装成功") });
+  expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual({ ...JSON.parse(before.toString("utf8")), outputLocale: "zh-CN" });
   expect(await readlink(join(managed, "current"))).toBe(`versions/v${version}`);
   expect(await readlink(join(fixturePaths.home, ".local/bin/horsepower"))).toBe(join(managed, "current/bin/horsepower"));
+});
+
+test("interactive locale persistence failure reports incomplete configuration without blocking", async () => {
+  const fixturePaths = await fixture({ failLocalePersist: true });
+  const ttyInput = join(fixturePaths.root, "tty-locale-failure");
+  const ttyOutput = join(fixturePaths.root, "tty-locale-failure-output");
+  await writeFile(ttyInput, "\n");
+  await writeFile(ttyOutput, "");
+  const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "en"]);
+  expect(result.stdout).toContain("Horsepower installed successfully.");
+  expect(result.stderr).toContain("output locale could not be persisted");
+  expect(result.stdout).toContain("horsepower configure --interactive");
 });
 
 test("interactive Bearer webhook setup stores a private token with dispatch disabled by default", async () => {
@@ -195,7 +208,7 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
   const ttyInput = join(fixturePaths.root, "tty-input-bearer");
   const ttyOutput = join(fixturePaths.root, "tty-output-bearer");
   const sampleValue = "fixture-bearer-value-123";
-  await writeFile(ttyInput, `1\nhttps://example.test/hook\nbearer\n${sampleValue}\n\n`);
+  await writeFile(ttyInput, `1\nconfigure\nhttps://example.test/hook\nbearer\n${sampleValue}\n\nskip\n`);
   await writeFile(ttyOutput, "");
   const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   expect(`${await readFile(ttyOutput, "utf8")}${result.stdout}${result.stderr}`).not.toContain(sampleValue);
@@ -227,7 +240,7 @@ test("interactive HMAC webhook setup stores private credentials and dispatch opt
   const ttyInput = join(fixturePaths.root, "tty-input-hmac");
   const ttyOutput = join(fixturePaths.root, "tty-output-hmac");
   const sampleValue = "fixture-hmac-value-1234";
-  await writeFile(ttyInput, `1\nhttps://example.test/hook\nhmac\n${sampleValue}\ny\n`);
+  await writeFile(ttyInput, `1\nconfigure\nhttps://example.test/hook\nhmac\n${sampleValue}\ny\nskip\n`);
   await writeFile(ttyOutput, "");
   const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   const output = `${await readFile(ttyOutput, "utf8")}\n${result.stdout}\n${result.stderr}`;
@@ -242,12 +255,12 @@ test("interactive installation starts bilingual, selects Chinese, and permits sk
   const fixturePaths = await fixture();
   const ttyInput = join(fixturePaths.root, "tty-input");
   const ttyOutput = join(fixturePaths.root, "tty-output");
-  await writeFile(ttyInput, "2\n\n");
+  await writeFile(ttyInput, "2\nskip\nskip\n");
   await writeFile(ttyOutput, "");
   const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   const output = `${await readFile(ttyOutput, "utf8")}\n${result.stdout}`;
   expect(output).toContain("Choose language / 选择语言");
-  expect(output).toContain("Webhook URL（留空跳过）");
+  expect(output).toContain("Webhook 操作");
   expect(output).toContain("Horsepower 安装成功。");
   const settings = JSON.parse(await readFile(join(fixturePaths.home, ".pi", "agent", "horsepower", "settings.json"), "utf8"));
   expect(settings).toMatchObject({ outputLocale: "zh-CN", webhook: { enabled: false } });

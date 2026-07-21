@@ -15,17 +15,20 @@ Install only from the `LosFurina/horsepower` GitHub Releases page. Download the 
 
 ```sh
 curl -fsSLO https://github.com/LosFurina/horsepower/raw/main/install.sh
-sh install.sh --version 0.1.0-alpha.1 --no-setup
-horsepower setup --interactive
+sh install.sh --version 0.1.0-alpha.1
 ```
 
-The bootstrap downloads `horsepower-v<version>.tar.gz` and its SHA-256 asset, validates the exact layout and internal digests, then atomically switches `current`. It never uses `sudo`, edits shell startup files, or copies Pi resources. Use `--locale en` or `--locale zh-CN`; without a terminal or prior setting, English is used.
+The interactive installer is the primary path. It downloads `horsepower-v<version>.tar.gz` and its SHA-256 asset, validates the exact layout and internal digests, performs the pre-activation Skill gate, atomically switches `current`, then starts the complete locale, Skill-boundary, webhook, and model journey. It never uses `sudo`, edits shell startup files, or copies Pi resources. Use `--locale en` or `--locale zh-CN`; without a terminal or prior setting, English is used.
+
+For unattended installation, use `sh install.sh --version 0.1.0-alpha.1 --no-setup`. This skips every interactive configuration prompt but retains the observation-only audit and warnings. Afterwards run `horsepower configure --interactive` for the complete journey. Use `horsepower setup --interactive` only for model-slot selection or revalidation.
 
 ## Skill isolation and exposure audit
 
 Every Horsepower one-shot and persistent worker starts Pi with `--no-skills`; workers do not discover global, project, settings, package, or extension-contributed Skills. This is an instruction boundary, not a filesystem, credential, network, or OS sandbox.
 
-The main Captain intentionally remains in the user's normal, user-controlled Pi environment. Installation audits enabled static Skill resources after staged preflight and before activation. External exposure or an incomplete audit requires explicit `y`, `Y`, or `yes` in interactive installation (default No); unattended installation warns on stderr and continues without changing Pi Skill configuration.
+The main Captain intentionally remains in the user's normal, user-controlled Pi environment. External Skills such as Superpowers are user-managed; Horsepower never installs, removes, enables, disables, or configures them. Installation audits enabled static Skill resources after staged preflight and before activation. External exposure or an incomplete audit requires explicit `y`, `Y`, or `yes` in interactive installation (default No); unattended installation warns on stderr and continues without changing Pi Skill configuration.
+
+Run `horsepower configure --interactive` at any time for complete configuration: output locale, the Captain/worker Skill boundary and current-context audit, optional webhook settings, then required model slots. Earlier confirmed independent sections remain configured if a later section is skipped or canceled, and the summary prints exact follow-up commands.
 
 Run `horsepower skill-audit` or `horsepower skill-audit --json` from any project. The observation-only audit covers global and current-project context, skips unavailable packages rather than installing them, and never loads extensions or Skill content. Dynamic extension-contributed Skills are not enumerated, and future project exposure cannot be predicted. For a broader candidate-file scan, the command prints an optional portable `find "$HOME" ...` command but never executes it; candidate files are not necessarily enabled by Pi.
 
