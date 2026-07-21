@@ -650,28 +650,22 @@ export function createCli(options: CliOptions) {
     const outcome = restored ? "rollback restored the original state" : "rollback was incomplete";
     throw new AggregateError(failures, `Integration operation failed; ${outcome}: ${failures.map(({ message }) => message).join("; ")}`);
   }
-  async function enable(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
-    only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("enable accepts no arguments");
+  async function setIntegrationState(parsed: ReturnType<typeof flags>, desired: "enabled" | "disabled"): Promise<CommandResult> {
+    const command = desired === "enabled" ? "enable" : "disable";
+    only(parsed, [], []); if (parsed.positionals.length) throw new UsageError(`${command} accepts no arguments`);
     const states = await preflightIntegrationLinks();
     try {
-      for (const item of states) if (item.state.status === "absent") {
-        await mkdir(dirname(item.link.path), { recursive: true });
-        await linkOperations.create(item.link.target, item.link.path);
+      for (const item of states) {
+        if (desired === "enabled" && item.state.status === "absent") {
+          await mkdir(dirname(item.link.path), { recursive: true });
+          await linkOperations.create(item.link.target, item.link.path);
+        }
+        if (desired === "disabled" && item.state.status === "owned") await linkOperations.remove(item.link.path);
       }
     } catch (cause) {
       return reconcileIntegrationLinks(states, cause);
     }
-    return { data: { integrationStatus: "enabled", reloadRequired: true }, message: "Horsepower enabled; run /reload or restart Pi" };
-  }
-  async function disable(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
-    only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("disable accepts no arguments");
-    const states = await preflightIntegrationLinks();
-    try {
-      for (const item of states) if (item.state.status === "owned") await linkOperations.remove(item.link.path);
-    } catch (cause) {
-      return reconcileIntegrationLinks(states, cause);
-    }
-    return { data: { integrationStatus: "disabled", reloadRequired: true }, message: "Horsepower disabled; run /reload or restart Pi" };
+    return { data: { integrationStatus: desired, reloadRequired: true }, message: `Horsepower ${desired}; run /reload or restart Pi` };
   }
   async function uninstall(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []); if (parsed.positionals.length) throw new UsageError("uninstall accepts no arguments"); await verifyTrustedPath(options.homeDir, topology.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const root = await managedRootState(topology.root); if (root.status === "conflict") throw new Error(root.message); const current = await currentState(topology.root, topology.current); const versions = await versionsState(topology.versions); const states = await Promise.all(topology.links.map(async (link) => ({ link, state: await linkState(link.path, link.target) }))); const conflicts = [current, versions, ...states.map(({ state }) => state)].filter((state) => state.status === "conflict"); if (conflicts.length) throw new Error(conflicts.map((state) => state.message).join("; "));
@@ -714,8 +708,8 @@ export function createCli(options: CliOptions) {
     handoff: { run: handoff, summaryId: completed },
     doctor: { run: doctor, summaryId: "doctor.healthy" },
     preflight: { run: preflight, requiresPlatform: true, summaryId: completed },
-    enable: { run: enable, requiresPlatform: true, summaryId: "cli.enabled" },
-    disable: { run: disable, requiresPlatform: true, summaryId: "cli.disabled" },
+    enable: { run: (parsed) => setIntegrationState(parsed, "enabled"), requiresPlatform: true, summaryId: "cli.enabled" },
+    disable: { run: (parsed) => setIntegrationState(parsed, "disabled"), requiresPlatform: true, summaryId: "cli.disabled" },
     uninstall: { run: uninstall, requiresPlatform: true, summaryId: completed },
     purge: { run: purge, requiresPlatform: true, summaryId: completed },
   } satisfies Record<string, CommandDefinition>;
