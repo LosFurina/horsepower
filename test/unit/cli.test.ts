@@ -814,6 +814,22 @@ test("setup commits both initialized files in one configuration transaction", as
   expect(writes[0]).toHaveLength(2);
 });
 
+test("installation-only doctor verifies owned active topology without requiring project configuration", async () => {
+  const { homeDir, run } = await harness({ runOpenSpec: async () => ({ code: 1, stdout: "", stderr: "must not run" }) });
+  const managed = join(homeDir, ".pi/agent/horsepower");
+  const release = join(managed, "versions/v0.1.0");
+  await writeRelease(release, "0.1.0");
+  await mkdir(join(homeDir, ".pi/agent/extensions"), { recursive: true });
+  await mkdir(join(homeDir, ".pi/agent/skills"), { recursive: true });
+  await mkdir(join(homeDir, ".local/bin"), { recursive: true });
+  await symlink("versions/v0.1.0", join(managed, "current"));
+  await symlink(join(managed, "current/pi/extensions/horsepower"), join(homeDir, ".pi/agent/extensions/horsepower"));
+  await symlink(join(managed, "current/pi/skills/horsepower"), join(homeDir, ".pi/agent/skills/horsepower"));
+  await symlink(join(managed, "current/bin/horsepower"), join(homeDir, ".local/bin/horsepower"));
+  const result = JSON.parse((await run(["doctor", "--installation-only", "--json"])).stdout);
+  expect(result).toMatchObject({ ok: true, data: { checks: [{ id: "installation", status: "ok" }] } });
+});
+
 test("doctor reports configuration, notifications, OpenSpec, skipped models, and ownership actionably", async () => {
   const { run } = await harness({ models: undefined, runOpenSpec: async (args: readonly string[]) => args[0] === "--version"
     ? { code: 127, stdout: "", stderr: "not found" }

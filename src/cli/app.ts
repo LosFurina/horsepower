@@ -63,7 +63,7 @@ function withoutCredentials(value: JsonObject): JsonObject {
 }
 function flags(args: readonly string[]): { positionals: string[]; values: Map<string, string>; switches: Set<string> } {
   const positionals: string[] = []; const values = new Map<string, string>(); const switches = new Set<string>();
-  const boolean = new Set(["json", "yes", "dispatch", "no-dispatch", "change", "no-change"]);
+  const boolean = new Set(["json", "yes", "dispatch", "no-dispatch", "change", "no-change", "installation-only"]);
   for (let index = 0; index < args.length; index += 1) {
     const item = args[index]!;
     if (!item.startsWith("--")) { positionals.push(item); continue; }
@@ -536,7 +536,12 @@ export function createCli(options: CliOptions) {
     }
   }
   async function doctor(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
-    only(parsed, [], []); const checks: Array<Record<string, unknown>> = [];
+    only(parsed, [], ["installation-only"]);
+    if (parsed.switches.has("installation-only")) {
+      const check = await installationCheck();
+      return { data: { checks: [check] }, ok: check.status !== "error", exitCode: check.status === "error" ? 1 : 0 };
+    }
+    const checks: Array<Record<string, unknown>> = [];
     let configurationValid = false;
     try { const data = await slotsData(); configurationValid = true; checks.push({ id: "configuration", status: "ok", message: `Slots revision ${data.revision}` }); } catch (cause) { checks.push({ id: "configuration", status: "error", message: (cause as Error).message, action: "Run horsepower setup" }); }
     const globalSettings = await doctorSettings(options.homeDir, paths.global.settings);
