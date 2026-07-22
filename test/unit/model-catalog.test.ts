@@ -77,6 +77,13 @@ test("uses the same authenticated and enabled model set as Pi model selection", 
     modelIds: ["authenticated/available"],
   });
   expect(getAvailable).toHaveBeenCalledOnce();
+
+  resolveEnabled.mockResolvedValueOnce([]);
+  await expect(loadSelectablePiModelCatalog({ getAvailable }, ["missing/model"], resolveEnabled)).resolves.toMatchObject({
+    status: "available",
+    modelIds: ["authenticated/available"],
+  });
+  expect(getAvailable).toHaveBeenCalledTimes(2);
 });
 
 test("treats coarse reasoning metadata as unverified instead of declaring every thinking level", async () => {

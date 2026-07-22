@@ -78,9 +78,10 @@ export async function loadSelectablePiModelCatalog(
   resolveEnabled: (patterns: readonly string[]) => Promise<readonly PiCatalogModel[]>,
 ): Promise<PiModelCatalog> {
   try {
-    const selected = enabledModels && enabledModels.length > 0
+    const scoped = enabledModels && enabledModels.length > 0
       ? await resolveEnabled(enabledModels)
       : await runtime.getAvailable();
+    const selected = scoped.length > 0 ? scoped : await runtime.getAvailable();
     return createPiModelCatalog({ getAll: () => [...selected] });
   } catch {
     return { status: "unavailable", reason: "registry-error" };

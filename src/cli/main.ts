@@ -54,9 +54,10 @@ async function loadModelCatalog() {
     const cwd = process.cwd();
     const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
     const enabledModels = SettingsManager.create(cwd, agentDir, { projectTrusted }).getEnabledModels();
-    const selected = enabledModels && enabledModels.length > 0
+    const scoped = enabledModels && enabledModels.length > 0
       ? (await resolveModelScope([...enabledModels], { getAvailable: async () => models } as never)).map(({ model }) => model)
       : models;
+    const selected = scoped.length > 0 ? scoped : models;
     return createPiModelCatalog({ getAll: () => selected });
   } catch {
     return { status: "unavailable" as const, reason: "registry-error" as const };
