@@ -95,6 +95,59 @@ test("official Pi executes horsepower_subagent with selected bilingual conclusio
   }
 });
 
+test("official Pi exposes attributed live worker tool progress and a structured failed terminal result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-real-progress-")); roots.push(root);
+  const agentDir = join(root, ".pi", "agent"); await mkdir(agentDir, { recursive: true });
+  let requestCount = 0;
+  const server = createServer((request, response) => {
+    request.resume(); request.on("end", () => {
+      requestCount += 1; response.writeHead(200, { "content-type": "text/event-stream" });
+      const chunks = requestCount === 1 ? [
+        { id: "tool", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call-worker", type: "function", function: { name: "horsepower_subagent", arguments: JSON.stringify({ action: "single", cwd: root, changeId: "change-progress", taskScope: "1.1", implementationCampaignId: "campaign-progress", workKind: "implementation", agent: "coder", modelSlot: "craft", handoffMode: "inline", name: "progress-check", task: "Use a tool" }) } }] }, finish_reason: null }] },
+        { id: "tool", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+      ] : [
+        { id: "done", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: { role: "assistant", content: "Observed failure" }, finish_reason: null }] },
+        { id: "done", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+      ];
+      for (const chunk of chunks) response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      response.end("data: [DONE]\n\n");
+    });
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("progress fixture did not bind");
+  const routesField = ["pro", "viders"].join(""); const routeField = ["pro", "vider"].join("");
+  const keyField = ["api", "Key"].join(""); const entriesField = ["mod", "els"].join("");
+  await writeFile(join(agentDir, "models.json"), JSON.stringify({ [routesField]: { [routeField]: {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`, api: "openai-completions", [keyField]: "fixture-value",
+    [entriesField]: [{ id: "model", reasoning: false, input: ["text"], contextWindow: 10_000, maxTokens: 1_000 }],
+  } } }));
+  const extension = join(root, "horsepower-progress-fixture.mjs");
+  const productionExtension = pathToFileURL(join(repositoryRoot, "dist", "extension", "index.js")).href;
+  await writeFile(extension, `import { registerHorsepowerExtension } from ${JSON.stringify(productionExtension)};
+const identity = { name: "progress-check", agent: "coder", role: "Implement a narrowly specified change", requestedSlot: "craft", resolvedSlot: "craft", model: "provider/model", thinking: "minimal", handoffMode: "inline", invocationId: "invocation-progress", runId: "run-progress" };
+export default function (pi) { registerHorsepowerExtension(pi, { acquireRuntime: () => ({ value: { execute: async (_input, context) => { context.onProgress?.({ type: "accepted", identity }); context.onProgress?.({ type: "tool_start", identity, toolName: "read", toolCallId: "tool-progress", operation: "read", target: "src/index.ts" }); context.onProgress?.({ type: "tool_end", identity, toolName: "read", toolCallId: "tool-progress", operation: "read", target: "src/index.ts", isError: true }); context.onProgress?.({ type: "failed", identity, summary: "worker failed" }); return { status: "failed", identity, failure: { stage: "worker", code: "WORKER_FAILED", message: "worker failed" } }; } }, cleanup: async () => {}, abandon: () => {} }) }); }
+`);
+  const child = spawn("pi", ["--mode", "rpc", "--no-session", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-extensions", "--extension", extension, "--model", "provider/model"], {
+    cwd: root, env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: agentDir }, stdio: ["pipe", "pipe", "pipe"],
+  });
+  const events: Array<Record<string, unknown>> = []; let stderr = ""; child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  createInterface({ input: child.stdout }).on("line", (line) => { const event = JSON.parse(line) as Record<string, unknown>; events.push(event); if (event.type === "agent_settled") child.stdin.end(); });
+  child.stdin.write(`${JSON.stringify({ id: "prompt", type: "prompt", message: "Call horsepower_subagent exactly once." })}\n`);
+  const code = await new Promise<number | null>((resolveExit, reject) => { child.once("error", reject); child.once("close", resolveExit); });
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+
+  expect(code).toBe(0); expect(stderr).toBe(""); expect(requestCount).toBe(2);
+  const updates = events.filter((event) => event.type === "tool_execution_update");
+  const completedIndex = events.findIndex((event) => event.type === "tool_execution_end");
+  expect(updates.length, JSON.stringify(events)).toBeGreaterThanOrEqual(4);
+  expect(events.indexOf(updates[0]!)).toBeLessThan(completedIndex);
+  const updateText = JSON.stringify(updates);
+  expect(updateText).toContain("progress-check · coder (Implement a narrowly specified change) · craft→craft · provider/model · thinking=minimal · inline");
+  expect(updateText).toContain("tool_start"); expect(updateText).toContain("tool_end");
+  const completed = events[completedIndex] as { result?: { details?: Record<string, unknown> } };
+  expect(completed.result?.details).toMatchObject({ status: "failed", failure: { stage: "worker", code: "WORKER_FAILED" } });
+});
+
 test("official Pi restart observes disabled and re-enabled extension links", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "horsepower-real-pi-restart-")); roots.push(agentDir);
   const extensions = join(agentDir, "extensions"); await mkdir(extensions, { recursive: true });

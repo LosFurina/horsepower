@@ -18,22 +18,11 @@ async function gateFixture(now = 0) {
   return { cache, clock, gate, probe };
 }
 
-test("records user-configured evidence without probing upstream", async () => {
-  const { cache, clock, gate, probe } = await gateFixture();
-  await gate.ensure(selection);
-  await gate.ensure(selection);
+test("fails closed when exact catalog thinking evidence is unavailable", async () => {
+  const { cache, gate, probe } = await gateFixture();
+  await expect(gate.ensure(selection)).rejects.toMatchObject({ code: "MODEL_CAPABILITY_UNVERIFIED", status: "inconclusive" });
   expect(probe.probe).not.toHaveBeenCalled();
-
-  await gate.ensure({ ...selection, thinking: "low" });
-  await gate.ensure({ ...selection, catalogRevision: "catalog-r2" });
-  expect(probe.probe).not.toHaveBeenCalled();
-
-  cache.invalidate(selection);
-  await gate.ensure(selection);
-  clock.now = 10 * 60 * 1_000 + 1;
-  await gate.ensure(selection);
-  expect(probe.probe).not.toHaveBeenCalled();
-  expect(cache.get(selection)).toMatchObject({ source: "user-configured", code: "user_configured" });
+  expect(cache.get(selection)).toBeUndefined();
 });
 
 test("authoritative exact catalog support avoids a live probe", async () => {

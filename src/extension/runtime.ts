@@ -10,9 +10,10 @@ import { createImplementationCampaignManager, type ImplementationMode, type Work
 import { resolveOutputLocale } from "../localization/index.js";
 import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary } from "../openspec/boundary.js";
+import type { OpenSpecTaskInventory } from "../openspec/task-inventory.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
 import { createOrchestration } from "../orchestration/facade.js";
-import { createOneShotExecutor } from "../runtime/one-shot.js";
+import { createOneShotExecutor, type OneShotProgress, type WorkerIdentity } from "../runtime/one-shot.js";
 import { createPiJsonRunner } from "../runtime/one-shot-runner.js";
 import { capabilityRejectionError } from "../runtime/capability-rejection.js";
 import { PersistentWorkerManager } from "../runtime/persistent-manager.js";
@@ -28,6 +29,8 @@ export interface HorsepowerRuntimeContext {
   captain: boolean;
   cwd: string;
   modelRegistry: Pick<ModelRegistry, "getAll">;
+  signal?: AbortSignal;
+  onProgress?: (event: OneShotProgress & { identity: WorkerIdentity }) => void;
 }
 
 export interface CreateHorsepowerRuntimeOptions {
@@ -44,6 +47,7 @@ export interface CreateHorsepowerRuntimeOptions {
   }) | undefined;
   oneShot?: ReturnType<typeof createOneShotExecutor>;
   capabilityProbe?: ModelCapabilityProbe;
+  loadTaskInventory?: (input: { cwd: string; changeId: string }) => Promise<OpenSpecTaskInventory>;
 }
 
 interface ToolFailureMetadata { code: string; boundary: string; remediation: string }
@@ -100,11 +104,53 @@ export class HorsepowerRuntime {
     this.#boundary = createOpenSpecBoundary({ run: options.runOpenSpec ?? createOpenSpecCliRunner(), readText });
   }
 
-  async beginImplementationCampaign(input: { changeId: string; projectId: string; taskScopes: string[]; mode: ImplementationMode }) {
+  async loadImplementationTaskInventory(input: { changeId: string; projectId: string }) {
+    const requestedProjectId = resolve(input.projectId);
+    await this.#boundary.authorize({ action: "begin_change", cwd: requestedProjectId, changeId: input.changeId });
+    return this.#loadTaskInventory(requestedProjectId, input.changeId);
+  }
+
+  async beginImplementationCampaign(input: {
+    changeId: string;
+    projectId: string;
+    selectedTaskIds: string[];
+    selectedTasks: Array<{ id: string; description: string; status: "pending"; sectionId: string }>;
+    inventoryDigest: string;
+    mode: ImplementationMode;
+  } | {
+    changeId: string;
+    projectId: string;
+    taskScopes: string[];
+    mode: ImplementationMode;
+  }) {
+    if ("taskScopes" in input) {
+      throw new Error("Campaign taskScopes are unsupported; select canonical unfinished OpenSpec task IDs with /horsepower-campaign");
+    }
     const requestedProjectId = resolve(input.projectId);
     const projectId = await realpath(requestedProjectId).catch(() => requestedProjectId);
     await this.#boundary.authorize({ action: "begin_change", cwd: requestedProjectId, changeId: input.changeId });
-    return this.#implementations.begin({ ...input, projectId });
+    const inventory = await (this.#options.loadTaskInventory
+      ? this.#options.loadTaskInventory({ cwd: requestedProjectId, changeId: input.changeId })
+      : this.#boundary.loadTaskInventory({ cwd: requestedProjectId, changeId: input.changeId }));
+    const inventoryProjectId = await realpath(resolve(inventory.projectRoot)).catch(() => resolve(inventory.projectRoot));
+    if (inventory.changeId !== input.changeId || inventoryProjectId !== projectId) {
+      throw new Error("OpenSpec task inventory ownership changed during campaign creation");
+    }
+    if (inventory.digest !== input.inventoryDigest) throw new Error("OpenSpec task inventory changed before campaign confirmation; run /horsepower-campaign again");
+    const current = new Map(inventory.sections.flatMap((section) => section.tasks.map((task) => [task.id, { ...task, sectionTitle: section.title }] as const)));
+    const selectedTasks = input.selectedTaskIds.map((id) => {
+      const task = current.get(id);
+      if (!task) throw new Error(`Unknown OpenSpec task ID: ${id}`);
+      if (task.status !== "pending") throw new Error(`OpenSpec task is already complete: ${id}`);
+      return task;
+    });
+    return this.#implementations.begin({ ...input, selectedTasks, projectId });
+  }
+
+  async #loadTaskInventory(cwd: string, changeId: string): Promise<OpenSpecTaskInventory> {
+    return this.#options.loadTaskInventory
+      ? this.#options.loadTaskInventory({ cwd, changeId })
+      : this.#boundary.loadTaskInventory({ cwd, changeId });
   }
 
   async authorizeImplementationReviewer(input: { campaignId: string; projectId: string; reviewCampaignId: string; acceptanceScope: string; budget: number }) {
@@ -134,6 +180,14 @@ export class HorsepowerRuntime {
     const readText = this.#options.readText ?? ((path: string) => readFile(path, "utf8"));
     const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor", "review_campaign_status"]);
     const lifecycleOnly = new Set(["begin_change", "report_terminal", "begin_review_campaign", "record_review_finding", "extend_review_campaign", "end_review_campaign"]);
+    const workProducing = new Set(["single", "parallel", "chain", "create", "send", "steer"]);
+    if (workProducing.has(String(raw.action)) && context.signal?.aborted) {
+      return { status: "canceled", action: String(raw.action), failure: {
+        stage: "preflight", code: "DISPATCH_CANCELED", boundary: "cancellation",
+        message: "Dispatch canceled before OpenSpec authorization or campaign accounting",
+        remediation: "Start a new Captain turn and retry the explicit dispatch.",
+      } };
+    }
     if (!safe.has(String(raw.action))) {
       if (!context.captain) throw new Error(`Captain capability is required for ${String(raw.action)}`);
       try {
@@ -146,7 +200,6 @@ export class HorsepowerRuntime {
         throw toolFailure({ code: "OPENSPEC_BOUNDARY_FAILED", boundary: "openspec", remediation: "Run openspec doctor and resolve the reported project problem before retrying." }, cause);
       }
     }
-    const workProducing = new Set(["single", "parallel", "chain", "create", "send", "steer"]);
     if (workProducing.has(String(raw.action))) {
       const campaignId = typeof raw.implementationCampaignId === "string" ? raw.implementationCampaignId : "";
       const taskScope = typeof raw.taskScope === "string" ? raw.taskScope : "";
@@ -158,6 +211,21 @@ export class HorsepowerRuntime {
         );
       }
       try {
+        const campaign = this.#implementations.status(campaignId, projectId);
+        const inventory = await this.#loadTaskInventory(cwd, String(raw.changeId));
+        const inventoryProjectId = await realpath(resolve(inventory.projectRoot)).catch(() => resolve(inventory.projectRoot));
+        if (inventory.changeId !== campaign.changeId || inventoryProjectId !== campaign.projectId) {
+          throw new Error("OpenSpec task inventory ownership drifted; create a new implementation campaign");
+        }
+        const current = new Map(inventory.sections.flatMap((section) => section.tasks.map((task) => [task.id, { ...task, sectionTitle: section.title }] as const)));
+        const currentSelectedOrder = inventory.sections.flatMap((section) => section.tasks).filter((task) => campaign.selectedTaskIds.includes(task.id)).map((task) => task.id);
+        if (currentSelectedOrder.join("\0") !== campaign.selectedTaskIds.join("\0")) throw new Error("Selected OpenSpec task ordering drifted; create a new implementation campaign");
+        for (const selected of campaign.selectedTasks) {
+          const task = current.get(selected.id);
+          if (!task || task.status !== "pending" || task.description !== selected.description || task.sectionId !== selected.sectionId || task.sectionTitle !== selected.sectionTitle) {
+            throw new Error(`Selected OpenSpec task drifted: ${selected.id}; create a new implementation campaign`);
+          }
+        }
         this.#implementations.authorizeDispatch({
           campaignId, changeId: String(raw.changeId), projectId, taskScope, workKind,
           ...(typeof raw.reviewCampaignId === "string" ? { reviewCampaignId: raw.reviewCampaignId } : {}),
@@ -258,6 +326,8 @@ export class HorsepowerRuntime {
       beginChange: (change) => this.#lifecycle.beginChange(change, bindNotification("change")),
       beginDispatch: (dispatch) => this.#lifecycle.beginDispatch(dispatch, bindNotification("dispatch")),
       oneShot,
+      ...(context.signal ? { signal: context.signal } : {}),
+      ...(context.onProgress ? { onProgress: context.onProgress } : {}),
       sendWorker: (send) => this.#manager.send(send as never),
       waitForMessage: (workerId, messageId) => this.#manager.waitForMessage(workerId, messageId),
       messageStatus: (workerId, messageId) => this.#manager.messageStatus(workerId, messageId) as "completed" | "failed" | "canceled",

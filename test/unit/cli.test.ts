@@ -1042,13 +1042,41 @@ test("doctor reports an unavailable current model catalog with localized remedia
 
     const check = JSON.parse((await run(["doctor", "--json"])).stdout).data.checks.find((candidate: { id: string }) => candidate.id === "model-catalog");
     expect(check).toMatchObject({
-      status: "skipped",
+      status: "error",
+      readiness: "unverified",
       catalogStatus: "unavailable",
       rawEvidence: "registry-error",
       message: locale === "zh-CN" ? "Pi 模型目录不可用；无法验证模型能力。" : "The Pi model catalog is unavailable; model capabilities could not be verified.",
       action: locale === "zh-CN" ? "恢复 Pi 模型目录后运行 horsepower setup --interactive。" : "Restore the Pi model catalog, then run horsepower setup --interactive.",
     });
+    expect(JSON.parse((await run(["doctor", "--json"])).stdout).ok).toBe(false);
   }
+});
+
+test("doctor reports configured models absent from the current catalog as unavailable", async () => {
+  const modelCatalog = {
+    status: "available" as const,
+    modelIds: ["provider/judge"],
+    models: { "provider/judge": { thinkingLevels: ["high" as const] } },
+    revision: "catalog-revision",
+  };
+  const { homeDir, run } = await harness({ models: undefined, modelCatalog });
+  const slotsPath = join(homeDir, ".pi/agent/horsepower/model-slots.json");
+  await mkdir(dirname(slotsPath), { recursive: true });
+  await writeFile(slotsPath, JSON.stringify({ slots: {
+    judgment: { model: "provider/missing", thinking: "high" },
+    craft: { model: "provider/missing", thinking: "high" },
+    utility: { model: "provider/missing", thinking: "high" },
+  } }));
+
+  const result = JSON.parse((await run(["doctor", "--json"])).stdout);
+  expect(result.ok).toBe(false);
+  expect(result.data.checks).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      id: "model-binding:provider/missing", status: "error", readiness: "unavailable",
+      rawEvidence: "provider/missing code=model_absent catalogRevision=catalog-revision",
+    }),
+  ]));
 });
 
 test("doctor reports configuration, notifications, OpenSpec, skipped models, and ownership actionably", async () => {

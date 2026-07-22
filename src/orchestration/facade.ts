@@ -3,7 +3,7 @@ import type { AgentDefinition } from "../agents/catalog.js";
 import type { ChangeTerminalReport, DispatchTerminalReport } from "../lifecycle/run-lifecycle.js";
 import type { CompletionEvidence, E2EWaiver } from "../lifecycle/verification-gate.js";
 import type { ReviewCampaign, ReviewCampaignOutcome, ReviewFindingScope } from "../lifecycle/review-campaign.js";
-import type { OneShotExecutor, OneShotInvocation } from "../runtime/one-shot.js";
+import { OneShotBatchError, type OneShotExecutor, type OneShotInvocation, type OneShotProgress, type WorkerIdentity } from "../runtime/one-shot.js";
 import type { ResolvedSlot } from "../slots/registry.js";
 import { horsepowerActionSchemas, horsepowerSubagentSchema } from "./schema.js";
 
@@ -33,6 +33,8 @@ export interface OrchestrationOptions {
   beginChange?: (input: { changeId: string; projectId: string }) => { runId: string };
   beginDispatch(input: { changeId: string; projectId: string; summary: string }): { runId: string };
   oneShot?: OneShotExecutor;
+  signal?: AbortSignal;
+  onProgress?: (event: OneShotProgress & { identity: WorkerIdentity }) => void;
   sendWorker?: (input: Record<string, unknown>) => Promise<unknown>;
   waitForMessage?: (workerId: string, messageId: string) => Promise<unknown>;
   messageStatus?: (workerId: string, messageId: string) => "completed" | "failed" | "canceled";
@@ -132,6 +134,36 @@ function dependency<T>(value: T | undefined, name: string): T {
   return value;
 }
 
+function progressSummary(value: string): string {
+  const sensitiveLabels = [["api", "key"].join("[_-]?"), "to" + "ken", "sec" + "ret", "pass" + "word", "coo" + "kie", "author" + "ization", "bear" + "er"];
+  if (new RegExp(`(?:${sensitiveLabels.join("|")})(?:\\s|[:=])`, "iu").test(value)) return "[REDACTED]";
+  const compact = value.replace(/\/[\w./-]*\.pi\/agent\/horsepower\/state\/handoffs\/[^\s]+/gu, "[private-path]").replace(/[\r\n\t]+/gu, " ").trim();
+  return Buffer.from(compact, "utf8").subarray(0, 500).toString("utf8");
+}
+
+function cancellationError(phase: "preflight" | "during_run"): Error {
+  return Object.assign(new Error(phase === "preflight" ? "Dispatch canceled before authorization" : "Dispatch canceled during worker execution"), {
+    code: "DISPATCH_CANCELED",
+    horsepowerFailure: {
+      code: "DISPATCH_CANCELED", boundary: "cancellation",
+      remediation: "Start a new Captain turn and retry the explicit dispatch.",
+    },
+  });
+}
+
+function failureEvidence(cause: unknown, stage: string) {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  const typed = cause !== null && typeof cause === "object" && "horsepowerFailure" in cause
+    ? (cause as { horsepowerFailure?: unknown }).horsepowerFailure
+    : undefined;
+  const metadata = typed !== null && typeof typed === "object" ? typed as Record<string, unknown> : undefined;
+  const direct = cause !== null && typeof cause === "object" ? cause as Record<string, unknown> : undefined;
+  const code = typeof metadata?.code === "string" ? metadata.code : typeof direct?.code === "string" ? direct.code : undefined;
+  const boundary = typeof metadata?.boundary === "string" ? metadata.boundary : undefined;
+  const remediation = typeof metadata?.remediation === "string" ? metadata.remediation : undefined;
+  return { stage, message, ...(code ? { code } : {}), ...(boundary ? { boundary } : {}), ...(remediation ? { remediation } : {}) };
+}
+
 export function createOrchestration(options: OrchestrationOptions) {
   async function validateCapabilities(slots: readonly ResolvedSlot[]): Promise<void> {
     if (!options.validateCapability) return;
@@ -140,6 +172,49 @@ export function createOrchestration(options: OrchestrationOptions) {
 
   function workerRejection(slot: Pick<ResolvedSlot, "model" | "thinking">, cause: unknown): Error | undefined {
     return options.handleWorkerCapabilityRejection?.(slot, cause);
+  }
+
+  async function finalizeDispatchFailure(input: {
+    action: string;
+    runId: string;
+    stage: string;
+    cause: unknown;
+    projectPath: string;
+    handoffRunIds?: readonly string[];
+    canceledHandoffRunIds?: readonly string[];
+    status?: "failed" | "canceled";
+    identities?: readonly WorkerIdentity[];
+  }) {
+    const status = input.status ?? "failed";
+    const failure = failureEvidence(input.cause, input.stage);
+    const cleanupFailures: Array<{ runId: string; message: string }> = [];
+    if (options.recordHandoffTerminal) {
+      for (const runId of [...(input.handoffRunIds ?? []), ...(input.canceledHandoffRunIds ?? [])]) {
+        try {
+          const handoffStatus = input.canceledHandoffRunIds?.includes(runId) ? "canceled" : status;
+          await options.recordHandoffTerminal({ projectPath: input.projectPath, runId, status: handoffStatus });
+        } catch (cleanupCause) {
+          cleanupFailures.push({ runId, message: cleanupCause instanceof Error ? cleanupCause.message : String(cleanupCause) });
+        }
+      }
+    }
+    try {
+      await options.reportDispatchTerminal({
+        runId: input.runId,
+        status,
+        summary: `${input.action} ${status} at ${input.stage}: ${failure.message}`,
+      });
+    } catch (terminalCause) {
+      cleanupFailures.push({ runId: input.runId, message: terminalCause instanceof Error ? terminalCause.message : String(terminalCause) });
+    }
+    return {
+      status,
+      action: input.action,
+      runId: input.runId,
+      ...(input.identities ? { identities: input.identities } : {}),
+      failure,
+      ...(cleanupFailures.length ? { cleanupFailures } : {}),
+    };
   }
 
   async function oneShot(
@@ -162,9 +237,10 @@ export function createOrchestration(options: OrchestrationOptions) {
     const slots = rawTasks.map((task) => options.resolveSlot(task.modelSlot));
     for (const slot of slots) options.validateModel(slot);
     await validateCapabilities(slots);
+    const agents = rawTasks.map((task) => options.getAgent(task.agent));
     let invocations = rawTasks.map((task, index): OneShotInvocation => {
       const slot = slots[index]!;
-      const agent = options.getAgent(task.agent);
+      const agent = agents[index]!;
       return {
         name: task.name,
         agent: task.agent,
@@ -180,33 +256,115 @@ export function createOrchestration(options: OrchestrationOptions) {
     const executor = dependency(options.oneShot, "oneShot");
     const run = options.beginDispatch({ changeId, projectId: options.projectId ?? cwd, summary: `${action} ${invocations.length}` });
     const managed = input.handoffMode === "managed";
+    invocations = invocations.map((item, index) => {
+      const slot = slots[index]!;
+      const identity: WorkerIdentity = Object.freeze({
+        name: item.name,
+        agent: item.agent,
+        role: agents[index]!.role,
+        requestedSlot: slot.requestedSlot,
+        resolvedSlot: slot.resolvedSlot,
+        model: slot.model,
+        thinking: slot.thinking,
+        handoffMode: managed ? "managed" : "inline",
+        invocationId: `${run.runId}-${index + 1}`,
+        runId: invocations.length === 1 ? run.runId : `${run.runId}-${index + 1}`,
+      });
+      return {
+        ...item,
+        identity,
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.onProgress ? { onProgress: (event: OneShotProgress) => options.onProgress!({ ...event, identity }) } : {}),
+      };
+    });
     const handoffRunIds = invocations.map((_, index) => invocations.length === 1 ? run.runId : `${run.runId}-${index + 1}`);
+    const emit = (index: number, event: OneShotProgress) => {
+      const identity = invocations[index]?.identity;
+      if (!identity || !options.onProgress) return;
+      try { options.onProgress({ ...event, identity }); } catch { /* progress rendering is observational */ }
+    };
+    invocations.forEach((_, index) => emit(index, { type: "accepted" }));
+    const createdHandoffIds: string[] = [];
+    let stage: "handoff" | "worker" | "handoff_report" = "handoff";
     try {
       if (managed) {
         const createHandoff = dependency(options.createHandoff, "createHandoff");
-        invocations = await Promise.all(invocations.map(async (item, index) => {
-          const workspace = await createHandoff({ projectPath: options.projectId ?? cwd, runId: handoffRunIds[index]!, brief: item.task, producer: { kind: "captain", id: "captain" } });
+        const managedInvocations: OneShotInvocation[] = [];
+        for (const [index, item] of invocations.entries()) {
+          const handoffRunId = handoffRunIds[index]!;
+          const workspace = await createHandoff({ projectPath: options.projectId ?? cwd, runId: handoffRunId, brief: item.task, producer: { kind: "captain", id: "captain" } });
+          createdHandoffIds.push(handoffRunId);
+          emit(index, { type: "handoff_created", runId: handoffRunId });
           const previous = action === "chain" && item.task.includes("{previous}") ? " The prior step output is: {previous}." : "";
-          return { ...item, task: `Read your assigned brief at ${workspace.worker.briefPath}.${previous} Complete only that brief. Write your final report to ${workspace.worker.reportPath}. Do not include the full report in model output.` };
-        }));
+          managedInvocations.push({ ...item, task: `Read your assigned brief at ${workspace.worker.briefPath}.${previous} Complete only that brief. Write your final report to ${workspace.worker.reportPath}. Do not include the full report in model output.` });
+        }
+        invocations = managedInvocations;
       }
+      stage = "worker";
       const result = action === "single"
         ? await executor.single(invocations[0]!)
         : action === "parallel"
           ? await executor.parallel(invocations)
           : await executor.chain(invocations);
-      const evidenceRefs = managed ? await Promise.all(handoffRunIds.map((runId, index) => dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId, producer: { kind: "worker", id: invocations[index]!.name } }))) : [];
+      stage = "handoff_report";
+      const evidenceRefs = managed ? await Promise.all(handoffRunIds.map(async (runId, index) => {
+        const evidence = await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId, producer: { kind: "worker", id: invocations[index]!.name } });
+        emit(index, { type: "report_validated", runId });
+        return evidence;
+      })) : [];
       await options.reportDispatchTerminal({ runId: run.runId, status: "completed", summary: `${action} completed`, ...(evidenceRefs.length ? { evidenceRefs: evidenceRefs.map((item) => JSON.stringify(item)) } : {}) });
-      return { runId: run.runId, result: managed ? undefined : result, slots, ...(evidenceRefs.length ? { handoffs: evidenceRefs } : {}) };
+      invocations.forEach((_, index) => emit(index, { type: "completed" }));
+      return { status: "completed", action, runId: run.runId, identities: invocations.map((item) => item.identity), result: managed ? undefined : result, slots, ...(evidenceRefs.length ? { handoffs: evidenceRefs } : {}) };
     } catch (cause) {
-      if (managed && options.recordHandoffTerminal) await Promise.allSettled(handoffRunIds.map((runId) => options.recordHandoffTerminal!({ projectPath: options.projectId ?? cwd, runId, status: "failed" })));
-      await options.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: `${action} failed` });
-      let remediation: Error | undefined;
-      for (const slot of slots) {
-        const rejected = workerRejection(slot, cause);
-        remediation ??= rejected;
+      const canceled = options.signal?.aborted === true;
+      let primary = canceled ? cancellationError("during_run") : cause;
+      let terminalHandoffIds = [...createdHandoffIds];
+      const canceledHandoffIds: string[] = [];
+      if (cause instanceof OneShotBatchError && !canceled) {
+        terminalHandoffIds = [];
+        let firstFailure: unknown;
+        for (const [index, outcome] of cause.outcomes.entries()) {
+          if (outcome.status === "fulfilled") {
+            if (managed) {
+              try {
+                await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: handoffRunIds[index]!, producer: { kind: "worker", id: invocations[index]!.name } });
+                emit(index, { type: "report_validated", runId: handoffRunIds[index]! });
+              } catch (reportCause) {
+                firstFailure ??= reportCause; terminalHandoffIds.push(handoffRunIds[index]!);
+                emit(index, { type: "failed", stage: "handoff_report", summary: progressSummary(failureEvidence(reportCause, "handoff_report").message) });
+                continue;
+              }
+            }
+            emit(index, { type: "completed" });
+          } else if (outcome.status === "skipped") {
+            canceledHandoffIds.push(handoffRunIds[index]!);
+            emit(index, { type: "canceled", summary: "Invocation did not start after an earlier chain failure" });
+          } else {
+            firstFailure ??= outcome.reason; terminalHandoffIds.push(handoffRunIds[index]!);
+            emit(index, { type: "failed", stage: "worker", summary: progressSummary(failureEvidence(outcome.reason, "worker").message) });
+          }
+        }
+        primary = firstFailure ?? cause;
+      } else {
+        if (!canceled && stage === "worker") {
+          for (const slot of slots) primary = workerRejection(slot, cause) ?? primary;
+        }
+        const failure = failureEvidence(primary, stage);
+        invocations.forEach((_, index) => emit(index, canceled
+          ? { type: "canceled", summary: failure.message }
+          : { type: "failed", stage, summary: progressSummary(failure.message) }));
       }
-      throw remediation ?? cause;
+      return finalizeDispatchFailure({
+        action,
+        runId: run.runId,
+        stage,
+        cause: primary,
+        projectPath: options.projectId ?? cwd,
+        handoffRunIds: terminalHandoffIds,
+        ...(canceledHandoffIds.length ? { canceledHandoffRunIds: canceledHandoffIds } : {}),
+        identities: invocations.flatMap((item) => item.identity ? [item.identity] : []),
+        ...(canceled ? { status: "canceled" as const } : {}),
+      });
     }
   }
 
@@ -215,6 +373,10 @@ export function createOrchestration(options: OrchestrationOptions) {
       validate(rawInput);
       const action = required(rawInput, "action");
       preflight(action, rawInput);
+      const cancellable = new Set(["single", "parallel", "chain", "create", "send", "steer"]);
+      if (cancellable.has(action) && options.signal?.aborted) {
+        return { status: "canceled", action, failure: failureEvidence(cancellationError("preflight"), "preflight") };
+      }
       const cwd = required(rawInput, "cwd");
       const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor", "review_campaign_status"]);
       if (!safe.has(action) && !caller.captain) throw new Error(`Captain capability is required for ${action}`);
@@ -317,13 +479,16 @@ export function createOrchestration(options: OrchestrationOptions) {
         await validateCapabilities([slot]);
         const agent = options.getAgent(agentName);
         const run = options.beginDispatch({ changeId: changeId!, projectId: options.projectId ?? cwd, summary: `create ${name}` });
+        const handoffMode = required(rawInput, "handoffMode") as "managed" | "inline";
+        let handoff: Awaited<ReturnType<NonNullable<OrchestrationOptions["createHandoff"]>>> | undefined;
+        let createdWorkerId: string | undefined;
+        let stage = "handoff";
         try {
-          const handoffMode = required(rawInput, "handoffMode") as "managed" | "inline";
-          let handoff: Awaited<ReturnType<NonNullable<OrchestrationOptions["createHandoff"]>>> | undefined;
           if (handoffMode === "managed") {
             if (typeof rawInput.brief !== "string" || !rawInput.brief.trim()) throw new Error("$.brief: required for managed create");
             handoff = await dependency(options.createHandoff, "createHandoff")({ projectPath: options.projectId ?? cwd, runId: run.runId, brief: rawInput.brief, producer: { kind: "captain", id: "captain" } });
           }
+          stage = "worker";
           const worker = await options.createWorker({
             name,
             agent: agentName,
@@ -336,11 +501,17 @@ export function createOrchestration(options: OrchestrationOptions) {
             handoffMode,
             ...(handoff ? { handoffRunId: run.runId, initialMessage: `Read your assigned brief at ${handoff.worker.briefPath}. Write the completed report to ${handoff.worker.reportPath}.` } : {}),
           });
+          createdWorkerId = worker.workerId;
           let evidence: unknown;
           if (handoff) {
             const messageId = typeof (worker as { activeMessageId?: unknown }).activeMessageId === "string" ? (worker as { activeMessageId: string }).activeMessageId : undefined;
             if (!messageId) throw new Error("Managed persistent create did not start its initial message");
-            await dependency(options.waitForMessage, "waitForMessage")((worker as { workerId: string }).workerId, messageId);
+            const abortPersistent = () => { void options.abortWorker?.(worker.workerId); };
+            options.signal?.addEventListener("abort", abortPersistent, { once: true });
+            if (options.signal?.aborted) abortPersistent();
+            try { await dependency(options.waitForMessage, "waitForMessage")((worker as { workerId: string }).workerId, messageId); }
+            finally { options.signal?.removeEventListener("abort", abortPersistent); }
+            stage = "handoff_report";
             evidence = await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: run.runId, producer: { kind: "worker", id: (worker as { workerId: string }).workerId } });
           }
           await options.reportDispatchTerminal({
@@ -351,13 +522,17 @@ export function createOrchestration(options: OrchestrationOptions) {
           });
           return { ...worker, runId: run.runId, slot, ...(handoff ? { handoff: evidence ?? handoff.reference } : {}) };
         } catch (cause) {
-          if (rawInput.handoffMode === "managed" && options.recordHandoffTerminal) await options.recordHandoffTerminal({ projectPath: options.projectId ?? cwd, runId: run.runId, status: "failed" }).catch(() => undefined);
-          await options.reportDispatchTerminal({
+          const primary = stage === "worker" ? workerRejection(slot, cause) ?? cause : cause;
+          if (createdWorkerId && options.destroyWorker) await options.destroyWorker(createdWorkerId, true).catch(() => undefined);
+          return finalizeDispatchFailure({
+            action: "create",
             runId: run.runId,
-            status: "failed",
-            summary: "create failed",
+            stage,
+            cause: primary,
+            projectPath: options.projectId ?? cwd,
+            handoffRunIds: handoff ? [run.runId] : [],
+            ...(options.signal?.aborted ? { status: "canceled" as const } : {}),
           });
-          throw workerRejection(slot, cause) ?? cause;
         }
       }
 
@@ -374,6 +549,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         let reportRevision: number | undefined;
         let dispatchMessage = message;
         let immediate: unknown;
+        let stage = managed ? "handoff" : "worker";
         try {
           if (managed) {
             if (rawInput.delivery === "followUp") {
@@ -390,6 +566,7 @@ export function createOrchestration(options: OrchestrationOptions) {
               dispatchMessage = `Read your assigned brief at ${workspace.worker.briefPath}. Write the completed report to ${workspace.worker.reportPath}.`;
             }
           }
+          stage = "worker";
           immediate = await sendWorker({
             workerId,
             message: dispatchMessage,
@@ -398,74 +575,83 @@ export function createOrchestration(options: OrchestrationOptions) {
             ...(rawInput.timeoutMs === undefined ? {} : { timeoutMs: rawInput.timeoutMs }),
           });
         } catch (cause) {
-          if (managed && handoffRunId && options.recordHandoffTerminal) await options.recordHandoffTerminal({ projectPath: options.projectId ?? cwd, runId: handoffRunId, status: "failed" }).catch(() => undefined);
-          await options.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: `${action} failed` });
-          const summary = options.statusWorker?.(workerId);
-          if (summary !== null && typeof summary === "object") {
+          let primary = cause;
+          let summary: unknown;
+          try { summary = options.statusWorker?.(workerId); } catch { summary = undefined; }
+          if (stage === "worker" && summary !== null && typeof summary === "object") {
             const workerModel = (summary as { model?: unknown }).model;
             const thinking = (summary as { thinking?: unknown }).thinking;
             if (typeof workerModel === "string" && typeof thinking === "string") {
-              throw workerRejection({ model: workerModel, thinking: thinking as ResolvedSlot["thinking"] }, cause) ?? cause;
+              primary = workerRejection({ model: workerModel, thinking: thinking as ResolvedSlot["thinking"] }, cause) ?? cause;
             }
           }
-          throw cause;
+          return finalizeDispatchFailure({
+            action,
+            runId: run.runId,
+            stage,
+            cause: primary,
+            projectPath: options.projectId ?? cwd,
+            handoffRunIds: managed && handoffRunId ? [handoffRunId] : [],
+          });
         }
         const messageId = immediate !== null && typeof immediate === "object" &&
           typeof (immediate as { messageId?: unknown }).messageId === "string"
           ? (immediate as { messageId: string }).messageId
           : undefined;
         if (!messageId) {
-          await options.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: `${action} failed` });
-          throw new Error(`${action} did not return a messageId`);
+          return finalizeDispatchFailure({
+            action,
+            runId: run.runId,
+            stage: "worker",
+            cause: new Error(`${action} did not return a messageId`),
+            projectPath: options.projectId ?? cwd,
+            handoffRunIds: managed && handoffRunId ? [handoffRunId] : [],
+          });
         }
         const settle = async () => {
+          const abortPersistent = () => { void options.abortWorker?.(workerId); };
+          options.signal?.addEventListener("abort", abortPersistent, { once: true });
+          if (options.signal?.aborted) abortPersistent();
           try {
             const completed = await waitForMessage(workerId, messageId);
+            stage = "handoff_report";
             const evidence = managed && handoffRunId ? await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: handoffRunId, producer: { kind: "worker", id: workerId }, ...(reportRevision === undefined ? {} : { expectedRevision: reportRevision }) }) : undefined;
             await options.reportDispatchTerminal({ runId: run.runId, status: "completed", summary: `${action} completed`, ...(evidence ? { evidenceRefs: [JSON.stringify(evidence)] } : {}) });
             return evidence ? { handoff: evidence } : completed;
           } catch (cause) {
-            const status = messageStatus(workerId, messageId);
-            if (managed && handoffRunId && options.recordHandoffTerminal) await options.recordHandoffTerminal({ projectPath: options.projectId ?? cwd, runId: handoffRunId, status: status === "canceled" ? "canceled" : "failed", producer: { kind: "worker", id: workerId } }).catch(() => undefined);
-            await options.reportDispatchTerminal({
-              runId: run.runId,
-              status: status === "canceled" ? "canceled" : "failed",
-              summary: status === "canceled" ? `${action} canceled` : `${action} failed`,
-            });
-            const summary = options.statusWorker?.(workerId);
-            if (summary !== null && typeof summary === "object") {
+            let messageTerminal: "completed" | "failed" | "canceled" = "failed";
+            try { messageTerminal = messageStatus(workerId, messageId); } catch { /* diagnostic only */ }
+            let primary = cause;
+            let summary: unknown;
+            try { summary = options.statusWorker?.(workerId); } catch { summary = undefined; }
+            if (stage === "worker" && summary !== null && typeof summary === "object") {
               const workerModel = (summary as { model?: unknown }).model;
               const thinking = (summary as { thinking?: unknown }).thinking;
               if (typeof workerModel === "string" && typeof thinking === "string") {
-                throw workerRejection({ model: workerModel, thinking: thinking as ResolvedSlot["thinking"] }, cause) ?? cause;
+                primary = workerRejection({ model: workerModel, thinking: thinking as ResolvedSlot["thinking"] }, cause) ?? cause;
               }
             }
-            throw cause;
+            return finalizeDispatchFailure({
+              action,
+              runId: run.runId,
+              stage,
+              cause: primary,
+              projectPath: options.projectId ?? cwd,
+              handoffRunIds: managed && handoffRunId ? [handoffRunId] : [],
+              status: options.signal?.aborted || messageTerminal === "canceled" ? "canceled" : "failed",
+            });
+          } finally {
+            options.signal?.removeEventListener("abort", abortPersistent);
           }
         };
         const settlement = settle();
         options.trackSettlement?.(settlement);
-        if (rawInput.wait === true) {
-          if (typeof rawInput.timeoutMs === "number") {
-            let timeout: NodeJS.Timeout | undefined;
-            const waited = await Promise.race([
-              settlement.then((result) => ({ result })),
-              new Promise<{ timedOut: true }>((resolve) => {
-                timeout = setTimeout(() => resolve({ timedOut: true }), rawInput.timeoutMs as number);
-              }),
-            ]).finally(() => {
-              if (timeout) clearTimeout(timeout);
-            });
-            if ("timedOut" in waited) {
-              void settlement.catch(() => undefined);
-              return { runId: run.runId, result: managed ? { messageId } : immediate, timedOut: true };
-            }
-            return { runId: run.runId, result: waited.result };
-          }
-          return { runId: run.runId, result: await settlement };
+        const settled = await settlement;
+        if (settled !== null && typeof settled === "object" &&
+          ((settled as { status?: unknown }).status === "failed" || (settled as { status?: unknown }).status === "canceled")) {
+          return settled;
         }
-        void settlement.catch(() => undefined);
-        return { runId: run.runId, result: managed ? { messageId } : immediate };
+        return { status: "completed", runId: run.runId, result: settled };
       }
 
       throw new Error(`Unsupported orchestration action: ${action}`);

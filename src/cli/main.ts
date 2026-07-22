@@ -1,8 +1,9 @@
-import { open } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { fstatSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { createCli } from "./app.js";
@@ -49,15 +50,32 @@ const interactive = Boolean((process.stdin.isTTY && process.stderr.isTTY) || pro
 async function loadModelCatalog() {
   try {
     const { stdout } = await execFileAsync("pi", ["--list-models"], { cwd: process.cwd(), encoding: "utf8" });
-    const models = parsePiListModelRows(stdout);
     const agentDir = getAgentDir();
-    const cwd = process.cwd();
-    const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
-    const enabledModels = SettingsManager.create(cwd, agentDir, { projectTrusted }).getEnabledModels();
-    const scoped = enabledModels && enabledModels.length > 0
-      ? (await resolveModelScope([...enabledModels], { getAvailable: async () => models } as never)).map(({ model }) => model)
-      : models;
-    const selected = scoped.length > 0 ? scoped : models;
+    const declaredMaps = new Map<string, Record<string, string | null>>();
+    try {
+      const document = JSON.parse(await readFile(join(agentDir, "models.json"), "utf8")) as { providers?: Record<string, { models?: Array<{ id?: unknown; thinkingLevelMap?: unknown }> }> };
+      for (const [provider, definition] of Object.entries(document.providers ?? {})) {
+        for (const model of definition.models ?? []) {
+          if (typeof model.id === "string" && model.thinkingLevelMap && typeof model.thinkingLevelMap === "object") {
+            declaredMaps.set(`${provider}/${model.id}`, model.thinkingLevelMap as Record<string, string | null>);
+          }
+        }
+      }
+    } catch { /* Built-in models may have no user declaration; exact support remains unverified. */ }
+    const models = parsePiListModelRows(stdout).map((model) => {
+      const thinkingLevelMap = declaredMaps.get(`${model.provider}/${model.id}`);
+      return thinkingLevelMap ? { ...model, thinkingLevelMap } : model;
+    });
+    let selected = models;
+    try {
+      const cwd = process.cwd();
+      const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
+      const enabledModels = SettingsManager.create(cwd, agentDir, { projectTrusted }).getEnabledModels();
+      if (enabledModels && enabledModels.length > 0) {
+        const scoped = (await resolveModelScope([...enabledModels], { getAvailable: async () => models } as never)).map(({ model }) => model);
+        if (scoped.length > 0) selected = scoped;
+      }
+    } catch { /* Optional scope filtering cannot erase an established current Pi catalog. */ }
     return createPiModelCatalog({ getAll: () => selected });
   } catch {
     return { status: "unavailable" as const, reason: "registry-error" as const };

@@ -22,7 +22,9 @@ test("creates private opaque workspace and validates a worker report", async () 
   expect(created.worker.briefPath).toContain(join("handoffs", created.reference.projectId, "run-1", "brief.md"));
   expect((await lstat(join(root, "handoffs"))).mode & 0o777).toBe(0o700);
   expect((await lstat(created.worker.briefPath)).mode & 0o777).toBe(0o600);
-  await writeFile(created.worker.reportPath, "Completed safely.\n", { mode: 0o600 });
+  expect((await lstat(created.worker.reportPath)).mode & 0o777).toBe(0o600);
+  expect(await readFile(created.worker.reportPath, "utf8")).toBe("");
+  await writeFile(created.worker.reportPath, "Completed safely.\n");
   const reference = await store.validateReport({ projectPath: project, runId: "run-1", producer: { kind: "worker", id: "worker-1" } });
   expect(reference).toMatchObject({ artifactId: "report", bytes: 18, mediaType: "text/markdown; charset=utf-8" });
   expect(reference.sha256).toMatch(/^[a-f0-9]{64}$/u);
@@ -47,6 +49,7 @@ test("rejects traversal, links, non-regular reports, and cross-project access", 
     await expect(store.create({ projectPath: project, runId, brief: "brief", producer })).rejects.toThrow(/run ID/u);
   }
   const created = await store.create({ projectPath: project, runId: "run-links", brief: "brief", producer });
+  await rm(created.worker.reportPath);
   await symlink(join(root, "outside"), created.worker.reportPath);
   await expect(store.validateReport({ projectPath: project, runId: "run-links", producer: { kind: "worker", id: "w" } })).rejects.toThrow(/symbolic link|regular file/u);
   await rm(created.worker.reportPath);
@@ -70,6 +73,34 @@ test("bounds attachments and total run size, and records truthful terminal absen
   await store.create({ projectPath: project, runId: "total", brief: "brief", producer });
   await store.addAttachment({ projectPath: project, runId: "total", name: "first.bin", content: Buffer.alloc(10 * 1024 * 1024), mediaType: "application/octet-stream", producer });
   await expect(store.addAttachment({ projectPath: project, runId: "total", name: "second.bin", content: Buffer.alloc(10 * 1024 * 1024), mediaType: "application/octet-stream", producer })).rejects.toThrow("20 MiB");
+});
+
+test("invalid worker report cannot prevent failed terminal truth", async () => {
+  const { store, project } = await fixture();
+  const created = await store.create({ projectPath: project, runId: "invalid-report-terminal", brief: "brief", producer });
+  await writeFile(created.worker.reportPath, "unsafe mode");
+  await chmod(created.worker.reportPath, 0o644);
+
+  await expect(store.recordTerminal({ projectPath: project, runId: "invalid-report-terminal", status: "failed" }))
+    .resolves.toEqual({ status: "failed", reportPresent: false });
+  expect(await store.inspect({ projectPath: project, runId: "invalid-report-terminal" })).toMatchObject({
+    terminal: { status: "failed", reportPresent: false }, report: null,
+  });
+});
+
+test("terminal recording is idempotent for the same status and rejects conflicting terminal truth", async () => {
+  const { store, project } = await fixture();
+  await store.create({ projectPath: project, runId: "idempotent-terminal", brief: "brief", producer });
+
+  await store.recordTerminal({ projectPath: project, runId: "idempotent-terminal", status: "failed" });
+  await expect(store.recordTerminal({ projectPath: project, runId: "idempotent-terminal", status: "failed" })).resolves.toMatchObject({
+    status: "failed", reportPresent: false,
+  });
+  await expect(store.recordTerminal({ projectPath: project, runId: "idempotent-terminal", status: "canceled" }))
+    .rejects.toThrow("already terminal as failed");
+  expect(await store.inspect({ projectPath: project, runId: "idempotent-terminal" })).toMatchObject({
+    terminal: { status: "failed", reportPresent: false }, report: null,
+  });
 });
 
 test("records a worker-written report truthfully when failure happens before validation", async () => {

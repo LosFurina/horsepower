@@ -48,10 +48,9 @@ export function createPreLaunchCapabilityGate(options: {
   return {
     async ensure(selection: CapabilityGateSelection, declaredThinking?: readonly ThinkingLevel[]): Promise<void> {
       if (options.cache.get(selection)) return;
-      options.cache.recordSupported(selection, {
-        source: declaredThinking?.includes(selection.thinking) ? "declared" : "user-configured",
-        code: declaredThinking?.includes(selection.thinking) ? "catalog_declared" : "user_configured",
-      });
+      if (!declaredThinking) throw new ModelCapabilityError("MODEL_CAPABILITY_UNVERIFIED", "inconclusive", selection, "missing_exact_catalog_evidence");
+      if (!declaredThinking.includes(selection.thinking)) throw new ModelCapabilityError("MODEL_CAPABILITY_REJECTED", "unsupported", selection, "declared_exact_exclusion");
+      options.cache.recordSupported(selection, { source: "declared", code: "catalog_declared" });
     },
     handleWorkerRejection(selection: CapabilityGateSelection, cause: unknown): ModelCapabilityError | undefined {
       const explicit = rejection(cause, selection.thinking);

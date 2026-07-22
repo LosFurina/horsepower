@@ -1,11 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { capabilityRejectionError, type CapabilityRejectionError } from "./capability-rejection.js";
 import { safePiTools } from "./pi-launch.js";
-import type { OneShotInvocation, OneShotResult, OneShotUsage } from "./one-shot.js";
+import type { OneShotInvocation, OneShotProgress, OneShotResult, OneShotUsage } from "./one-shot.js";
 
 const noDelegationInstruction = [
   "Horsepower worker restriction:",
@@ -21,6 +21,8 @@ export interface PiJsonRunnerOptions {
   stdoutByteLimit?: number;
   structuredTextByteLimit?: number;
   gracefulShutdownMs?: number;
+  progressEventLimit?: number;
+  progressByteLimit?: number;
   spawnProcess?: (
     command: string,
     args: readonly string[],
@@ -71,6 +73,71 @@ function addUsage(total: OneShotUsage, next: OneShotUsage): OneShotUsage {
   };
 }
 
+function safeProgress(invocation: OneShotInvocation, event: OneShotProgress): void {
+  try { invocation.onProgress?.(event); } catch { /* progress rendering is observational */ }
+}
+
+function boundedSummary(value: string): string {
+  if (/(?:api[_-]?key|token|secret|password|cookie|authorization|bearer)\s*[:=]/iu.test(value)) return "[REDACTED]";
+  const compact = value.replace(/[\r\n\t]+/gu, " ").replace(/[\u0000-\u001f\u007f]/gu, "").trim();
+  const bytes = Buffer.from(compact, "utf8");
+  if (bytes.length <= 500) return compact;
+  return `${new TextDecoder().decode(bytes.subarray(0, 497))}...`;
+}
+
+interface ToolOperation { operation: string; target?: string }
+
+function safePath(value: string, cwd: string): string {
+  if (!isAbsolute(value)) return boundedSummary(value);
+  const rel = relative(cwd, value);
+  return rel && rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(rel)
+    ? boundedSummary(rel)
+    : "[private-path]";
+}
+
+function safeCommand(value: string, cwd: string): string {
+  const compact = boundedSummary(value);
+  if (compact === "[REDACTED]") return compact;
+  return boundedSummary(compact.replace(/(^|\s)(\/[^\s"'`]+)/gu, (_match, prefix: string, path: string) => `${prefix}${safePath(path, cwd)}`));
+}
+
+function toolOperation(event: Record<string, unknown>, cwd: string): ToolOperation {
+  const toolName = typeof event.toolName === "string" ? boundedSummary(event.toolName) : "tool";
+  const args = event.args !== null && typeof event.args === "object" ? event.args as Record<string, unknown> : undefined;
+  const stringArg = (...names: string[]) => names.map((name) => args?.[name]).find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const path = stringArg("path", "file_path");
+  if (path) return { operation: toolName, target: safePath(path, cwd) };
+  const command = stringArg("command");
+  if (command) return { operation: toolName, target: safeCommand(command, cwd) };
+  const pattern = stringArg("pattern", "query");
+  const searchPath = stringArg("glob", "root", "cwd");
+  if (pattern || searchPath) return { operation: toolName, target: boundedSummary([pattern, searchPath && safePath(searchPath, cwd)].filter(Boolean).join(" in ")) };
+  return { operation: toolName };
+}
+
+function progressEvent(event: Record<string, unknown>, cwd: string, knownTools: Map<string, ToolOperation>): OneShotProgress | undefined {
+  if (event.type === "message_update") {
+    const update = event.assistantMessageEvent as Record<string, unknown> | undefined;
+    if (update?.type === "text_end" && typeof update.content === "string") {
+      const summary = boundedSummary(update.content);
+      return summary ? { type: "assistant", summary } : undefined;
+    }
+  }
+  if (event.type === "tool_execution_start" || event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+    if (typeof event.toolName !== "string" || typeof event.toolCallId !== "string") return undefined;
+    const toolCallId = boundedSummary(event.toolCallId);
+    const operation = event.type === "tool_execution_start"
+      ? toolOperation(event, cwd)
+      : knownTools.get(toolCallId) ?? toolOperation(event, cwd);
+    knownTools.set(toolCallId, operation);
+    const type = event.type === "tool_execution_start" ? "tool_start" : event.type === "tool_execution_update" ? "tool_update" : "tool_end";
+    return type === "tool_end"
+      ? { type, toolName: boundedSummary(event.toolName), toolCallId, ...operation, isError: event.isError === true }
+      : { type, toolName: boundedSummary(event.toolName), toolCallId, ...operation };
+  }
+  return undefined;
+}
+
 function validateInvocation(invocation: OneShotInvocation): void {
   if (!invocation.modelSlot?.trim()) throw new Error("One-shot modelSlot is required");
   if (!invocation.model?.trim()) throw new Error("One-shot model is required");
@@ -100,12 +167,16 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
         ...(tools.length > 0 ? ["--tools", tools.join(",")] : ["--no-tools"]),
         invocation.task,
       ];
+      safeProgress(invocation, { type: "starting" });
       const child = spawnProcess(options.executable ?? "pi", args, {
         cwd: invocation.cwd,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         ...(options.environment ? { env: options.environment } : {}),
       });
+      // The prompt is the final positional argument. Pi JSON mode waits for more
+      // prompts while stdin remains open, so send EOF immediately after spawn.
+      child.stdin.end();
       const stdoutLimit = options.stdoutByteLimit ?? 10 * 1024 * 1024;
       const textLimit = options.structuredTextByteLimit ?? 10 * 1024 * 1024;
       const decoder = new StringDecoder("utf8");
@@ -116,13 +187,30 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
       let assistantError: string | undefined;
       let capabilityRejection: CapabilityRejectionError | undefined;
       let parseError: Error | undefined;
+      let escalation: NodeJS.Timeout | undefined;
+      const terminate = () => {
+        child.kill("SIGTERM");
+        escalation ??= setTimeout(() => child.kill("SIGKILL"), options.gracefulShutdownMs ?? 1000);
+      };
+      let progressEvents = 0;
+      let progressBytes = 0;
+      const knownTools = new Map<string, ToolOperation>();
+      const emittedToolUpdates = new Set<string>();
+      const emitProgress = (event: OneShotProgress) => {
+        if (event.type === "tool_update" && emittedToolUpdates.has(event.toolCallId)) return;
+        if (event.type === "tool_update") emittedToolUpdates.add(event.toolCallId);
+        const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+        if (progressEvents >= (options.progressEventLimit ?? 200) || progressBytes + eventBytes > (options.progressByteLimit ?? 64 * 1024)) return;
+        progressEvents += 1; progressBytes += eventBytes;
+        safeProgress(invocation, event);
+      };
 
       child.stdout.on("data", (chunk: Buffer | string) => {
         if (parseError) return;
         stdout += decoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
         if (Buffer.byteLength(stdout, "utf8") > stdoutLimit && !stdout.includes("\n")) {
           parseError = new Error(`Pi JSON stdout line exceeds ${stdoutLimit} bytes`);
-          child.kill("SIGTERM");
+          terminate();
           return;
         }
         let newline = stdout.indexOf("\n");
@@ -131,27 +219,30 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
           stdout = stdout.slice(newline + 1);
           if (Buffer.byteLength(line, "utf8") > stdoutLimit) {
             parseError = new Error(`Pi JSON stdout line exceeds ${stdoutLimit} bytes`);
-            child.kill("SIGTERM");
+            terminate();
             return;
           }
           if (line) {
             try {
               const event = JSON.parse(line) as Record<string, unknown>;
               capabilityRejection ??= event.type === "error" ? capabilityRejectionError(event.error) : undefined;
+              const progress = progressEvent(event, invocation.cwd, knownTools);
+              if (progress) emitProgress(progress);
               const result = assistantResult(event);
               if (result) {
                 if (Buffer.byteLength(result.text, "utf8") > textLimit) {
                   parseError = new Error(`Pi JSON assistant output exceeds ${textLimit} bytes`);
-                  child.kill("SIGTERM");
+                  terminate();
                   return;
                 }
                 finalText = result.text;
                 usage = addUsage(usage, result.usage);
+                capabilityRejection ??= result.error ? capabilityRejectionError(result.error) : undefined;
                 assistantError = result.error ?? assistantError;
               }
             } catch (cause) {
               parseError = cause instanceof Error ? cause : new Error(String(cause));
-              child.kill("SIGTERM");
+              terminate();
               return;
             }
           }
@@ -164,11 +255,9 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
       });
 
       let aborted = invocation.signal?.aborted === true;
-      let escalation: NodeJS.Timeout | undefined;
       const abort = () => {
         aborted = true;
-        child.kill("SIGTERM");
-        escalation = setTimeout(() => child.kill("SIGKILL"), options.gracefulShutdownMs ?? 1000);
+        terminate();
       };
       invocation.signal?.addEventListener("abort", abort, { once: true });
       if (aborted) abort();

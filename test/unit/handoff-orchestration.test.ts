@@ -48,7 +48,9 @@ test("managed one-shot creates brief before execution and requires report for su
     validateHandoffReport: async () => { events.push("report"); throw new Error("Managed report is missing"); },
     recordHandoffTerminal: async ({ status }: { status: string }) => { events.push(`terminal:${status}`); },
   });
-  await expect(createOrchestration(fixture.options as never).execute({ action: "single", changeId: "c", cwd: "/p", handoffMode: "managed", name: "n", agent: "a", modelSlot: "judgment", task: "do work" }, { captain: true })).rejects.toThrow("Managed report is missing");
+  await expect(createOrchestration(fixture.options as never).execute({ action: "single", changeId: "c", cwd: "/p", handoffMode: "managed", name: "n", agent: "a", modelSlot: "judgment", task: "do work" }, { captain: true })).resolves.toMatchObject({
+    status: "failed", action: "single", runId: "run-1", failure: { stage: "handoff_report", message: "Managed report is missing" },
+  });
   expect(events[0]).toBe("brief:run-1");
   expect(events[1]).toContain("Read your assigned brief at /private/brief.md");
   expect(events).toContain("terminal:failed");

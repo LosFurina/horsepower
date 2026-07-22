@@ -696,30 +696,46 @@ export function createCli(options: CliOptions) {
       }
     }
     checks.push(await openspecCheck(outputLocale));
-    const catalog = knownModelCatalog();
-    if (configurationValid && catalog?.status === "unavailable") {
+    const catalog = await setupCatalog();
+    if (configurationValid && catalog?.status !== "available") {
       checks.push({
-        id: "model-catalog", status: "skipped", catalogStatus: "unavailable",
+        id: "model-catalog", status: "error", readiness: "unverified", catalogStatus: "unavailable",
         message: localizedMessage(outputLocale, "doctor.catalogUnavailable"),
-        action: localizedMessage(outputLocale, "doctor.catalogAction"), rawEvidence: catalog.reason,
+        action: localizedMessage(outputLocale, "doctor.catalogAction"), rawEvidence: catalog?.reason ?? "registry-unavailable",
       });
     } else {
       checks.push(!configurationValid
         ? { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelNeedsConfiguration"), action: localizedMessage(outputLocale, "doctor.setupAction") }
-        : catalog?.status === "available"
-          ? { id: "model-registry", status: "ok", message: localizedMessage(outputLocale, "doctor.modelValidated") }
-          : { id: "model-registry", status: "skipped", message: localizedMessage(outputLocale, "doctor.modelUnavailable") });
+        : catalog?.status === "available" && Object.values(resolvedSlots).every((binding) =>
+          catalog.models[binding.model]?.thinkingLevels?.includes(binding.thinking) === true
+        )
+          ? { id: "model-registry", status: "ok", readiness: "verified", message: localizedMessage(outputLocale, "doctor.modelValidated") }
+          : { id: "model-registry", status: "skipped", readiness: "unverified", message: localizedMessage(outputLocale, "doctor.modelUnavailable") });
     }
     const derivedDiagnostics: Array<{ id: string; status: "unverified" | "unsupported"; rawEvidence: string }> = [];
     if (configurationValid && catalog?.status === "available") {
       const seen = new Set<string>();
+      const missingModels = new Set<string>();
       for (const slot of requiredSetupSlots) {
         const binding = resolvedSlots[slot];
         if (!binding) continue;
         const id = `${binding.model}:${binding.thinking}`;
         if (seen.has(id)) continue;
         seen.add(id);
-        const declared = catalog.models[binding.model]?.thinkingLevels;
+        const catalogEntry = catalog.models[binding.model];
+        if (!catalogEntry) {
+          if (!missingModels.has(binding.model)) {
+            missingModels.add(binding.model);
+            checks.push({
+              id: `model-binding:${binding.model}`, status: "error", readiness: "unavailable",
+              message: localizedMessage(outputLocale, "doctor.capabilityUnsupported"),
+              action: localizedMessage(outputLocale, "doctor.capabilityUnsupportedAction"),
+              rawEvidence: `${binding.model} code=model_absent catalogRevision=${catalog.revision}`,
+            });
+          }
+          continue;
+        }
+        const declared = catalogEntry.thinkingLevels;
         if (declared === undefined) {
           derivedDiagnostics.push({
             id, status: "unverified",

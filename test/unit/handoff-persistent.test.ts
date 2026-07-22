@@ -47,7 +47,7 @@ test("managed followUp refreshes evidence in the associated workspace while stee
   expect(events).toContain("validate:run-original:1");
   expect(JSON.stringify(result)).not.toContain("raw final worker output");
   expect(JSON.stringify(result)).not.toContain("raw worker output must stay private");
-  expect(result).toEqual({ runId: "run-1", result: { handoff: expect.objectContaining({ artifactId: "report", summary: "bounded" }) } });
+  expect(result).toEqual({ status: "completed", runId: "run-1", result: { handoff: expect.objectContaining({ artifactId: "report", summary: "bounded" }) } });
   events.splice(0);
   await orchestration.execute({ action: "steer", changeId: "c", cwd: "/p", workerId: "w", message: "change", wait: true }, { captain: true });
   expect(events.some((event) => event.startsWith("create:") || event.startsWith("validate:"))).toBe(false);

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { OpenSpecTask } from "../openspec/task-inventory.js";
 
 export type ImplementationMode = "multi_agent" | "main_agent";
 export type WorkKind = "implementation" | "research" | "test" | "fix" | "review";
@@ -11,20 +12,28 @@ interface ReviewerAuthorization {
   remaining: number;
 }
 
+export interface CampaignTaskSnapshot extends Pick<OpenSpecTask, "id" | "description" | "status" | "sectionId"> { sectionTitle?: string }
+
 export interface ImplementationCampaign {
   campaignId: string;
   changeId: string;
   projectId: string;
-  taskScopes: string[];
+  selectedTaskIds: string[];
+  selectedTasks: CampaignTaskSnapshot[];
+  inventoryDigest: string;
   mode: ImplementationMode;
   status: "active" | "ended";
   outcome?: "switched" | "ended";
   reviewerAuthorizations: ReviewerAuthorization[];
-  dispatches: Array<{ taskScope: string; workKind: WorkKind }>;
-  captainDirect: Array<{ taskScope: string; reason: string }>;
+  dispatches: Array<{ taskIds: string[]; workKind: WorkKind }>;
+  captainDirect: Array<{ taskIds: string[]; reason: string }>;
 }
 
 export interface ImplementationCampaignManagerOptions { makeId?: () => string }
+
+const taskIdPattern = /^\d+(?:\.\d+)+$/u;
+const digestPattern = /^[a-f0-9]{64}$/u;
+const MAX_SELECTED_TASKS = 1_000;
 
 function text(value: string, label: string): string {
   if (!value.trim()) throw new Error(`${label} is required`);
@@ -36,39 +45,27 @@ function positive(value: number, label: string): number {
 }
 function copy(campaign: ImplementationCampaign): ImplementationCampaign { return structuredClone(campaign); }
 
-function taskPoint(value: string): number[] | undefined {
-  if (!/^\d+(?:\.\d+)*$/u.test(value)) return undefined;
-  return value.split(".").map(Number);
-}
-
-function compareTaskPoints(left: readonly number[], right: readonly number[]): number {
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (left[index] ?? 0) - (right[index] ?? 0);
-    if (difference !== 0) return difference;
+function exactTaskIds(values: readonly string[], label: string): string[] {
+  if (values.length === 0) throw new Error(`At least one ${label} is required`);
+  if (values.length > MAX_SELECTED_TASKS) throw new Error(`${label} permits at most ${MAX_SELECTED_TASKS} task IDs`);
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const id = text(raw, label);
+    if (!taskIdPattern.test(id)) {
+      throw new Error(`${label} must use exact OpenSpec task IDs; ranges and free-form scopes are unsupported: ${id}`);
+    }
+    if (!seen.has(id)) { seen.add(id); normalized.push(id); }
   }
-  return 0;
+  return normalized;
 }
 
-function taskRange(value: string): { start: number[]; end: number[] } | undefined {
-  const parts = value.split("-");
-  if (parts.length > 2) return undefined;
-  const start = taskPoint(parts[0]!);
-  const end = taskPoint(parts[1] ?? parts[0]!);
-  if (!start || !end || compareTaskPoints(start, end) > 0) return undefined;
-  return { start, end };
-}
-
-function includesTaskScope(authorized: readonly string[], requested: string): boolean {
-  if (authorized.includes(requested)) return true;
-  const requestedRange = taskRange(requested);
-  if (!requestedRange) return false;
-  return authorized.some((scope) => {
-    const allowed = taskRange(scope);
-    return allowed !== undefined
-      && compareTaskPoints(allowed.start, requestedRange.start) <= 0
-      && compareTaskPoints(allowed.end, requestedRange.end) >= 0;
-  });
+function requestedTaskIds(value: string): string[] {
+  const raw = value.split(",").map((item) => item.trim());
+  if (raw.some((item) => !item)) throw new Error("Dispatch task scope must be comma-separated exact OpenSpec task IDs");
+  const ids = exactTaskIds(raw, "Dispatch task scope");
+  if (ids.length !== raw.length) throw new Error("Dispatch task scope contains duplicate task IDs");
+  return ids;
 }
 
 export function createImplementationCampaignManager(options: ImplementationCampaignManagerOptions = {}) {
@@ -84,17 +81,35 @@ export function createImplementationCampaignManager(options: ImplementationCampa
     if (campaign.projectId !== projectId) throw new Error(`Implementation campaign ${id} belongs to another project`);
     return campaign;
   }
-  function active(id: string, changeId: string, projectId: string, taskScope: string): ImplementationCampaign {
+  function active(id: string, changeId: string, projectId: string, taskScope: string): { campaign: ImplementationCampaign; taskIds: string[] } {
     const campaign = owned(id, projectId);
     if (campaign.status !== "active") throw new Error(`Implementation campaign ${id} is not active`);
     if (campaign.changeId !== changeId) throw new Error(`Implementation campaign ${id} belongs to change ${campaign.changeId}`);
-    if (!includesTaskScope(campaign.taskScopes, taskScope)) throw new Error(`Implementation campaign ${id} does not include task scope ${taskScope}`);
-    return campaign;
+    const taskIds = requestedTaskIds(taskScope);
+    const unauthorized = taskIds.filter((taskId) => !campaign.selectedTaskIds.includes(taskId));
+    if (unauthorized.length) throw new Error(`Implementation campaign ${id} does not include task IDs: ${unauthorized.join(",")}`);
+    return { campaign, taskIds };
   }
   return {
-    begin(input: { changeId: string; projectId: string; taskScopes: string[]; mode: ImplementationMode }): ImplementationCampaign {
-      const taskScopes = [...new Set(input.taskScopes.map((scope) => text(scope, "Implementation task scope")))];
-      if (taskScopes.length === 0) throw new Error("At least one implementation task scope is required");
+    begin(input: {
+      changeId: string;
+      projectId: string;
+      selectedTaskIds: readonly string[];
+      selectedTasks: readonly CampaignTaskSnapshot[];
+      inventoryDigest: string;
+      mode: ImplementationMode;
+    }): ImplementationCampaign {
+      const selectedTaskIds = exactTaskIds(input.selectedTaskIds, "implementation task ID");
+      if (!digestPattern.test(input.inventoryDigest)) throw new Error("Implementation inventory digest is invalid");
+      const records = new Map(input.selectedTasks.map((task) => [task.id, task]));
+      if (records.size !== input.selectedTasks.length) throw new Error("Implementation task snapshot contains duplicate IDs");
+      const selectedTasks = selectedTaskIds.map((id) => {
+        const task = records.get(id);
+        if (!task) throw new Error(`Implementation task snapshot is missing selected task: ${id}`);
+        if (task.status !== "pending") throw new Error(`Implementation task is already complete: ${id}`);
+        return structuredClone(task);
+      });
+      if (records.size !== selectedTaskIds.length) throw new Error("Implementation task snapshot contains unselected tasks");
       for (const campaign of campaigns.values()) {
         if (campaign.projectId === input.projectId && campaign.status === "active") {
           campaign.status = "ended";
@@ -103,8 +118,9 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       }
       const campaign: ImplementationCampaign = {
         campaignId: makeId(), changeId: text(input.changeId, "Implementation change ID"),
-        projectId: text(input.projectId, "Implementation project ID"), taskScopes,
-        mode: input.mode, status: "active", reviewerAuthorizations: [], dispatches: [], captainDirect: [],
+        projectId: text(input.projectId, "Implementation project ID"), selectedTaskIds, selectedTasks,
+        inventoryDigest: input.inventoryDigest, mode: input.mode, status: "active",
+        reviewerAuthorizations: [], dispatches: [], captainDirect: [],
       };
       campaigns.set(campaign.campaignId, campaign);
       return copy(campaign);
@@ -120,7 +136,7 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       return copy(campaign);
     },
     authorizeDispatch(input: { campaignId: string; changeId: string; projectId: string; taskScope: string; workKind: WorkKind; reviewCampaignId?: string }): ImplementationCampaign & { reviewerAuthorization?: ReviewerAuthorization } {
-      const campaign = active(input.campaignId, input.changeId, input.projectId, input.taskScope);
+      const { campaign, taskIds } = active(input.campaignId, input.changeId, input.projectId, input.taskScope);
       let reviewerAuthorization: ReviewerAuthorization | undefined;
       if (campaign.mode === "main_agent") {
         if (input.workKind !== "review") throw new Error(`Main-Agent campaign prohibits worker dispatch: ${input.workKind}`);
@@ -131,13 +147,13 @@ export function createImplementationCampaignManager(options: ImplementationCampa
         reviewerAuthorization.consumed += 1;
         reviewerAuthorization.remaining -= 1;
       }
-      campaign.dispatches.push({ taskScope: input.taskScope, workKind: input.workKind });
+      campaign.dispatches.push({ taskIds, workKind: input.workKind });
       return { ...copy(campaign), ...(reviewerAuthorization ? { reviewerAuthorization: structuredClone(reviewerAuthorization) } : {}) };
     },
     recordCaptainDirect(input: { campaignId: string; changeId: string; projectId: string; taskScope: string; reason: string }): ImplementationCampaign {
-      const campaign = active(input.campaignId, input.changeId, input.projectId, input.taskScope);
+      const { campaign, taskIds } = active(input.campaignId, input.changeId, input.projectId, input.taskScope);
       if (campaign.mode !== "multi_agent") throw new Error("Captain-direct reason is only required in multi-Agent mode");
-      campaign.captainDirect.push({ taskScope: input.taskScope, reason: text(input.reason, "Captain-direct reason") });
+      campaign.captainDirect.push({ taskIds, reason: text(input.reason, "Captain-direct reason") });
       return copy(campaign);
     },
     end(input: { campaignId: string; projectId: string }): ImplementationCampaign {

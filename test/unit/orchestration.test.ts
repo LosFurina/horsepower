@@ -198,9 +198,9 @@ test("actual worker capability rejection invalidates evidence without fallback o
 
   const error = await captain(orchestration, {
     action: "create", handoffMode: "inline", changeId: "c", cwd: "/p", name: "w", agent: "a", modelSlot: "judgment",
-  }).catch((cause: unknown) => cause) as Error & { code?: string };
+  });
 
-  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(error).toMatchObject({ status: "failed", failure: { stage: "worker", code: "MODEL_CAPABILITY_REJECTED" } });
   expect(attempts).toEqual([{ model: genericId("p", "m"), thinking: "high" }]);
   expect(invalidated).toHaveBeenCalledTimes(1);
   expect(configured).toEqual({ model: genericId("p", "m"), thinking: "high" });
@@ -240,9 +240,9 @@ test("parallel worker capability rejection invalidates each matching attempted c
       { name: "one", agent: "a", modelSlot: "judgment", task: "one" },
       { name: "two", agent: "a", modelSlot: "craft", task: "two" },
     ],
-  }).catch((cause: unknown) => cause) as Error & { code?: string };
+  });
 
-  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(error).toMatchObject({ status: "failed", failure: { stage: "worker", code: "MODEL_CAPABILITY_REJECTED" } });
   expect(attempts).toEqual([[{ model: genericId("p", "judgment"), thinking: "high" }, { model: genericId("p", "craft"), thinking: "high" }]]);
   expect(invalidated.mock.calls.map(([slot]) => slot.model)).toEqual(["p/judgment", "p/craft"]);
 });
@@ -275,9 +275,9 @@ test("one-shot worker capability rejection invalidates evidence without automati
 
   const error = await captain(orchestration, {
     action: "single", handoffMode: "inline", changeId: "c", cwd: "/p", name: "w", agent: "a", modelSlot: "judgment", task: "work",
-  }).catch((cause: unknown) => cause) as Error & { code?: string };
+  });
 
-  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(error).toMatchObject({ status: "failed", failure: { stage: "worker", code: "MODEL_CAPABILITY_REJECTED" } });
   expect(attempts).toEqual([{ model: genericId("p", "m"), thinking: "xhigh" }]);
   expect(invalidated).toHaveBeenCalledTimes(1);
 });
@@ -306,6 +306,111 @@ test("authorizes and executes exactly one explicitly requested persistent creati
     modelSlot: "judgment",
   })).resolves.toMatchObject({ workerId: "worker-1", runId: "run-1" });
   expect(calls).toEqual(["authorize", "create:reviewer-1"]);
+});
+
+test("pre-aborted one-shot returns canceled before authorization, accounting, run, handoff, or spawn", async () => {
+  const calls: string[] = [];
+  const controller = new AbortController(); controller.abort("captain turn canceled");
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => { calls.push("authorize"); },
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => { calls.push("model"); },
+    getAgent: (name) => ({ name, role: "Review", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => { calls.push("worker"); return { workerId: "unused" }; },
+    oneShot: { single: async () => { calls.push("spawn"); return { name: "review", text: "unused" }; }, parallel: async () => [], chain: async () => [] },
+    beginDispatch: () => { calls.push("run"); return { runId: "unused" }; },
+    createHandoff: async () => { calls.push("handoff"); throw new Error("unused"); },
+    consumeReviewCampaign: () => { calls.push("budget"); return {} as never; },
+    reportDispatchTerminal: async () => { calls.push("terminal"); },
+    signal: controller.signal,
+  });
+
+  await expect(captain(orchestration, {
+    action: "single", handoffMode: "managed", changeId: "c", cwd: "/p", name: "review", agent: "reviewer", modelSlot: "judgment", task: "review", reviewCampaignId: "review-campaign",
+  })).resolves.toEqual({
+    status: "canceled", action: "single",
+    failure: { stage: "preflight", code: "DISPATCH_CANCELED", boundary: "cancellation", message: "Dispatch canceled before authorization", remediation: "Start a new Captain turn and retry the explicit dispatch." },
+  });
+  expect(calls).toEqual([]);
+});
+
+test("emits immutable complete identity with requested-to-resolved fallback and terminal progress", async () => {
+  const progress: Array<Record<string, unknown>> = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: "judgment", model: genericId("provider", "model"), thinking: "xhigh", fallbackPath: [slot, "judgment"], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Implement a narrowly specified change", prompt: "Prompt", tools: ["read"], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: { single: async (input) => { input.onProgress?.({ type: "tool_start", toolName: "read", toolCallId: "call-1", operation: "read", target: "src/index.ts" }); return { name: input.name, text: "done" }; }, parallel: async () => [], chain: async () => [] },
+    beginDispatch: () => ({ runId: "run-identity" }),
+    reportDispatchTerminal: async () => undefined,
+    onProgress: (event) => { progress.push(event); },
+  });
+
+  await captain(orchestration, {
+    action: "single", handoffMode: "inline", changeId: "c", cwd: "/p", name: "inventory", agent: "coder", modelSlot: "context", task: "work",
+  });
+
+  expect(progress.map((event) => event.type)).toEqual(["accepted", "tool_start", "completed"]);
+  expect(progress[0]).toMatchObject({
+    identity: {
+      name: "inventory", agent: "coder", role: "Implement a narrowly specified change",
+      requestedSlot: "context", resolvedSlot: "judgment", model: "provider/model", thinking: "xhigh",
+      handoffMode: "inline", invocationId: "run-identity-1", runId: "run-identity",
+    },
+  });
+  expect(Object.isFrozen(progress[0]!.identity)).toBe(true);
+});
+
+test("during-run abort returns canceled and terminalizes created managed handoffs as canceled", async () => {
+  const controller = new AbortController();
+  const handoffTerminals: string[] = []; const dispatchTerminals: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Review", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: { single: async () => { controller.abort("captain turn canceled"); throw new Error("One-shot task aborted"); }, parallel: async () => [], chain: async () => [] },
+    beginDispatch: () => ({ runId: "run-canceled" }), signal: controller.signal,
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } }),
+    recordHandoffTerminal: async ({ status }) => { handoffTerminals.push(status); },
+    reportDispatchTerminal: async ({ status }) => { dispatchTerminals.push(status); },
+  });
+
+  await expect(captain(orchestration, {
+    action: "single", handoffMode: "managed", changeId: "c", cwd: "/p", name: "review", agent: "reviewer", modelSlot: "judgment", task: "review",
+  })).resolves.toMatchObject({
+    status: "canceled", runId: "run-canceled",
+    failure: { stage: "worker", code: "DISPATCH_CANCELED", boundary: "cancellation", message: "Dispatch canceled during worker execution" },
+  });
+  expect(handoffTerminals).toEqual(["canceled"]);
+  expect(dispatchTerminals).toEqual(["canceled"]);
+});
+
+test("orchestration progress callback failure cannot change worker completion", async () => {
+  const terminals: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: { single: async (input) => ({ name: input.name, text: "done" }), parallel: async () => [], chain: async () => [] },
+    beginDispatch: () => ({ runId: "run-progress-error" }),
+    reportDispatchTerminal: async ({ status }) => { terminals.push(status); },
+    onProgress: () => { throw new Error("TUI update failed"); },
+  });
+
+  await expect(captain(orchestration, {
+    action: "single", handoffMode: "inline", changeId: "c", cwd: "/p", name: "work", agent: "coder", modelSlot: "craft", task: "work",
+  })).resolves.toMatchObject({ status: "completed", runId: "run-progress-error" });
+  expect(terminals).toEqual(["completed"]);
 });
 
 test("dispatches exactly the explicit parallel tasks and reports terminal lifecycle", async () => {
@@ -347,6 +452,126 @@ test("dispatches exactly the explicit parallel tasks and reports terminal lifecy
       { requestedSlot: "judgment", resolvedSlot: "judgment", model: genericId("p", "m"), thinking: "high", fallbackPath: ["judgment"] },
       { requestedSlot: "craft", resolvedSlot: "craft", model: genericId("p", "m"), thinking: "high", fallbackPath: ["craft"] },
     ],
+  });
+});
+
+test("parallel batch failure preserves completed and failed child terminal truth", async () => {
+  const progress: Array<Record<string, unknown>> = []; const handoffTerminals: Array<{ runId: string; status: string }> = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const { OneShotBatchError } = await import("../../src/runtime/one-shot.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: name, prompt: "Review", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: { single: async () => { throw new Error("unused"); }, parallel: async () => { throw new OneShotBatchError([
+      { status: "fulfilled", value: { name: "a", text: "done" } }, { status: "rejected", reason: new Error("b failed") },
+    ]); }, chain: async () => [] },
+    beginDispatch: () => ({ runId: "run-batch-truth" }),
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } }),
+    validateHandoffReport: async ({ runId }) => ({ runId, artifactId: "report" }),
+    recordHandoffTerminal: async ({ runId, status }) => { handoffTerminals.push({ runId, status }); },
+    reportDispatchTerminal: async () => undefined,
+    onProgress: (event) => { progress.push(event); },
+  });
+
+  await expect(captain(orchestration, { action: "parallel", handoffMode: "managed", changeId: "c", cwd: "/p", tasks: [
+    { name: "a", agent: "reviewer", modelSlot: "craft", task: "a" }, { name: "b", agent: "reviewer", modelSlot: "craft", task: "b" },
+  ] })).resolves.toMatchObject({ status: "failed", failure: { message: "b failed" } });
+  const childTerminal = progress.filter((event) => ["completed", "failed", "canceled"].includes(String(event.type)));
+  expect(childTerminal).toMatchObject([
+    { type: "completed", identity: { name: "a" } }, { type: "failed", identity: { name: "b" }, summary: "b failed" },
+  ]);
+  expect(handoffTerminals).toEqual([{ runId: "run-batch-truth-2", status: "failed" }]);
+});
+
+test("terminalizes only managed handoffs that were created before parallel handoff setup failed", async () => {
+  const handoffs: string[] = [];
+  const terminals: Array<{ runId: string; status: string }> = [];
+  const dispatchTerminals: Array<{ status: string; summary: string }> = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: { single: async () => ({ name: "unused", text: "unused" }), parallel: async () => [], chain: async () => [] },
+    beginDispatch: () => ({ runId: "run-partial" }),
+    createHandoff: async ({ runId }) => {
+      if (runId.endsWith("-2")) throw new Error("second handoff failed");
+      handoffs.push(runId);
+      return { worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } };
+    },
+    recordHandoffTerminal: async ({ runId, status }) => { terminals.push({ runId, status }); },
+    reportDispatchTerminal: async ({ status, summary }) => { dispatchTerminals.push({ status, summary }); },
+  });
+
+  await expect(captain(orchestration, {
+    action: "parallel", handoffMode: "managed", changeId: "c", cwd: "/p", tasks: [
+      { name: "one", agent: "a", modelSlot: "judgment", task: "one" },
+      { name: "two", agent: "a", modelSlot: "craft", task: "two" },
+    ],
+  })).resolves.toMatchObject({
+    status: "failed", action: "parallel", runId: "run-partial",
+    failure: { stage: "handoff", message: "second handoff failed" },
+  });
+  expect(handoffs).toEqual(["run-partial-1"]);
+  expect(terminals).toEqual([{ runId: "run-partial-1", status: "failed" }]);
+  expect(dispatchTerminals).toEqual([{ status: "failed", summary: "parallel failed at handoff: second handoff failed" }]);
+});
+
+test.each([
+  ["worker", async () => { throw new Error("spawn failed"); }],
+  ["handoff_report", async () => ({ name: "one", text: "done" })],
+] as const)("returns structured failure and terminalizes managed one-shot on %s failure", async (expectedStage, executeSingle) => {
+  const terminals: Array<{ runId: string; status: string }> = [];
+  const dispatchTerminals: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: { single: executeSingle, parallel: async () => [], chain: async () => [] },
+    beginDispatch: () => ({ runId: `run-${expectedStage}` }),
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } }),
+    validateHandoffReport: async () => { throw new Error("Managed report is missing"); },
+    recordHandoffTerminal: async ({ runId, status }) => { terminals.push({ runId, status }); },
+    reportDispatchTerminal: async ({ status }) => { dispatchTerminals.push(status); },
+  });
+
+  const result = await captain(orchestration, {
+    action: "single", handoffMode: "managed", changeId: "c", cwd: "/p", name: "one", agent: "a", modelSlot: "craft", task: "work",
+  });
+
+  expect(result).toMatchObject({ status: "failed", action: "single", failure: { stage: expectedStage } });
+  expect(terminals).toEqual([{ runId: `run-${expectedStage}`, status: "failed" }]);
+  expect(dispatchTerminals).toEqual(["failed"]);
+});
+
+test("preserves primary managed failure when handoff terminalization also fails", async () => {
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: { single: async () => { throw new Error("worker primary"); }, parallel: async () => [], chain: async () => [] },
+    beginDispatch: () => ({ runId: "run-cleanup" }),
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } }),
+    recordHandoffTerminal: async () => { throw new Error("terminal write failed"); },
+    reportDispatchTerminal: async () => undefined,
+  });
+
+  await expect(captain(orchestration, {
+    action: "single", handoffMode: "managed", changeId: "c", cwd: "/p", name: "one", agent: "a", modelSlot: "craft", task: "work",
+  })).resolves.toMatchObject({
+    status: "failed", failure: { stage: "worker", message: "worker primary" },
+    cleanupFailures: [{ runId: "run-cleanup", message: "terminal write failed" }],
   });
 });
 
@@ -481,7 +706,7 @@ test("clears the timeout when waited settlement completes first", async () => {
   }
 });
 
-test("wait timeout returns without canceling persistent dispatch settlement", async () => {
+test("persistent dispatch waits for terminal settlement despite wait and timeout hints", async () => {
   let finish!: () => void;
   const completion = new Promise<void>((resolve) => { finish = resolve; });
   const terminal: string[] = [];
@@ -499,13 +724,15 @@ test("wait timeout returns without canceling persistent dispatch settlement", as
     messageStatus: () => "completed",
   });
 
-  await expect(captain(orchestration, {
+  let returned = false;
+  const dispatch = captain(orchestration, {
     action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m",
-    wait: true, timeoutMs: 2,
-  })).resolves.toMatchObject({ runId: "run-send", timedOut: true });
-  expect(terminal).toEqual([]);
+    wait: false, timeoutMs: 2,
+  }).finally(() => { returned = true; });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(returned).toBe(false); expect(terminal).toEqual([]);
   finish();
-  await new Promise((resolve) => setImmediate(resolve));
+  await expect(dispatch).resolves.toMatchObject({ status: "completed", runId: "run-send" });
   expect(terminal).toEqual(["completed"]);
 });
 
@@ -527,7 +754,7 @@ test("maps wait-true semantic cancellation to canceled dispatch terminal", async
 
   await expect(captain(orchestration, {
     action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m", wait: true,
-  })).rejects.toThrow("canceled");
+  })).resolves.toMatchObject({ status: "canceled", failure: { stage: "worker", message: "canceled" } });
   expect(terminal).toEqual(["canceled"]);
 });
 
@@ -576,9 +803,9 @@ test("persistent execution capability rejection invalidates matching evidence wi
 
   const error = await captain(orchestration, {
     action: "send", handoffMode: "inline", changeId: "c", cwd: "/p", workerId: "w", message: "work",
-  }).catch((cause: unknown) => cause) as Error & { code?: string };
+  });
 
-  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(error).toMatchObject({ status: "failed", failure: { stage: "worker", code: "MODEL_CAPABILITY_REJECTED" } });
   expect(sends).toHaveBeenCalledTimes(1);
   expect(invalidated).toHaveBeenCalledWith({ model: genericId("p", "m"), thinking: "high" }, expect.anything());
 });
@@ -606,9 +833,9 @@ test("late persistent execution rejection invalidates evidence during tracked se
   await captain(orchestration, {
     action: "send", handoffMode: "inline", changeId: "c", cwd: "/p", workerId: "w", message: "work",
   });
-  const error = await tracked!.catch((cause: unknown) => cause) as Error & { code?: string };
+  const error = await tracked!;
 
-  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_REJECTED" });
+  expect(error).toMatchObject({ status: "failed", failure: { stage: "worker", code: "MODEL_CAPABILITY_REJECTED" } });
   expect(invalidated).toHaveBeenCalledWith({ model: genericId("p", "m"), thinking: "high" }, rejection);
 });
 
@@ -645,6 +872,29 @@ test("settles create and persistent-send dispatch runs without creating extra wo
   ]);
 });
 
+test("managed persistent create terminalizes its created handoff when worker startup fails", async () => {
+  const handoffTerminals: Array<{ runId: string; status: string }> = [];
+  const dispatchTerminals: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    createWorker: async () => { throw new Error("spawn failed"); },
+    beginDispatch: () => ({ runId: "run-managed-create" }),
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } }),
+    recordHandoffTerminal: async ({ runId, status }) => { handoffTerminals.push({ runId, status }); },
+    reportDispatchTerminal: async ({ status }) => { dispatchTerminals.push(status); },
+  });
+
+  await expect(captain(orchestration, {
+    action: "create", handoffMode: "managed", changeId: "c", cwd: "/p", name: "worker", agent: "coder", modelSlot: "craft", brief: "work",
+  })).resolves.toMatchObject({ status: "failed", action: "create", runId: "run-managed-create", failure: { stage: "worker", message: "spawn failed" } });
+  expect(handoffTerminals).toEqual([{ runId: "run-managed-create", status: "failed" }]);
+  expect(dispatchTerminals).toEqual(["failed"]);
+});
+
 test("reports failed create dispatch without spawning replacement work", async () => {
   const terminal: string[] = [];
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
@@ -661,7 +911,7 @@ test("reports failed create dispatch without spawning replacement work", async (
   await expect(captain(orchestration, {
     action: "create", handoffMode: "inline", changeId: "horsepower-alpha1", cwd: "/project",
     name: "reviewer-1", agent: "reviewer", modelSlot: "judgment",
-  })).rejects.toThrow("startup failed");
+  })).resolves.toMatchObject({ status: "failed", failure: { stage: "worker", message: "startup failed" } });
   expect(terminal).toEqual(["failed"]);
 });
 

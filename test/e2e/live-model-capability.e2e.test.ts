@@ -122,15 +122,24 @@ async function runtimeHarness() {
     capabilityProbe: fixture.probe,
     runOpenSpec,
     readText,
+    loadTaskInventory: async () => ({
+      changeId: "change-a", projectRoot: project, digest: "a".repeat(64),
+      sections: [{ id: "1", title: "Capability", tasks: Array.from({ length: 7 }, (_, index) => ({ id: `1.${index + 1}`, description: `Capability ${index + 1}`, status: "pending" as const, sectionId: "1" })) }],
+    }),
   });
-  const scopes = ["fresh", "reuse", "revision", "one-reject", "one-reprobe", "rpc-reject", "rpc-reprobe"];
-  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: scopes, mode: "multi_agent" });
+  const scopes = Array.from({ length: 7 }, (_, index) => `1.${index + 1}`);
+  const campaign = await runtime.beginImplementationCampaign({
+    changeId: "change-a", projectId: project, selectedTaskIds: scopes,
+    selectedTasks: scopes.map((id) => ({ id, description: `Capability ${id.split(".")[1]}`, status: "pending" as const, sectionId: "1" })),
+    inventoryDigest: "a".repeat(64), mode: "multi_agent",
+  });
   let revisionFlag = false;
   const context = {
     captain: true,
     cwd: project,
     modelRegistry: { getAll: () => [{
       provider: genericId.split("/")[0]!, id: genericId.split("/")[1]!, reasoning: revisionFlag,
+      thinkingLevelMap: { high: "high" },
     }] } as never,
   };
   const common = {
@@ -142,10 +151,10 @@ async function runtimeHarness() {
 
 test("one-shot and persistent workers do not preflight upstream across revisions", async () => {
   const { fixture, runtime, context, common, setRevision } = await runtimeHarness();
-  await runtime.execute({ action: "single", ...common, taskScope: "fresh", name: "first", task: "first" }, context);
-  await runtime.execute({ action: "create", ...common, taskScope: "reuse", name: "persistent" }, context);
+  await runtime.execute({ action: "single", ...common, taskScope: "1.1", name: "first", task: "first" }, context);
+  await runtime.execute({ action: "create", ...common, taskScope: "1.2", name: "persistent" }, context);
   setRevision();
-  await runtime.execute({ action: "single", ...common, taskScope: "revision", name: "second", task: "second" }, context);
+  await runtime.execute({ action: "single", ...common, taskScope: "1.3", name: "second", task: "second" }, context);
 
   expect((await fixture.events()).map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([
     "one-shot:high", "persistent:high", "one-shot:high",
@@ -155,17 +164,17 @@ test("one-shot and persistent workers do not preflight upstream across revisions
 
 test("explicit worker rejections invalidate evidence and never retry with downgraded thinking", async () => {
   const { fixture, runtime, context, common } = await runtimeHarness();
-  await runtime.execute({ action: "single", ...common, taskScope: "fresh", name: "fresh", task: "fresh" }, context);
+  await runtime.execute({ action: "single", ...common, taskScope: "1.1", name: "fresh", task: "fresh" }, context);
 
   await fixture.set({ rejectNextOneShot: true });
-  await expect(runtime.execute({ action: "single", ...common, taskScope: "one-reject", name: "rejected", task: "reject" }, context))
-    .rejects.toMatchObject({ code: "MODEL_CAPABILITY_REJECTED", status: "unsupported" });
-  await runtime.execute({ action: "single", ...common, taskScope: "one-reprobe", name: "after-one", task: "after" }, context);
+  await expect(runtime.execute({ action: "single", ...common, taskScope: "1.4", name: "rejected", task: "reject" }, context))
+    .resolves.toMatchObject({ status: "failed", failure: { code: "MODEL_CAPABILITY_FAILED" } });
+  await runtime.execute({ action: "single", ...common, taskScope: "1.5", name: "after-one", task: "after" }, context);
 
   await fixture.set({ rejectNextPersistent: true });
-  await expect(runtime.execute({ action: "create", ...common, taskScope: "rpc-reject", name: "rpc-rejected" }, context))
-    .rejects.toMatchObject({ code: "MODEL_CAPABILITY_REJECTED", status: "unsupported" });
-  await runtime.execute({ action: "create", ...common, taskScope: "rpc-reprobe", name: "rpc-after" }, context);
+  await expect(runtime.execute({ action: "create", ...common, taskScope: "1.6", name: "rpc-rejected" }, context))
+    .resolves.toMatchObject({ status: "failed", failure: { code: "MODEL_CAPABILITY_FAILED" } });
+  await runtime.execute({ action: "create", ...common, taskScope: "1.7", name: "rpc-after" }, context);
 
   const events = await fixture.events();
   expect(events.map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([

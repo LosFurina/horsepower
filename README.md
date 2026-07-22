@@ -46,7 +46,9 @@ Horsepower does not preflight selected models against the upstream before dispat
 
 The only tool is `horsepower_subagent`. Legacy `single`, `parallel`, and `chain` actions coexist with persistent `create`, `send`, `status`, `list`, `read`, `abort`, and `destroy` actions. Only the Captain may dispatch workers; workers cannot delegate recursively.
 
-Before implementation work, the user selects `multi_agent` or `main_agent` with `/horsepower-campaign`. The selection is scoped to one change, task scope, campaign, and Pi process. `main_agent` blocks implementation workers unless the user separately authorizes a bounded reviewer. Review campaigns have Captain-defined finite budgets and root-cause finding deduplication; a reviewer verdict never schedules another worker.
+Before implementation work, `/horsepower-campaign` loads one apply-ready change's current OpenSpec tasks. The user explicitly selects all unfinished tasks, unfinished tasks by section, or exact unfinished task IDs, confirms the normalized list, and then selects `multi_agent` or `main_agent`. A campaign is scoped to one change, those canonical task IDs, and the current Pi process. Ranges, free-form labels, completed tasks, and cross-change IDs are rejected. Selected tasks are revalidated before every work-producing dispatch; relevant drift requires a new campaign. Successful confirmation starts exactly one Captain turn automatically—no separate `go` message is needed.
+
+One-shot workers stream bounded, redacted assistant/tool lifecycle updates. Each display includes dispatch name, agent and role, requested/resolved slot, concrete model, thinking level, and handoff mode. Every accepted dispatch returns a structured `completed`, `failed`, or `canceled` result; managed failures terminalize created handoffs instead of leaving silent orphans. `main_agent` blocks implementation workers unless the user separately authorizes a bounded reviewer. Review campaigns have Captain-defined finite budgets and root-cause finding deduplication; a reviewer verdict never schedules another worker.
 
 ## Managed handoffs
 

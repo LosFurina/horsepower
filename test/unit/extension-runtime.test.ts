@@ -12,6 +12,20 @@ function fakeManager() {
   };
 }
 
+function campaignSelection(ids: readonly string[]) {
+  return {
+    selectedTaskIds: [...ids],
+    selectedTasks: ids.map((id) => ({ id, description: `Task ${id}`, status: "pending" as const, sectionId: id.split(".")[0]! })),
+    inventoryDigest: "a".repeat(64),
+  };
+}
+function taskInventory(projectRoot: string, ids: readonly string[]) {
+  return async ({ changeId }: { changeId: string }) => ({
+    changeId, projectRoot, digest: "a".repeat(64),
+    sections: [{ id: "1", title: "Tasks", tasks: ids.map((id) => ({ id, description: `Task ${id}`, status: "pending" as const, sectionId: id.split(".")[0]! })) }],
+  });
+}
+
 const modelRegistry = {
   getAll: () => [{
     provider: "provider", id: "model", reasoning: true,
@@ -62,13 +76,14 @@ test("campaign creation binds only to a resolved existing OpenSpec change", asyn
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
   const runtime = createHorsepowerRuntime({
     homeDir: "/missing-home", bundledAgentsDir: "/missing-agents", runOpenSpec, readText,
+    loadTaskInventory: taskInventory("/project", ["1.1"]),
   });
 
   await expect(runtime.beginImplementationCampaign({
-    changeId: "你来决定", projectId: "/project", taskScopes: ["1.1"], mode: "multi_agent",
+    changeId: "你来决定", projectId: "/project", ...campaignSelection(["1.1"]), mode: "multi_agent",
   })).rejects.toThrow();
   await expect(runtime.beginImplementationCampaign({
-    changeId: "real-change", projectId: "/project", taskScopes: ["1.1"], mode: "multi_agent",
+    changeId: "real-change", projectId: "/project", ...campaignSelection(["1.1"]), mode: "multi_agent",
   })).resolves.toMatchObject({ changeId: "real-change" });
 });
 
@@ -104,22 +119,61 @@ test("shares process-local capability evidence across one-shot and persistent cr
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
   const runtime = createHorsepowerRuntime({
     homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText,
-    oneShot: oneShot as never, capabilityProbe,
+    oneShot: oneShot as never, capabilityProbe, loadTaskInventory: taskInventory(project, ["1.1", "1.2"]),
   });
-  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["one", "two"], mode: "multi_agent" });
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1", "1.2"]), mode: "multi_agent" });
   const common = { changeId: "change-a", agent: "coder", modelSlot: "craft", implementationCampaignId: campaign.campaignId, workKind: "implementation" };
   const context = {
     captain: true,
     cwd: project,
-    modelRegistry: { getAll: () => [{ provider: "provider", id: "model", reasoning: true }] } as never,
+    modelRegistry: modelRegistry as never,
   };
 
-  await runtime.execute({ action: "single", handoffMode: "inline", ...common, taskScope: "one", name: "one", task: "work" }, context);
-  await runtime.execute({ action: "create", handoffMode: "inline", ...common, taskScope: "two", name: "two" }, context);
+  await runtime.execute({ action: "single", handoffMode: "inline", ...common, taskScope: "1.1", name: "one", task: "work" }, context);
+  await runtime.execute({ action: "create", handoffMode: "inline", ...common, taskScope: "1.2", name: "two" }, context);
 
   expect(capabilityProbe.probe).not.toHaveBeenCalled();
   expect(oneShot.single).toHaveBeenCalledTimes(1);
   expect(manager.create).toHaveBeenCalledTimes(1);
+  await runtime.shutdown();
+});
+
+test("dispatch revalidates selected task snapshot before worker side effects while ignoring unselected drift", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-task-drift-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const agents = join(root, "agents");
+  await mkdir(join(home, ".pi", "agent", "horsepower"), { recursive: true });
+  await mkdir(agents, { recursive: true });
+  await writeFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), JSON.stringify({ slots: {
+    judgment: { model: "provider/model", thinking: "high" }, craft: { model: "provider/model", thinking: "high" }, utility: { model: "provider/model", thinking: "off" },
+  } }));
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: []\nstandards: []\n---\nCode only.\n");
+  const runOpenSpec = vi.fn(async (args: readonly string[]) => args[0] === "--version"
+    ? { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false }
+    : args[0] === "doctor" ? { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: project } }), stderr: "", truncated: false }
+      : args[0] === "status" ? { code: 0, stdout: JSON.stringify({ changeName: "change-a", isComplete: true }), stderr: "", truncated: false }
+        : { code: 0, stdout: JSON.stringify({ summary: { totals: { failed: 0 } } }), stderr: "", truncated: false });
+  const readText = vi.fn(async (path: string) => path.endsWith("SKILL.md")
+    ? "name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: 1.6.0\n"
+    : path.endsWith("opsx-apply.md") ? "Implement tasks from an OpenSpec change" : (await import("node:fs/promises")).readFile(path, "utf8"));
+  let selected = { id: "1.1", description: "Task 1.1", status: "pending" as "pending" | "complete", sectionId: "1" };
+  let unrelated = { id: "9.9", description: "Unrelated", status: "pending" as const, sectionId: "9" };
+  const loadTaskInventory = async () => ({ changeId: "change-a", projectRoot: project, digest: "a".repeat(64), sections: [
+    { id: "1", title: "Selected", tasks: [selected] }, { id: "9", title: "Other", tasks: [unrelated] },
+  ] });
+  const oneShot = { single: vi.fn(async (input) => ({ name: input.name, text: "done" })), parallel: vi.fn(), chain: vi.fn() };
+  const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
+  const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, runOpenSpec, readText, loadTaskInventory, oneShot: oneShot as never });
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1"]), mode: "multi_agent" });
+  const context = { captain: true, cwd: project, modelRegistry: modelRegistry as never };
+  const input = { action: "single", handoffMode: "inline", changeId: "change-a", agent: "coder", modelSlot: "craft", task: "work", taskScope: "1.1", workKind: "implementation", implementationCampaignId: campaign.campaignId };
+
+  unrelated = { ...unrelated, description: "Changed unrelated" };
+  await expect(runtime.execute({ ...input, name: "allowed" }, context)).resolves.toMatchObject({ status: "completed" });
+  selected = { ...selected, status: "complete" };
+  await expect(runtime.execute({ ...input, name: "blocked" }, context)).rejects.toThrow("Selected OpenSpec task drifted: 1.1");
+  expect(oneShot.single).toHaveBeenCalledTimes(1);
   await runtime.shutdown();
 });
 
@@ -159,12 +213,13 @@ test("configured dispatch notification uses injected transport and shutdown aban
       config: { url: "https://example.invalid/hook", auth: { mode: "none" } },
       notifications: { dispatch: true }, fetch: fetch as never, sleep, retryDelaysMs: [0, 1_000],
     },
+    loadTaskInventory: taskInventory(project, ["1.1"]),
   });
 
-  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["notification"], mode: "multi_agent" });
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1"]), mode: "multi_agent" });
   await runtime.execute({
     action: "create", handoffMode: "inline", changeId: "change-a", name: "w", agent: "coder", modelSlot: "craft",
-    implementationCampaignId: campaign.campaignId, taskScope: "notification", workKind: "implementation",
+    implementationCampaignId: campaign.campaignId, taskScope: "1.1", workKind: "implementation",
   }, { captain: true, cwd: project, modelRegistry: modelRegistry as never });
   await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
   await vi.waitFor(() => expect(sleep).toHaveBeenCalledTimes(1));
@@ -328,13 +383,14 @@ test("shutdown waits for an admitted one-shot, terminal notification, then destr
       notifications: { dispatch: true },
       fetch: fetch as never,
     },
+    loadTaskInventory: taskInventory(project, ["1.1"]),
   });
   const ctx = { captain: true, cwd: project, modelRegistry: modelRegistry as never };
 
-  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["shutdown"], mode: "multi_agent" });
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1"]), mode: "multi_agent" });
   const execution = runtime.execute({
     action: "single", handoffMode: "inline", changeId: "change-a", name: "task", agent: "coder", modelSlot: "craft", task: "work",
-    implementationCampaignId: campaign.campaignId, taskScope: "shutdown", workKind: "implementation",
+    implementationCampaignId: campaign.campaignId, taskScope: "1.1", workKind: "implementation",
   }, ctx);
   await vi.waitFor(() => expect(oneShot.single).toHaveBeenCalledTimes(1));
   const shutdown = runtime.shutdown();
@@ -468,12 +524,12 @@ test("advancing actions use official OpenSpec checks in the active cwd", async (
     return (await import("node:fs/promises")).readFile(path, "utf8");
   });
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
-  const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText });
+  const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText, loadTaskInventory: taskInventory(project, ["1.1"]) });
 
-  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, taskScopes: ["cwd"], mode: "multi_agent" });
+  const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1"]), mode: "multi_agent" });
   await runtime.execute({
     action: "create", handoffMode: "inline", changeId: "change-a", cwd: "/stale", name: "w", agent: "coder", modelSlot: "craft",
-    implementationCampaignId: campaign.campaignId, taskScope: "cwd", workKind: "implementation",
+    implementationCampaignId: campaign.campaignId, taskScope: "1.1", workKind: "implementation",
   }, { captain: true, cwd: project, modelRegistry: modelRegistry as never });
 
   expect(calls.map((call) => call.args[0])).toEqual([

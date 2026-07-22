@@ -6,6 +6,7 @@ function setup(results: Record<string, Result>, piIntegration: "current" | "miss
   return import("../../src/openspec/boundary.js").then(({ createOpenSpecBoundary }) =>
     createOpenSpecBoundary({
       run: async (args) => results[args.join(" ")] ?? { code: 1, stdout: "", stderr: "unexpected command" },
+      inspectPath: async () => ({ isFile: () => true, isSymbolicLink: () => false }),
       readText: async (path) => {
         if (piIntegration === "missing") throw Object.assign(new Error("missing"), { code: "ENOENT" });
         if (path.endsWith("SKILL.md")) {
@@ -149,6 +150,63 @@ test("blocks invalid change context without modifying OpenSpec facts", async () 
 
   await expect(boundary.authorize({ action: "chain", changeId: "horsepower-alpha1", cwd: "/project" }))
     .rejects.toThrow("OpenSpec change is not valid: horsepower-alpha1");
+});
+
+test("loads bounded tasks only from the resolved official status artifact after strict checks", async () => {
+  const calls: string[] = [];
+  const reads: string[] = [];
+  const tasksPath = "/project/openspec/changes/horsepower-alpha1/tasks.md";
+  const boundary = await import("../../src/openspec/boundary.js").then(({ createOpenSpecBoundary }) => createOpenSpecBoundary({
+    run: async (args) => {
+      calls.push(args.join(" "));
+      if (args[0] === "status") return { ...healthy["status --change horsepower-alpha1 --json"], stdout: JSON.stringify({
+        changeName: "horsepower-alpha1", isComplete: true,
+        artifactPaths: { tasks: { resolvedOutputPath: tasksPath } },
+      }) };
+      return healthy[args.join(" ") as keyof typeof healthy] ?? { code: 1, stdout: "", stderr: "unexpected" };
+    },
+    inspectPath: async (path) => { expect(path).toBe(tasksPath); return { isFile: () => true, isSymbolicLink: () => false }; },
+    readText: async (path) => {
+      reads.push(path);
+      if (path === tasksPath) return "## 1. Work\n- [ ] 1.1 Implement inventory\n- [x] 1.2 Plan inventory\n";
+      return path.endsWith("SKILL.md")
+        ? 'name: openspec-apply-change\nallowed-tools: Bash(openspec:*)\nauthor: openspec\ngeneratedBy: "1.6.0"'
+        : "Implement tasks from an OpenSpec change.";
+    },
+  }));
+
+  await expect(boundary.loadTaskInventory({ cwd: "/project/src", changeId: "horsepower-alpha1" })).resolves.toMatchObject({
+    changeId: "horsepower-alpha1", projectRoot: "/project", sections: [{ id: "1", tasks: [{ id: "1.1", status: "pending" }, { id: "1.2", status: "complete" }] }],
+  });
+  expect(calls).toEqual(["--version", "doctor --json", "status --change horsepower-alpha1 --json", "validate horsepower-alpha1 --strict --json"]);
+  expect(reads.at(-1)).toBe(tasksPath);
+});
+
+test.each([
+  ["missing path", undefined, { isFile: (): boolean => true, isSymbolicLink: (): boolean => false }, "no resolved tasks artifact"],
+  ["glob path", "/project/openspec/changes/c/tasks/**/*.md", { isFile: (): boolean => true, isSymbolicLink: (): boolean => false }, "no resolved tasks artifact"],
+  ["escape", "/outside/tasks.md", { isFile: (): boolean => true, isSymbolicLink: (): boolean => false }, "escapes project root"],
+  ["symlink", "/project/tasks.md", { isFile: (): boolean => true, isSymbolicLink: (): boolean => true }, "regular non-symbolic-link"],
+  ["directory", "/project/tasks.md", { isFile: (): boolean => false, isSymbolicLink: (): boolean => false }, "regular non-symbolic-link"],
+] as const)("rejects unsafe task artifact %s", async (_name, resolvedOutputPath, info, message) => {
+  const status = {
+    ...healthy,
+    "status --change horsepower-alpha1 --json": {
+      code: 0, stderr: "", stdout: JSON.stringify({
+        changeName: "horsepower-alpha1", isComplete: true,
+        artifactPaths: { tasks: { ...(resolvedOutputPath === undefined ? {} : { resolvedOutputPath }) } },
+      }),
+    },
+  };
+  const { createOpenSpecBoundary } = await import("../../src/openspec/boundary.js");
+  const boundary = createOpenSpecBoundary({
+    run: async (args) => status[args.join(" ") as keyof typeof status] ?? { code: 1, stdout: "", stderr: "" },
+    inspectPath: async () => info,
+    readText: async (path) => path.endsWith("SKILL.md")
+      ? 'name: openspec-apply-change\nallowed-tools: Bash(openspec:*)\nauthor: openspec\ngeneratedBy: "1.6.0"'
+      : path.endsWith("opsx-apply.md") ? "Implement tasks from an OpenSpec change." : "## 1. A\n- [ ] 1.1 T\n",
+  });
+  await expect(boundary.loadTaskInventory({ cwd: "/project", changeId: "horsepower-alpha1" })).rejects.toThrow(message);
 });
 
 test("permits safe observation and cleanup actions without OpenSpec", async () => {

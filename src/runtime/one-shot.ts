@@ -1,5 +1,30 @@
 import type { ThinkingLevel } from "../slots/registry.js";
 
+export type OneShotProgress =
+  | { type: "accepted" }
+  | { type: "starting" }
+  | { type: "assistant"; summary: string }
+  | { type: "tool_start" | "tool_update"; toolName: string; toolCallId: string; operation: string; target?: string }
+  | { type: "tool_end"; toolName: string; toolCallId: string; operation: string; target?: string; isError: boolean }
+  | { type: "handoff_created"; runId: string }
+  | { type: "report_validated"; runId: string }
+  | { type: "completed" }
+  | { type: "failed"; stage: string; summary: string }
+  | { type: "canceled"; summary: string };
+
+export interface WorkerIdentity {
+  name: string;
+  agent: string;
+  role: string;
+  requestedSlot: string;
+  resolvedSlot: string;
+  model: string;
+  thinking: ThinkingLevel;
+  handoffMode: "managed" | "inline";
+  invocationId: string;
+  runId?: string;
+}
+
 export interface OneShotInvocation {
   name: string;
   agent: string;
@@ -10,7 +35,9 @@ export interface OneShotInvocation {
   prompt: string;
   tools: readonly string[];
   task: string;
+  identity?: WorkerIdentity;
   signal?: AbortSignal;
+  onProgress?: (event: OneShotProgress) => void;
 }
 
 export interface OneShotUsage {
@@ -30,6 +57,21 @@ export interface OneShotExecutor {
   single(task: OneShotInvocation): Promise<OneShotResult>;
   parallel(tasks: readonly OneShotInvocation[]): Promise<OneShotResult[]>;
   chain(tasks: readonly OneShotInvocation[]): Promise<OneShotResult[]>;
+}
+
+export type OneShotBatchOutcome =
+  | { status: "fulfilled"; value: OneShotResult }
+  | { status: "rejected"; reason: unknown }
+  | { status: "skipped" };
+
+export class OneShotBatchError extends Error {
+  readonly outcomes: readonly OneShotBatchOutcome[];
+  constructor(outcomes: readonly OneShotBatchOutcome[]) {
+    const rejected = outcomes.find((outcome): outcome is { status: "rejected"; reason: unknown } => outcome.status === "rejected");
+    super(rejected?.reason instanceof Error ? rejected.reason.message : "One-shot batch did not complete every invocation");
+    this.name = "OneShotBatchError";
+    this.outcomes = outcomes;
+  }
 }
 
 export interface OneShotExecutorOptions {
@@ -80,24 +122,34 @@ export function createOneShotExecutor(options: OneShotExecutorOptions): OneShotE
     async parallel(tasks) {
       if (tasks.length > 8) throw new Error("Parallel one-shot accepts at most 8 tasks");
       preflight(tasks);
-      const results = new Array<OneShotResult>(tasks.length);
+      const outcomes = new Array<OneShotBatchOutcome>(tasks.length);
       let next = 0;
       async function worker(): Promise<void> {
         while (next < tasks.length) {
           const index = next;
           next += 1;
-          results[index] = await single(tasks[index]!);
+          try { outcomes[index] = { status: "fulfilled", value: await single(tasks[index]!) }; }
+          catch (reason) { outcomes[index] = { status: "rejected", reason }; }
         }
       }
       await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
-      return results;
+      if (outcomes.some((outcome) => outcome.status === "rejected")) throw new OneShotBatchError(outcomes);
+      return outcomes.map((outcome) => (outcome as { status: "fulfilled"; value: OneShotResult }).value);
     },
     async chain(tasks) {
       preflight(tasks);
+      const outcomes: OneShotBatchOutcome[] = [];
       const results: OneShotResult[] = [];
       for (const task of tasks) {
         const previous = results.at(-1)?.text ?? "";
-        results.push(await single({ ...task, task: task.task.replaceAll("{previous}", previous) }));
+        try {
+          const value = await single({ ...task, task: task.task.replaceAll("{previous}", previous) });
+          outcomes.push({ status: "fulfilled", value }); results.push(value);
+        } catch (reason) {
+          outcomes.push({ status: "rejected", reason });
+          while (outcomes.length < tasks.length) outcomes.push({ status: "skipped" });
+          throw new OneShotBatchError(outcomes);
+        }
       }
       return results;
     },
