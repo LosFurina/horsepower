@@ -117,6 +117,13 @@ if [ -z "$LOCALE" ] && [ "$INTERACTIVE" -eq 1 ]; then
   case "$LANGUAGE_CHOICE" in 2|zh-CN) LOCALE=zh-CN ;; *) LOCALE=en ;; esac
 fi
 if [ -z "$LOCALE" ]; then LOCALE=en; fi
+COLOR_BOLD_CYAN=""; COLOR_GREEN=""; COLOR_YELLOW=""; COLOR_RESET=""
+if [ "$INTERACTIVE" -eq 1 ] && [ -t 4 ] && [ -z "${NO_COLOR:-}" ]; then
+  COLOR_BOLD_CYAN=$(printf '\033[1;36m')
+  COLOR_GREEN=$(printf '\033[32m')
+  COLOR_YELLOW=$(printf '\033[33m')
+  COLOR_RESET=$(printf '\033[0m')
+fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/horsepower-install.XXXXXX") || fail "unable to create temporary directory"
 cleanup() { rm -rf "$TMP"; }
@@ -192,6 +199,8 @@ HOME="$HOME_DIR" "$STAGED/bin/horsepower" skill-audit --json >"$AUDIT_JSON" \
 AUDIT_GATE=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).data;process.stdout.write(r.status!=="complete"||r.externalCount>0?"warn":"clean")' "$AUDIT_JSON") \
   || fail "invalid staged Skill audit output"
 if [ "$INTERACTIVE" -eq 1 ]; then
+  if [ "$LOCALE" = "zh-CN" ]; then printf '\n%s%s%s\n\n' "$COLOR_BOLD_CYAN" "安全检查" "$COLOR_RESET" >&4
+  else printf '\n%s%s%s\n\n' "$COLOR_BOLD_CYAN" "Safety check" "$COLOR_RESET" >&4; fi
   if [ "$LOCALE" = "zh-CN" ]; then
     printf '%s\n' "Superpowers 等外部技能仍由用户管理；主 Captain 遵循 Pi 的正常发现规则，Horsepower worker 始终使用 --no-skills。" >&4
   else
@@ -203,8 +212,9 @@ if [ "$AUDIT_GATE" = "warn" ]; then
   HOME="$HOME_DIR" "$STAGED/bin/horsepower" skill-audit --locale "$LOCALE" >"$AUDIT_TEXT" || fail "unable to render staged Skill audit"
   if [ "$INTERACTIVE" -eq 1 ]; then
     cat "$AUDIT_TEXT" >&4
-    if [ "$LOCALE" = "zh-CN" ]; then printf '%s ' "Worker 使用 --no-skills，但主 Captain 仍可能受这些技能影响。继续？[y/N]：" >&4
-    else printf '%s ' "Horsepower workers use --no-skills, but the main Captain may still be influenced. Continue? [y/N]:" >&4; fi
+    printf '\n' >&4
+    if [ "$LOCALE" = "zh-CN" ]; then printf '%s%s%s ' "$COLOR_YELLOW" "Worker 使用 --no-skills，但主 Captain 仍可能受这些技能影响。继续？[y/N]：" "$COLOR_RESET" >&4
+    else printf '%s%s%s ' "$COLOR_YELLOW" "Horsepower workers use --no-skills, but the main Captain may still be influenced. Continue? [y/N]:" "$COLOR_RESET" >&4; fi
     IFS= read -r AUDIT_CONFIRM <&3 || AUDIT_CONFIRM=""
     TTY_CONSUMED=$((TTY_CONSUMED + 1))
     case "$AUDIT_CONFIRM" in y|Y|yes) ;; *) fail "Skill audit declined before activation" ;; esac
@@ -301,7 +311,7 @@ elif [ "$INTERACTIVE" -eq 1 ] && [ "$CONFIGURATION_COMPLETE" -eq 0 ]; then
 fi
 
 if [ "$LOCALE" = "zh-CN" ]; then
-  printf '%s\n' "Horsepower 安装成功。"
+  printf '\n%s%s%s\n' "$COLOR_GREEN" "Horsepower 安装成功。" "$COLOR_RESET"
   if [ "$MODEL_SETUP_COMPLETE" -eq 1 ]; then
     printf '%s\n' "模型设置已完成。"
   else
@@ -310,7 +320,7 @@ if [ "$LOCALE" = "zh-CN" ]; then
   fi
   if [ "$INTERACTIVE" -eq 0 ] || [ "$CONFIGURATION_COMPLETE" -eq 0 ]; then printf '%s\n' "完整配置：horsepower configure --interactive"; fi
 else
-  printf '%s\n' "Horsepower installed successfully."
+  printf '\n%s%s%s\n' "$COLOR_GREEN" "Horsepower installed successfully." "$COLOR_RESET"
   if [ "$MODEL_SETUP_COMPLETE" -eq 1 ]; then
     printf '%s\n' "Model setup completed."
   else

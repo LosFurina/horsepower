@@ -10,7 +10,7 @@ import { parseReleaseCompatibility, validateReleaseCompatibility } from "../rele
 import { createHandoffStore } from "../handoffs/store.js";
 import { message as localizedMessage, resolveOutputLocale, validateOutputLocale, type MessageId, type OutputLocale } from "../localization/index.js";
 import { createSlotRegistry, thinkingLevels, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
-import { auditSkillExposure, type StaticSkillResolver, type SkillAuditResult } from "../skills/audit.js";
+import { auditSkillExposure, groupAuditSkillNames, type StaticSkillResolver, type SkillAuditResult } from "../skills/audit.js";
 import type { PiModelCatalog } from "../capabilities/model-catalog.js";
 import type { ModelCapabilityProbe } from "../runtime/model-capability-probe.js";
 import { collectGuidedSetup, commitSetup, requiredSetupSlots, SetupFailure, type SetupTerminal } from "./setup.js";
@@ -904,8 +904,8 @@ export function createCli(options: CliOptions) {
       if (machine) return { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" };
       if (command === "help") return { exitCode, stdout: `${(result.data as { commands: string[] }).commands.join("\n")}\n`, stderr: "" };
       if (audit) {
-        const rows = audit.skills.map((skill) => `- ${skill.name} | ${skill.scope} | ${skill.source} | ${skill.path} | ${skill.evidence}`);
-        const text = [summary, ...rows, localizedMessage(locale, "audit.boundary"), localizedMessage(locale, "audit.scope"), ...(audit.status === "complete" ? [] : [localizedMessage(locale, "audit.incomplete")]), localizedMessage(locale, "audit.candidates"), audit.candidateScanCommand].join("\n");
+        const rows = groupAuditSkillNames(audit.skills).map(({ group, names }) => `- ${group}: ${names.join(", ")}`);
+        const text = [summary, ...rows, ...(audit.skills.length > 0 ? [localizedMessage(locale, "audit.details")] : []), localizedMessage(locale, "audit.boundary"), localizedMessage(locale, "audit.scope"), ...(audit.status === "complete" ? [] : [localizedMessage(locale, "audit.incomplete")]), localizedMessage(locale, "audit.candidates"), audit.candidateScanCommand].join("\n");
         return { exitCode, stdout: `${text}\n`, stderr: "" };
       }
       return { exitCode, stdout: `${summary}\n`, stderr: "" };

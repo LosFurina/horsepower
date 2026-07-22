@@ -5,10 +5,10 @@ import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import { createCli } from "./app.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
-import { createPiModelCatalog } from "../capabilities/model-catalog.js";
+import { loadSelectablePiModelCatalog } from "../capabilities/model-catalog.js";
 import { createPiCapabilityProbe } from "../runtime/pi-capability-probe.js";
 import { createSetupTerminal } from "./terminal.js";
-import { ModelRegistry, ModelRuntime } from "../capabilities/pi-model-registry.js";
+import { ModelRuntime, resolveModelScope, SettingsManager } from "../capabilities/pi-model-registry.js";
 
 async function confirm(message: string): Promise<boolean | undefined> {
   let input: Readable = process.stdin;
@@ -45,9 +45,13 @@ const interactive = Boolean((process.stdin.isTTY && process.stderr.isTTY) || pro
 let modelCatalog;
 try {
   const runtime = await ModelRuntime.create();
-  const registry = new ModelRegistry(runtime);
-  await registry.refresh();
-  modelCatalog = createPiModelCatalog(registry);
+  await runtime.refresh();
+  const enabledModels = SettingsManager.create(process.cwd()).getEnabledModels();
+  modelCatalog = await loadSelectablePiModelCatalog(
+    runtime,
+    enabledModels,
+    async (patterns) => (await resolveModelScope([...patterns], runtime)).map(({ model }) => model),
+  );
 } catch {
   modelCatalog = { status: "unavailable" as const, reason: "registry-error" as const };
 }

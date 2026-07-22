@@ -2,3 +2,5 @@
 // The CLI bundle resolves these concrete modules instead of the audit-only package-root alias.
 export { ModelRegistry } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/model-registry.js";
 export { ModelRuntime } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/model-runtime.js";
+export { resolveModelScope } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/model-resolver.js";
+export { SettingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js";

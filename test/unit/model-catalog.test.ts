@@ -48,6 +48,26 @@ test("reports empty and unavailable current Pi catalogs without throwing", async
   });
 });
 
+test("uses the same authenticated and enabled model set as Pi model selection", async () => {
+  const { loadSelectablePiModelCatalog } = await import("../../src/capabilities/model-catalog.js");
+  const authenticated = [fixtureEntry({ [routeKey]: "authenticated", id: "available" })];
+  const scoped = [fixtureEntry({ [routeKey]: "authenticated", id: "enabled" })];
+  const getAvailable = vi.fn(async () => authenticated);
+  const resolveEnabled = vi.fn(async () => scoped);
+
+  await expect(loadSelectablePiModelCatalog({ getAvailable }, ["authenticated/enabled"], resolveEnabled)).resolves.toMatchObject({
+    status: "available",
+    modelIds: ["authenticated/enabled"],
+  });
+  expect(resolveEnabled).toHaveBeenCalledWith(["authenticated/enabled"]);
+
+  await expect(loadSelectablePiModelCatalog({ getAvailable }, undefined, resolveEnabled)).resolves.toMatchObject({
+    status: "available",
+    modelIds: ["authenticated/available"],
+  });
+  expect(getAvailable).toHaveBeenCalledOnce();
+});
+
 test("treats coarse reasoning metadata as unverified instead of declaring every thinking level", async () => {
   const { createPiModelCatalog } = await import("../../src/capabilities/model-catalog.js");
   const reasoning = createPiModelCatalog({ getAll: () => [fixtureEntry({ reasoning: true })] });

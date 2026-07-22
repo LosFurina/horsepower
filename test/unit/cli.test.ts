@@ -124,7 +124,11 @@ test("skill-audit is observation-only with stable JSON, localized human output, 
   const machine = JSON.parse((await run(["skill-audit", "--json"])).stdout);
   expect(machine).toMatchObject({ ok: true, outputLocale: "en", data: { status: "complete", externalCount: 1, dynamicExtensionsEnumerated: false, skills: [{ name: "external", scope: "project", source: "settings", evidence: "resolved" }] } });
   expect(JSON.stringify(machine)).not.toContain("private body");
-  expect((await run(["skill-audit"])).stdout).toContain("Skill exposure audit: complete");
+  const humanAudit = (await run(["skill-audit"])).stdout;
+  expect(humanAudit).toContain("Skill exposure audit: complete");
+  expect(humanAudit).toContain("- project/settings: external");
+  expect(humanAudit).toContain("Full paths and evidence: horsepower skill-audit --json");
+  expect(humanAudit).not.toContain("$PROJECT/.pi/skills/external/SKILL.md");
   let officialPath = "";
   const officialHarness = await harness({ resolveSkills: async () => ({ skills: [{ path: officialPath, enabled: true, metadata: { source: "settings", scope: "project", origin: "top-level" } }] }) });
   officialPath = join(officialHarness.cwd, ".pi/skills/openspec-apply-change/SKILL.md");

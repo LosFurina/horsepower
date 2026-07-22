@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { thinkingLevels, type ModelCatalog, type ThinkingLevel } from "../slots/registry.js";
 
-interface PiCatalogModel {
+export interface PiCatalogModel {
   provider: string;
   id: string;
   reasoning?: boolean;
@@ -10,6 +10,10 @@ interface PiCatalogModel {
 
 export interface PiModelRegistry {
   getAll(): PiCatalogModel[];
+}
+
+export interface PiAvailableModelRuntime {
+  getAvailable(): Promise<readonly PiCatalogModel[]>;
 }
 
 export type PiModelCatalog = {
@@ -54,4 +58,19 @@ export function createPiModelCatalog(registry: PiModelRegistry): PiModelCatalog 
     models,
     revision,
   });
+}
+
+export async function loadSelectablePiModelCatalog(
+  runtime: PiAvailableModelRuntime,
+  enabledModels: readonly string[] | undefined,
+  resolveEnabled: (patterns: readonly string[]) => Promise<readonly PiCatalogModel[]>,
+): Promise<PiModelCatalog> {
+  try {
+    const selected = enabledModels && enabledModels.length > 0
+      ? await resolveEnabled(enabledModels)
+      : await runtime.getAvailable();
+    return createPiModelCatalog({ getAll: () => [...selected] });
+  } catch {
+    return { status: "unavailable", reason: "registry-error" };
+  }
 }

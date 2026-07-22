@@ -33,6 +33,15 @@ export interface SkillAuditOptions {
   onPersist?: () => void;
 }
 
+export function groupAuditSkillNames(skills: readonly AuditSkill[]): Array<{ group: string; names: string[] }> {
+  const groups = new Map<string, string[]>();
+  for (const skill of skills) {
+    const group = `${skill.scope}/${skill.source}`;
+    groups.set(group, [...(groups.get(group) ?? []), skill.name]);
+  }
+  return [...groups].map(([group, names]) => ({ group, names }));
+}
+
 const MAX_RESULTS = 50;
 const MAX_NAME = 64;
 export const HOME_CANDIDATE_SCAN = 'find "$HOME" \\( -name node_modules -o -name .git -o -name Library \\) -prune -o \\( -name SKILL.md -o -path "*/.pi/skills/*.md" \\) -type f -print';

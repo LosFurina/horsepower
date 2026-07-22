@@ -5,11 +5,16 @@ import type { SetupAction, SetupTerminal } from "./setup.js";
 import type { ThinkingLevel } from "../slots/registry.js";
 import { message, type OutputLocale } from "../localization/index.js";
 import type { CompleteConfigurationResult, CompleteConfigurationTerminal, WebhookConfigurationInput } from "./configuration.js";
+import { groupAuditSkillNames } from "../skills/audit.js";
 
 interface TerminalStreams {
   input: Readable;
   output: Writable;
   close(): Promise<void>;
+}
+
+function ansi(enabled: boolean, code: string, text: string): string {
+  return enabled ? `\u001b[${code}m${text}\u001b[0m` : text;
 }
 
 async function terminalStreams(): Promise<TerminalStreams | undefined> {
@@ -34,12 +39,14 @@ async function select<T extends string>(
   locale: OutputLocale,
   prompt: string,
   choices: readonly T[],
-  options: { defaultChoice?: T; showChoices?: boolean } = {},
+  options: { color?: boolean; defaultChoice?: T; showChoices?: boolean } = {},
 ): Promise<T | undefined> {
   if (options.showChoices !== false) {
     const rendered = choices.map((choice, index) => {
       const marker = choice === options.defaultChoice ? (locale === "zh-CN" ? "（默认）" : " (default)") : "";
-      return `  ${index + 1}. ${choice}${marker}`;
+      const number = ansi(options.color === true, "36", `${index + 1}.`);
+      const renderedChoice = choice === options.defaultChoice ? ansi(options.color === true, "32", `${choice}${marker}`) : `${choice}${marker}`;
+      return `  ${number} ${renderedChoice}`;
     }).join("\n");
     await write(`${rendered}\n`);
   }
@@ -60,6 +67,7 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
   const injectedInput = configuredInput && configuredInput !== "/dev/tty" ? configuredInput : undefined;
   const injectedOutput = configuredOutput && configuredOutput !== "/dev/tty" ? configuredOutput : undefined;
   const injectedOffset = Number(process.env.HORSEPOWER_TTY_INPUT_OFFSET ?? "0");
+  const color = process.env.NO_COLOR === undefined && (configuredOutput === "/dev/tty" || (!configuredOutput && process.stderr.isTTY));
   let injectedAnswers: Promise<string[]> | undefined;
   let locale = initialLocale;
   const write = async (text: string): Promise<void> => {
@@ -99,33 +107,29 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
     },
     setLocale(next) { locale = next; },
     async showModels(modelIds) {
-      await write(`${message(locale, "setup.modelsHeading")}\n${modelIds.map((model, index) => `  ${index + 1}. ${model}`).join("\n")}\n`);
+      const heading = ansi(color, "1;36", message(locale, "setup.modelsHeading"));
+      await write(`\n${heading}\n\n${modelIds.map((model, index) => `  ${ansi(color, "36", `${index + 1}.`)} ${model}`).join("\n")}\n`);
     },
     chooseModel({ slot, modelIds }) {
-      return select(question, write, locale, message(locale, "setup.chooseModel", { slot }), modelIds, { showChoices: false });
+      return select(question, write, locale, message(locale, "setup.chooseModel", { slot }), modelIds, { color, showChoices: false });
     },
     chooseThinking({ slot, thinkingLevels }) {
       const defaultChoice = thinkingLevels.includes("medium") ? "medium" : thinkingLevels[0];
-      return select<ThinkingLevel>(question, write, locale, message(locale, "setup.chooseThinking", { slot, choices: thinkingLevels.join(", ") }), thinkingLevels, { ...(defaultChoice ? { defaultChoice } : {}) });
+      return select<ThinkingLevel>(question, write, locale, message(locale, "setup.chooseThinking", { slot, choices: thinkingLevels.join(", ") }), thinkingLevels, { color, ...(defaultChoice ? { defaultChoice } : {}) });
     },
     chooseProbeAction({ result }) {
       const actions: readonly SetupAction[] = result.status === "inconclusive"
         ? ["retry", "reselect", "skip", "cancel"]
         : ["reselect", "skip", "cancel"];
-      return select(question, write, locale, message(locale, "setup.capabilityAction", { status: result.status, code: result.evidence.code, actions: actions.join("/") }), actions);
+      return select(question, write, locale, message(locale, "setup.capabilityAction", { status: result.status, code: result.evidence.code, actions: actions.join("/") }), actions, { color });
     },
     chooseLocale() {
-      return select(question, write, locale, message(locale, "configure.chooseLocale"), ["en", "zh-CN"] as const);
+      return select(question, write, locale, message(locale, "configure.chooseLocale"), ["en", "zh-CN"] as const, { color });
     },
     showSkillBoundary(current) { return write(`${message(current, "configure.skillBoundary")}\n`); },
     async showSkillAudit(current, audit) {
       await write(`${message(current, "audit.summary", { status: audit.status, count: audit.externalCount })}\n`);
-      const groups = new Map<string, string[]>();
-      for (const skill of audit.skills) {
-        const key = `${skill.scope}/${skill.source}`;
-        groups.set(key, [...(groups.get(key) ?? []), skill.name]);
-      }
-      for (const [group, names] of groups) await write(`- ${group}: ${names.join(", ")}\n`);
+      for (const { group, names } of groupAuditSkillNames(audit.skills)) await write(`- ${group}: ${names.join(", ")}\n`);
       if (audit.skills.length > 0) await write(`${message(current, "audit.details")}\n`);
     },
     async confirmSkillRisk(current) {
@@ -134,7 +138,8 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
     },
     async chooseWebhookAction(current, existing) {
       const actions = existing ? ["preserve", "configure", "disable", "cancel"] as const : ["skip", "configure", "disable", "cancel"] as const;
-      return (await select(question, write, current, message(current, "configure.webhookAction", { actions: actions.join("/") }), actions, { defaultChoice: actions[0] })) ?? "cancel";
+      await write(`\n${ansi(color, "1;36", current === "zh-CN" ? "Webhook 设置" : "Webhook setup")}\n\n`);
+      return (await select(question, write, current, message(current, "configure.webhookAction", { actions: actions.join("/") }), actions, { color, defaultChoice: actions[0] })) ?? "cancel";
     },
     async readWebhookConfiguration(current): Promise<WebhookConfigurationInput | undefined> {
       const url = await question(message(current, "configure.webhookUrl"));
@@ -150,10 +155,11 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
       return { url, auth, dispatch: dispatch === "y" || dispatch === "Y" || dispatch?.toLowerCase() === "yes" };
     },
     async chooseModelAction(current) {
-      return (await select(question, write, current, message(current, "configure.modelAction"), ["configure", "skip", "cancel"] as const, { defaultChoice: "configure" })) ?? "cancel";
+      await write(`\n${ansi(color, "1;36", current === "zh-CN" ? "模型设置" : "Model setup")}\n\n`);
+      return (await select(question, write, current, message(current, "configure.modelAction"), ["configure", "skip", "cancel"] as const, { color, defaultChoice: "configure" })) ?? "cancel";
     },
     showConfigurationSummary(current, result: CompleteConfigurationResult) {
-      return write(`${message(current, "configure.summary", { status: result.status })}\n${result.followUps.map((command) => `${message(current, "configure.next", { command })}\n`).join("")}`);
+      return write(`\n${ansi(color, "1;36", message(current, "configure.summary", { status: result.status }))}\n${result.followUps.map((command) => `${message(current, "configure.next", { command })}\n`).join("")}`);
     },
   };
 }
