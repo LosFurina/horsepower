@@ -8,7 +8,14 @@ import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
 import { loadSelectablePiModelCatalog } from "../capabilities/model-catalog.js";
 import { createPiCapabilityProbe } from "../runtime/pi-capability-probe.js";
 import { createSetupTerminal } from "./terminal.js";
-import { ModelRuntime, resolveModelScope, SettingsManager } from "../capabilities/pi-model-registry.js";
+import {
+  createAgentSessionServices,
+  getAgentDir,
+  hasTrustRequiringProjectResources,
+  ProjectTrustStore,
+  resolveModelScope,
+  SettingsManager,
+} from "../capabilities/pi-model-registry.js";
 
 async function confirm(message: string): Promise<boolean | undefined> {
   let input: Readable = process.stdin;
@@ -44,9 +51,12 @@ async function verifiedInstallerContext(): Promise<boolean> {
 const interactive = Boolean((process.stdin.isTTY && process.stderr.isTTY) || process.platform !== "win32");
 let modelCatalog;
 try {
-  const runtime = await ModelRuntime.create();
-  await runtime.refresh();
-  const enabledModels = SettingsManager.create(process.cwd()).getEnabledModels();
+  const cwd = process.cwd();
+  const agentDir = getAgentDir();
+  const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
+  const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+  const { modelRuntime: runtime } = await createAgentSessionServices({ cwd, agentDir, settingsManager });
+  const enabledModels = settingsManager.getEnabledModels();
   modelCatalog = await loadSelectablePiModelCatalog(
     runtime,
     enabledModels,
