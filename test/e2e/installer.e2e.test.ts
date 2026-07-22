@@ -281,8 +281,7 @@ test("installer accepts a newer compatible Pi release", async () => {
   });
 });
 
-test("installer atomically replaces an existing current symlink during an upgrade", async () => {
-  const fixturePaths = await fixture();
+async function preparePreviousInstallation(fixturePaths: Awaited<ReturnType<typeof fixture>>) {
   const managedRoot = join(fixturePaths.home, ".pi/agent/horsepower");
   await runInstaller(fixturePaths);
   const previousRoot = join(managedRoot, "versions/v0.1.0-previous");
@@ -293,11 +292,43 @@ test("installer atomically replaces an existing current symlink during an upgrad
   await writeFile(previousManifestPath, `${JSON.stringify(previousManifest)}\n`);
   await symlink("versions/v0.1.0-previous", join(managedRoot, "current.previous"));
   await rename(join(managedRoot, "current.previous"), join(managedRoot, "current"));
+  return { managedRoot, previousRoot };
+}
+
+test("installer atomically replaces an existing current symlink during an upgrade", async () => {
+  const fixturePaths = await fixture();
+  const { managedRoot, previousRoot } = await preparePreviousInstallation(fixturePaths);
   await expect(runInstaller(fixturePaths)).resolves.toMatchObject({
     stdout: expect.stringContaining("Horsepower installed successfully."),
   });
   expect(await readlink(join(managedRoot, "current"))).toBe(`versions/v${version}`);
+  await expect(access(join(managedRoot, "current.new"))).rejects.toThrow();
   await expect(access(join(previousRoot, "current.new"))).rejects.toThrow();
+});
+
+test("failed upgrade doctor atomically restores the previous current symlink", async () => {
+  const fixturePaths = await fixture();
+  const { managedRoot, previousRoot } = await preparePreviousInstallation(fixturePaths);
+  const settingsPath = join(managedRoot, "settings.json");
+  const settingsBefore = await readFile(settingsPath);
+  const links = [
+    join(fixturePaths.home, ".pi/agent/extensions/horsepower"),
+    join(fixturePaths.home, ".pi/agent/skills/horsepower"),
+    join(fixturePaths.home, ".local/bin/horsepower"),
+  ];
+  const linkTargetsBefore = await Promise.all(links.map((link) => readlink(link)));
+  await writeFile(join(fixturePaths.bin, "node"), `#!/bin/sh\ncase "$*" in *"doctor --installation-only"*) exit 42 ;; esac\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+
+  await expect(runInstaller(fixturePaths)).rejects.toMatchObject({
+    stderr: expect.stringContaining("post-install doctor failed"),
+  });
+
+  expect(await readlink(join(managedRoot, "current"))).toBe("versions/v0.1.0-previous");
+  expect(await readFile(settingsPath)).toEqual(settingsBefore);
+  await expect(Promise.all(links.map((link) => readlink(link)))).resolves.toEqual(linkTargetsBefore);
+  for (const root of [managedRoot, previousRoot, join(managedRoot, `versions/v${version}`)]) {
+    await expect(access(join(root, "current.rollback"))).rejects.toThrow();
+  }
 });
 
 test.each(["1.5.9", "2.0.0", "1.6.0-beta.1", "OpenSpec 1.6.0", "01.6.0"])(
