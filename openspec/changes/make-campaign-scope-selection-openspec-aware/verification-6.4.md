@@ -17,7 +17,7 @@ The successful selected dispatch was:
 - name: `verify-task-6-4-fresh-pi-e2e`
 - agent/role: `tester` / `Design and execute focused verification`
 - requested/resolved slot: `craft` → `craft`
-- model: `liweijun/gpt-5.6-sol`
+- concrete model identifier was redacted from public evidence
 - thinking: `minimal`
 - handoff mode: `managed`
 - invocationId: `run-284151d2-1030-45cc-8369-8a05e54580f1-1`
