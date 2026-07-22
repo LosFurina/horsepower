@@ -9,7 +9,7 @@ import { selectedE2ELocales } from "../fixtures/e2e-locales.js";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(import.meta.dirname, "../..");
-const version = "0.1.0-alpha.1";
+const version = (JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8")) as { version: string }).version;
 let releaseDir: string;
 
 beforeAll(async () => {
