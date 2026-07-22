@@ -120,7 +120,13 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
     showSkillBoundary(current) { return write(`${message(current, "configure.skillBoundary")}\n`); },
     async showSkillAudit(current, audit) {
       await write(`${message(current, "audit.summary", { status: audit.status, count: audit.externalCount })}\n`);
-      for (const skill of audit.skills) await write(`- ${skill.name} | ${skill.scope} | ${skill.source} | ${skill.path} | ${skill.evidence}\n`);
+      const groups = new Map<string, string[]>();
+      for (const skill of audit.skills) {
+        const key = `${skill.scope}/${skill.source}`;
+        groups.set(key, [...(groups.get(key) ?? []), skill.name]);
+      }
+      for (const [group, names] of groups) await write(`- ${group}: ${names.join(", ")}\n`);
+      if (audit.skills.length > 0) await write(`${message(current, "audit.details")}\n`);
     },
     async confirmSkillRisk(current) {
       const answer = await question(message(current, "configure.auditRisk"));

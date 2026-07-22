@@ -76,10 +76,21 @@ test("interactive menus render numbered choices and accept useful Enter defaults
   await expect(terminal.chooseWebhookAction("zh-CN", false)).resolves.toBe("skip");
   await expect(terminal.chooseModelAction("zh-CN")).resolves.toBe("configure");
   await expect(terminal.chooseThinking({ slot: "judgment", model: "provider/model", thinkingLevels: ["low", "medium", "high"] })).resolves.toBe("medium");
+  await terminal.showSkillAudit("zh-CN", {
+    status: "complete", cwd: "/project", externalCount: 2, excludedCount: 0, dynamicExtensionsEnumerated: false,
+    limitations: [], candidateScanCommand: "find",
+    skills: [
+      { name: "skill-one", scope: "user", source: "settings", path: "$HOME/one/SKILL.md", evidence: "resolved" },
+      { name: "skill-two", scope: "user", source: "settings", path: "$HOME/two/SKILL.md", evidence: "resolved" },
+    ],
+  });
 
   const rendered = await readFile(output, "utf8");
   expect(rendered).toContain("1. skip");
   expect(rendered).toContain("2. configure");
   expect(rendered).toContain("1. configure");
   expect(rendered).toContain("2. medium（默认）");
+  expect(rendered).toContain("- user/settings: skill-one, skill-two");
+  expect(rendered).toContain("完整路径与证据：horsepower skill-audit --json");
+  expect(rendered).not.toContain("$HOME/one/SKILL.md");
 });
