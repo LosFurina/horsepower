@@ -11,16 +11,16 @@ Horsepower 是 Pi 的显式、模型中立多 Agent runtime。它协调持久 Pi
 - Pi 0.80.10
 - 官方 OpenSpec 1.6.0+
 
-仅从 `LosFurina/horsepower` GitHub Releases 安装。下载并检查仓库自带的 `install.sh`，指定 release version 执行：
+从 `raw/main` 下载并检查仓库自带的 `install.sh`。脚本只从 `LosFurina/horsepower` GitHub Releases 页面下载安装 asset；默认会解析并安装仓库当前的 Latest Release：
 
 ```sh
 curl -fsSLO https://github.com/LosFurina/horsepower/raw/main/install.sh
-sh install.sh --version 0.1.0-alpha.1 --locale zh-CN
+sh install.sh --locale zh-CN
 ```
 
 交互安装是首选路径。bootstrap 下载 `horsepower-v<version>.tar.gz` 及 SHA-256 asset，验证精确布局和内部 digest，执行激活前 Skill gate，原子切换 `current`，再启动语言、Skill 边界、webhook 与模型的完整配置。它不使用 `sudo`、不修改 shell 启动文件、不复制 Pi resource。可使用 `--locale en` 或 `--locale zh-CN`；没有终端和既有设置时默认英文。
 
-无人值守安装使用 `sh install.sh --version 0.1.0-alpha.1 --locale zh-CN --no-setup`。它跳过全部交互配置问题，但仍执行只读审计并显示警告。安装后运行 `horsepower configure --interactive` 完成完整配置；`horsepower setup --interactive` 只用于模型 slot 选择或重新验证。
+无人值守安装使用 `sh install.sh --locale zh-CN --no-setup`。它跳过全部交互配置问题，但仍执行只读审计并显示警告。需要可复现安装时，可使用 `--version VERSION` 或 `HORSEPOWER_VERSION=VERSION` 固定版本。安装后运行 `horsepower configure --interactive` 完成完整配置；`horsepower setup --interactive` 只用于模型 slot 选择或重新验证。
 
 ## 技能隔离与暴露审计
 

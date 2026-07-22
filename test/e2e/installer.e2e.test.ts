@@ -18,7 +18,7 @@ beforeAll(async () => {
   releaseDir = join(repositoryRoot, "release");
 });
 
-async function fixture(options: { failInstallationDoctor?: boolean; failLocalePersist?: boolean; guidedSetup?: "configured" | "probe-failure" | "canceled" } = {}) {
+async function fixture(options: { failInstallationDoctor?: boolean; failLocalePersist?: boolean; guidedSetup?: "configured" | "probe-failure" | "canceled"; latestVersion?: string; latestUrl?: string; failLatest?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "horsepower-installer-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -27,6 +27,11 @@ async function fixture(options: { failInstallationDoctor?: boolean; failLocalePe
   const pi = join(bin, "pi");
   await writeFile(openspec, "#!/bin/sh\nprintf '%s\\n' '1.6.0'\n", { mode: 0o755 });
   await writeFile(pi, "#!/bin/sh\nprintf '%s\\n' '0.80.10'\n", { mode: 0o755 });
+  if (options.latestVersion || options.latestUrl || options.failLatest) {
+    const realCurl = (await execFileAsync("sh", ["-c", "command -v curl"])).stdout.trim();
+    const latestUrl = options.latestUrl ?? `https://github.com/LosFurina/horsepower/releases/tag/v${options.latestVersion ?? version}`;
+    await writeFile(join(bin, "curl"), `#!/bin/sh\nlast=\"\"\nfor argument do last=$argument; done\nif [ \"$last\" = \"https://github.com/LosFurina/horsepower/releases/latest\" ]; then : > ${JSON.stringify(join(root, "latest-requested"))}; ${options.failLatest ? "exit 22" : `printf '%s' ${JSON.stringify(latestUrl)}; exit 0`}; fi\nexec ${JSON.stringify(realCurl)} \"$@\"\n`, { mode: 0o755 });
+  }
   if (options.failInstallationDoctor || options.failLocalePersist || options.guidedSetup) {
     const realNode = process.execPath;
     const modelSetupKey = ["model", "Setup"].join("");
@@ -56,6 +61,50 @@ async function install(args: string[] = []) {
   const result = await runInstaller(fixturePaths, args);
   return { ...fixturePaths, ...result };
 }
+
+test("installer resolves the latest GitHub Release when no version override is supplied", async () => {
+  const fixturePaths = await fixture({ latestVersion: version });
+  const result = await execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--no-setup"], {
+    cwd: fixturePaths.root,
+    env: {
+      ...process.env,
+      HOME: fixturePaths.home,
+      PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`,
+      HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`,
+    },
+  });
+  expect(result.stdout).toContain("Horsepower installed successfully.");
+  await expect(access(join(fixturePaths.root, "latest-requested"))).resolves.toBeUndefined();
+  expect(await readlink(join(fixturePaths.home, ".pi/agent/horsepower/current"))).toBe(`versions/v${version}`);
+});
+
+test.each([
+  ["resolver failure", { failLatest: true }, "unable to resolve the latest GitHub Release"],
+  ["unexpected redirect", { latestUrl: "https://example.test/releases/tag/v0.1.0" }, "latest GitHub Release resolved to an unexpected URL"],
+])("installer refuses latest resolution errors before downloading assets: %s", async (_label, options, error) => {
+  const fixturePaths = await fixture(options);
+  await expect(execFileAsync("sh", [join(repositoryRoot, "install.sh"), "--no-setup"], {
+    cwd: fixturePaths.root,
+    env: { ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}` },
+  })).rejects.toMatchObject({ stderr: expect.stringContaining(error) });
+  await expect(access(join(fixturePaths.home, ".pi"))).rejects.toThrow();
+});
+
+test.each([
+  ["environment pin", [] as string[], version],
+  ["command-line pin wins", ["--version", version] as string[], "invalid-environment-version"],
+])("installer %s skips latest resolution", async (_label, args, environmentVersion) => {
+  const fixturePaths = await fixture({ latestVersion: version });
+  const result = await execFileAsync("sh", [join(repositoryRoot, "install.sh"), ...args, "--no-setup"], {
+    cwd: fixturePaths.root,
+    env: {
+      ...process.env, HOME: fixturePaths.home, PATH: `${fixturePaths.bin}:${process.env.PATH ?? ""}`,
+      HORSEPOWER_VERSION: environmentVersion, HORSEPOWER_RELEASE_BASE_URL: `file://${releaseDir}`,
+    },
+  });
+  expect(result.stdout).toContain("Horsepower installed successfully.");
+  await expect(access(join(fixturePaths.root, "latest-requested"))).rejects.toThrow();
+});
 
 async function runInstallerWithoutTty(
   fixturePaths: Awaited<ReturnType<typeof fixture>>,

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${HORSEPOWER_VERSION:-0.1.0-alpha.1}"
+VERSION="${HORSEPOWER_VERSION:-}"
 LOCALE=""
 NO_SETUP=0
 REPOSITORY="https://github.com/LosFurina/horsepower"
@@ -19,6 +19,12 @@ fail() {
   exit 1
 }
 
+validate_version() {
+  case "$VERSION" in
+    ''|*[!0-9A-Za-z.-]*) fail "invalid version: $VERSION" ;;
+  esac
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version) [ "$#" -ge 2 ] || fail "--version requires a value"; VERSION=$2; shift 2 ;;
@@ -29,9 +35,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$VERSION" in
-  ''|*[!0-9A-Za-z.-]*) fail "invalid version: $VERSION" ;;
-esac
+[ -z "$VERSION" ] || validate_version
 case "$LOCALE" in
   ''|en|zh-CN) ;;
   *) fail "unsupported locale: $LOCALE" ;;
@@ -43,6 +47,16 @@ case "$(uname -s 2>/dev/null || printf unknown)" in
 esac
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
+if [ -z "$VERSION" ]; then
+  if LATEST_RELEASE_URL=$(curl --proto '=https' --proto-redir '=https' -fsSL -o /dev/null -w '%{url_effective}' "$REPOSITORY/releases/latest"); then :; else
+    fail "unable to resolve the latest GitHub Release; retry or use --version VERSION"
+  fi
+  case "$LATEST_RELEASE_URL" in
+    "$REPOSITORY/releases/tag/v"*) VERSION=${LATEST_RELEASE_URL#"$REPOSITORY/releases/tag/v"} ;;
+    *) fail "latest GitHub Release resolved to an unexpected URL; use --version VERSION" ;;
+  esac
+  validate_version
+fi
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 command -v node >/dev/null 2>&1 || fail "Node.js $NODE_COMPATIBILITY is required"
 node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' \

@@ -11,16 +11,16 @@ Horsepower is an explicit, model-neutral multi-Agent runtime for Pi. It coordina
 - Pi 0.80.10
 - Official OpenSpec 1.6.0 or newer
 
-Install only from the `LosFurina/horsepower` GitHub Releases page. Download the repository-owned `install.sh`, inspect it, and run it with the release version:
+Download and inspect the repository-owned `install.sh` from `raw/main`. The script downloads installable assets only from the `LosFurina/horsepower` GitHub Releases page; by default it resolves and installs the repository's current Latest Release:
 
 ```sh
 curl -fsSLO https://github.com/LosFurina/horsepower/raw/main/install.sh
-sh install.sh --version 0.1.0-alpha.1
+sh install.sh
 ```
 
 The interactive installer is the primary path. It downloads `horsepower-v<version>.tar.gz` and its SHA-256 asset, validates the exact layout and internal digests, performs the pre-activation Skill gate, atomically switches `current`, then starts the complete locale, Skill-boundary, webhook, and model journey. It never uses `sudo`, edits shell startup files, or copies Pi resources. Use `--locale en` or `--locale zh-CN`; without a terminal or prior setting, English is used.
 
-For unattended installation, use `sh install.sh --version 0.1.0-alpha.1 --no-setup`. This skips every interactive configuration prompt but retains the observation-only audit and warnings. Afterwards run `horsepower configure --interactive` for the complete journey. Use `horsepower setup --interactive` only for model-slot selection or revalidation.
+For unattended installation, use `sh install.sh --no-setup`. This skips every interactive configuration prompt but retains the observation-only audit and warnings. Pin a reproducible release with `--version VERSION` or `HORSEPOWER_VERSION=VERSION`. Afterwards run `horsepower configure --interactive` for the complete journey. Use `horsepower setup --interactive` only for model-slot selection or revalidation.
 
 ## Skill isolation and exposure audit
 
