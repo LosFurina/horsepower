@@ -6,7 +6,7 @@ import { resolveHorsepowerPaths } from "../config/paths.js";
 import { isCredentialKey, parseWebhookSettings, redactCredentials, validateWebhookSettingsShape, validateWebhookUrl } from "../config/webhook.js";
 import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-notifier.js";
 import { validateOpenSpecInstallation } from "../openspec/boundary.js";
-import { validateReleaseCompatibility } from "../release-manifest.js";
+import { parseReleaseCompatibility, validateReleaseCompatibility } from "../release-manifest.js";
 import { createHandoffStore } from "../handoffs/store.js";
 import { message as localizedMessage, resolveOutputLocale, validateOutputLocale, type MessageId, type OutputLocale } from "../localization/index.js";
 import { createSlotRegistry, thinkingLevels, type ModelCatalog, type SlotBinding, type SlotConfiguration, type ThinkingLevel } from "../slots/registry.js";
@@ -226,7 +226,7 @@ async function readManagedManifest(release: string): Promise<JsonObject> {
     const manifest = await readJsonObject(manifestPath);
     if (Object.keys(manifest).sort().join(",") !== "compatibility,digests,entryPoints,version") throw new ManagedTopologyError("Invalid release manifest fields");
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new ManagedTopologyError("Invalid release manifest version");
-    try { validateReleaseCompatibility(manifest.compatibility); }
+    try { parseReleaseCompatibility(manifest.compatibility); }
     catch (cause) { throw new ManagedTopologyError((cause as Error).message); }
     const entries = object(manifest.entryPoints);
     const digests = object(manifest.digests);
@@ -747,6 +747,7 @@ export function createCli(options: CliOptions) {
     if (!releaseVersion.test(expected)) throw new UsageError(`Invalid release version: ${expected}`);
     const root = resolve(staged); const stagedInfo = await lstat(root).catch(() => undefined); if (!stagedInfo?.isDirectory() || stagedInfo.isSymbolicLink()) throw new Error(`Invalid staged release root: ${root}`); let manifest: JsonObject; try { manifest = await readManagedManifest(root); } catch (cause) { throw new Error(`Invalid staged release: ${(cause as Error).message}`); }
     if (typeof manifest.version !== "string" || !releaseVersion.test(manifest.version)) throw new Error("Invalid staged manifest version");
+    validateReleaseCompatibility(manifest.compatibility);
     if (manifest.version !== expected) throw new Error(`Staged manifest version mismatch: expected ${expected}`); const entries = object(manifest.entryPoints);
     for (const [name, expectedPath] of Object.entries(releaseEntryPoints)) { if (entries[name] !== expectedPath) throw new Error(`Invalid staged ${name} entry point`); const candidate = normalize(String(entries[name])); if (candidate.startsWith("..") || isAbsolute(candidate)) throw new Error(`Unsafe staged ${name} entry point`); try { await verifyNoSymlinkPath(root, join(root, candidate), "file"); } catch { throw new Error(`Missing staged ${name}: ${candidate}`); } }
     await verifyInstallDestination(options.homeDir, topology.root, topology.versions, join(topology.versions, `v${expected}`));

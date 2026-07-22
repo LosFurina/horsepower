@@ -287,8 +287,9 @@ async function preparePreviousInstallation(fixturePaths: Awaited<ReturnType<type
   const previousRoot = join(managedRoot, "versions/v0.1.0-previous");
   await rename(join(managedRoot, `versions/v${version}`), previousRoot);
   const previousManifestPath = join(previousRoot, "release-manifest.json");
-  const previousManifest = JSON.parse(await readFile(previousManifestPath, "utf8")) as { version: string };
+  const previousManifest = JSON.parse(await readFile(previousManifestPath, "utf8")) as { version: string; compatibility: { pi: string } };
   previousManifest.version = "0.1.0-previous";
+  previousManifest.compatibility.pi = "0.80.10";
   await writeFile(previousManifestPath, `${JSON.stringify(previousManifest)}\n`);
   await symlink("versions/v0.1.0-previous", join(managedRoot, "current.previous"));
   await rename(join(managedRoot, "current.previous"), join(managedRoot, "current"));
