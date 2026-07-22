@@ -56,7 +56,10 @@ async function loadModelCatalog() {
     const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
     const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
     const services = await createAgentSessionServices({ cwd, agentDir, settingsManager });
-    if (services.diagnostics.some(({ type }) => type === "warning" || type === "error")) {
+    if (
+      services.diagnostics.some(({ type }) => type === "warning" || type === "error")
+      || services.resourceLoader.getExtensions().errors.length > 0
+    ) {
       return { status: "unavailable" as const, reason: "registry-error" as const };
     }
     const runtime = services.modelRuntime;
