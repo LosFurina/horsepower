@@ -19,6 +19,10 @@ fail() {
   exit 1
 }
 
+atomic_replace() {
+  node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$1" "$2"
+}
+
 validate_version() {
   case "$VERSION" in
     ''|*[!0-9A-Za-z.-]*) fail "invalid version: $VERSION" ;;
@@ -242,14 +246,14 @@ rollback() {
   for link in $CREATED_LINKS; do [ -L "$link" ] && rm "$link"; done
   if [ -n "$OLD_CURRENT" ]; then
     ln -s "$OLD_CURRENT" "$CURRENT.rollback"
-    mv -f "$CURRENT.rollback" "$CURRENT"
+    atomic_replace "$CURRENT.rollback" "$CURRENT"
   else
     [ -L "$CURRENT" ] && rm "$CURRENT"
   fi
 }
 trap 'rollback; cleanup' EXIT HUP INT TERM
 ln -s "versions/v$VERSION" "$CURRENT.new"
-mv -f "$CURRENT.new" "$CURRENT"
+atomic_replace "$CURRENT.new" "$CURRENT"
 for pair in "$EXTENSION_LINK|$EXTENSION_TARGET" "$SKILL_LINK|$SKILL_TARGET" "$CLI_LINK|$CLI_TARGET"; do
   link=${pair%%|*}; target=${pair#*|}
   if [ ! -L "$link" ]; then ln -s "$target" "$link"; CREATED_LINKS="$CREATED_LINKS $link"; fi

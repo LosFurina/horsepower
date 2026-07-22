@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, mkdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, readlink, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -279,6 +279,25 @@ test("installer accepts a newer compatible Pi release", async () => {
   await expect(runInstaller(fixturePaths)).resolves.toMatchObject({
     stdout: expect.stringContaining("Horsepower installed successfully."),
   });
+});
+
+test("installer atomically replaces an existing current symlink during an upgrade", async () => {
+  const fixturePaths = await fixture();
+  const managedRoot = join(fixturePaths.home, ".pi/agent/horsepower");
+  await runInstaller(fixturePaths);
+  const previousRoot = join(managedRoot, "versions/v0.1.0-previous");
+  await rename(join(managedRoot, `versions/v${version}`), previousRoot);
+  const previousManifestPath = join(previousRoot, "release-manifest.json");
+  const previousManifest = JSON.parse(await readFile(previousManifestPath, "utf8")) as { version: string };
+  previousManifest.version = "0.1.0-previous";
+  await writeFile(previousManifestPath, `${JSON.stringify(previousManifest)}\n`);
+  await symlink("versions/v0.1.0-previous", join(managedRoot, "current.previous"));
+  await rename(join(managedRoot, "current.previous"), join(managedRoot, "current"));
+  await expect(runInstaller(fixturePaths)).resolves.toMatchObject({
+    stdout: expect.stringContaining("Horsepower installed successfully."),
+  });
+  expect(await readlink(join(managedRoot, "current"))).toBe(`versions/v${version}`);
+  await expect(access(join(previousRoot, "current.new"))).rejects.toThrow();
 });
 
 test.each(["1.5.9", "2.0.0", "1.6.0-beta.1", "OpenSpec 1.6.0", "01.6.0"])(
