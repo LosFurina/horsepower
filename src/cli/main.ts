@@ -7,9 +7,10 @@ import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { createCli } from "./app.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
-import { parsePiListModels } from "../capabilities/model-catalog.js";
+import { createPiModelCatalog, parsePiListModelRows } from "../capabilities/model-catalog.js";
 import { createPiCapabilityProbe } from "../runtime/pi-capability-probe.js";
 import { createSetupTerminal } from "./terminal.js";
+import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, resolveModelScope, SettingsManager } from "../capabilities/pi-model-registry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,7 +49,15 @@ const interactive = Boolean((process.stdin.isTTY && process.stderr.isTTY) || pro
 async function loadModelCatalog() {
   try {
     const { stdout } = await execFileAsync("pi", ["--list-models"], { cwd: process.cwd(), encoding: "utf8" });
-    return parsePiListModels(stdout);
+    const models = parsePiListModelRows(stdout);
+    const agentDir = getAgentDir();
+    const cwd = process.cwd();
+    const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
+    const enabledModels = SettingsManager.create(cwd, agentDir, { projectTrusted }).getEnabledModels();
+    const selected = enabledModels && enabledModels.length > 0
+      ? (await resolveModelScope([...enabledModels], { getAvailable: async () => models } as never)).map(({ model }) => model)
+      : models;
+    return createPiModelCatalog({ getAll: () => selected });
   } catch {
     return { status: "unavailable" as const, reason: "registry-error" as const };
   }
