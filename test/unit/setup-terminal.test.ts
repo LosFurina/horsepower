@@ -52,11 +52,34 @@ test("guided setup renders every human prompt in the effective locale while iden
   await terminal.showConfigurationSummary("zh-CN", summary as never);
   const rendered = await readFile(output, "utf8");
   expect(rendered).toContain("当前 Pi 模型");
-  expect(rendered).toContain("为 judgment 选择模型");
+  expect(rendered).toContain("为 judgment 输入模型编号");
   expect(rendered).toContain("选择无效");
   expect(rendered).toContain("provider/judge");
   expect(rendered).toContain("high");
   expect(rendered).toContain("declared_exact_exclusion");
   expect(rendered).toContain("下一步：horsepower setup --interactive");
   expect(rendered).not.toContain("Next:");
+});
+
+test("interactive menus render numbered choices and accept useful Enter defaults", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-setup-terminal-defaults-"));
+  roots.push(root);
+  const input = join(root, "input");
+  const output = join(root, "output");
+  await writeFile(input, "\n\n\n");
+  await writeFile(output, "");
+  process.env.HORSEPOWER_TTY_INPUT = input;
+  process.env.HORSEPOWER_TTY_OUTPUT = output;
+  const { createSetupTerminal } = await import("../../src/cli/terminal.js");
+  const terminal = createSetupTerminal("zh-CN");
+
+  await expect(terminal.chooseWebhookAction("zh-CN", false)).resolves.toBe("skip");
+  await expect(terminal.chooseModelAction("zh-CN")).resolves.toBe("configure");
+  await expect(terminal.chooseThinking({ slot: "judgment", model: "provider/model", thinkingLevels: ["low", "medium", "high"] })).resolves.toBe("medium");
+
+  const rendered = await readFile(output, "utf8");
+  expect(rendered).toContain("1. skip");
+  expect(rendered).toContain("2. configure");
+  expect(rendered).toContain("1. configure");
+  expect(rendered).toContain("2. medium（默认）");
 });

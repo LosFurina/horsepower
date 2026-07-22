@@ -28,10 +28,25 @@ async function terminalStreams(): Promise<TerminalStreams | undefined> {
   }
 }
 
-async function select<T extends string>(question: (prompt: string) => Promise<string | undefined>, write: (text: string) => Promise<void>, locale: OutputLocale, prompt: string, choices: readonly T[]): Promise<T | undefined> {
+async function select<T extends string>(
+  question: (prompt: string) => Promise<string | undefined>,
+  write: (text: string) => Promise<void>,
+  locale: OutputLocale,
+  prompt: string,
+  choices: readonly T[],
+  options: { defaultChoice?: T; showChoices?: boolean } = {},
+): Promise<T | undefined> {
+  if (options.showChoices !== false) {
+    const rendered = choices.map((choice, index) => {
+      const marker = choice === options.defaultChoice ? (locale === "zh-CN" ? "（默认）" : " (default)") : "";
+      return `  ${index + 1}. ${choice}${marker}`;
+    }).join("\n");
+    await write(`${rendered}\n`);
+  }
   for (;;) {
     const answer = await question(prompt);
     if (answer === undefined) return undefined;
+    if (answer === "" && options.defaultChoice) return options.defaultChoice;
     const byNumber = /^\d+$/u.test(answer) ? choices[Number(answer) - 1] : undefined;
     const choice = byNumber ?? choices.find((candidate) => candidate === answer);
     if (choice) return choice;
@@ -49,7 +64,12 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
   let locale = initialLocale;
   const write = async (text: string): Promise<void> => {
     if (injectedOutput) await appendFile(injectedOutput, text);
-    else process.stderr.write(text);
+    else if (configuredOutput === "/dev/tty") {
+      try {
+        const tty = await open(configuredOutput, "a");
+        try { await tty.writeFile(text); } finally { await tty.close(); }
+      } catch { process.stderr.write(text); }
+    } else process.stderr.write(text);
   };
   const question = async (prompt: string): Promise<string | undefined> => {
     if (injectedInput && injectedOutput) {
@@ -82,10 +102,11 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
       await write(`${message(locale, "setup.modelsHeading")}\n${modelIds.map((model, index) => `  ${index + 1}. ${model}`).join("\n")}\n`);
     },
     chooseModel({ slot, modelIds }) {
-      return select(question, write, locale, message(locale, "setup.chooseModel", { slot }), modelIds);
+      return select(question, write, locale, message(locale, "setup.chooseModel", { slot }), modelIds, { showChoices: false });
     },
     chooseThinking({ slot, thinkingLevels }) {
-      return select<ThinkingLevel>(question, write, locale, message(locale, "setup.chooseThinking", { slot, choices: thinkingLevels.join(", ") }), thinkingLevels);
+      const defaultChoice = thinkingLevels.includes("medium") ? "medium" : thinkingLevels[0];
+      return select<ThinkingLevel>(question, write, locale, message(locale, "setup.chooseThinking", { slot, choices: thinkingLevels.join(", ") }), thinkingLevels, { ...(defaultChoice ? { defaultChoice } : {}) });
     },
     chooseProbeAction({ result }) {
       const actions: readonly SetupAction[] = result.status === "inconclusive"
@@ -107,7 +128,7 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
     },
     async chooseWebhookAction(current, existing) {
       const actions = existing ? ["preserve", "configure", "disable", "cancel"] as const : ["skip", "configure", "disable", "cancel"] as const;
-      return (await select(question, write, current, message(current, "configure.webhookAction", { actions: actions.join("/") }), actions)) ?? "cancel";
+      return (await select(question, write, current, message(current, "configure.webhookAction", { actions: actions.join("/") }), actions, { defaultChoice: actions[0] })) ?? "cancel";
     },
     async readWebhookConfiguration(current): Promise<WebhookConfigurationInput | undefined> {
       const url = await question(message(current, "configure.webhookUrl"));
@@ -123,7 +144,7 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
       return { url, auth, dispatch: dispatch === "y" || dispatch === "Y" || dispatch?.toLowerCase() === "yes" };
     },
     async chooseModelAction(current) {
-      return (await select(question, write, current, message(current, "configure.modelAction"), ["configure", "skip", "cancel"] as const)) ?? "cancel";
+      return (await select(question, write, current, message(current, "configure.modelAction"), ["configure", "skip", "cancel"] as const, { defaultChoice: "configure" })) ?? "cancel";
     },
     showConfigurationSummary(current, result: CompleteConfigurationResult) {
       return write(`${message(current, "configure.summary", { status: result.status })}\n${result.followUps.map((command) => `${message(current, "configure.next", { command })}\n`).join("")}`);
