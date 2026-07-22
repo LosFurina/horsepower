@@ -1,21 +1,17 @@
 import { open } from "node:fs/promises";
 import { fstatSync, readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
+import { promisify } from "node:util";
 import { createCli } from "./app.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
-import { loadSelectablePiModelCatalog } from "../capabilities/model-catalog.js";
+import { parsePiListModels } from "../capabilities/model-catalog.js";
 import { createPiCapabilityProbe } from "../runtime/pi-capability-probe.js";
 import { createSetupTerminal } from "./terminal.js";
-import {
-  createAgentSessionServices,
-  getAgentDir,
-  hasTrustRequiringProjectResources,
-  ProjectTrustStore,
-  resolveModelScope,
-  SettingsManager,
-} from "../capabilities/pi-model-registry.js";
+
+const execFileAsync = promisify(execFile);
 
 async function confirm(message: string): Promise<boolean | undefined> {
   let input: Readable = process.stdin;
@@ -51,23 +47,8 @@ async function verifiedInstallerContext(): Promise<boolean> {
 const interactive = Boolean((process.stdin.isTTY && process.stderr.isTTY) || process.platform !== "win32");
 async function loadModelCatalog() {
   try {
-    const cwd = process.cwd();
-    const agentDir = getAgentDir();
-    const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
-    const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
-    const services = await createAgentSessionServices({ cwd, agentDir, settingsManager });
-    if (
-      services.diagnostics.some(({ type }) => type === "warning" || type === "error")
-      || services.resourceLoader.getExtensions().errors.length > 0
-    ) {
-      return { status: "unavailable" as const, reason: "registry-error" as const };
-    }
-    const runtime = services.modelRuntime;
-    return await loadSelectablePiModelCatalog(
-      runtime,
-      settingsManager.getEnabledModels(),
-      async (patterns) => (await resolveModelScope([...patterns], runtime)).map(({ model }) => model),
-    );
+    const { stdout } = await execFileAsync("pi", ["--list-models"], { cwd: process.cwd(), encoding: "utf8" });
+    return parsePiListModels(stdout);
   } catch {
     return { status: "unavailable" as const, reason: "registry-error" as const };
   }

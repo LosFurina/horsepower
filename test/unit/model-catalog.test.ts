@@ -13,6 +13,17 @@ const fixtureEntry = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+test("parses the authoritative pi --list-models table", async () => {
+  const { parsePiListModels } = await import("../../src/capabilities/model-catalog.js");
+  const catalog = parsePiListModels([
+    "provider  model       context  max-out  thinking  images",
+    "alpha     first       128K     32K      yes       no",
+    "beta      second      64K      16K      no        yes",
+    "",
+  ].join("\n"));
+  expect(catalog).toMatchObject({ status: "available", modelIds: ["alpha/first", "beta/second"] });
+});
+
 test("discovers current Pi models as stable provider/model identifiers without secret revision inputs", async () => {
   const { createPiModelCatalog } = await import("../../src/capabilities/model-catalog.js");
   const first = createPiModelCatalog({

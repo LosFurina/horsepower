@@ -16,6 +16,15 @@ export interface PiAvailableModelRuntime {
   getAvailable(): Promise<readonly PiCatalogModel[]>;
 }
 
+export function parsePiListModels(output: string): PiModelCatalog {
+  const models = output.split(/\r?\n/u).slice(1).flatMap((line) => {
+    const columns = line.trim().split(/\s+/u);
+    if (columns.length < 5 || !columns[0] || !columns[1]) return [];
+    return [{ provider: columns[0], id: columns[1], reasoning: columns[4] === "yes" }];
+  });
+  return createPiModelCatalog({ getAll: () => models });
+}
+
 export type PiModelCatalog = {
   status: "available";
   modelIds: readonly string[];
