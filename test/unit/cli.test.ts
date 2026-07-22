@@ -85,7 +85,7 @@ test("configure --interactive runs the complete ordered journey while locale-onl
     ok: true, outputLocale: "zh-CN",
     data: { status: "incomplete", locale: { status: "configured", value: "zh-CN" }, webhook: { status: "skipped" } },
   });
-  expect(complete.data[["mod", "els"].join("")]).toMatchObject({ status: "skipped", followUp: "horsepower setup --interactive" });
+  expect(complete.data.modelSetup).toMatchObject({ status: "skipped", followUp: "horsepower setup --interactive" });
   expect(calls).toEqual(["locale:zh-CN", "boundary", "audit", "summary"]);
   expect(JSON.parse(await readFile(join(homeDir, ".pi/agent/horsepower/settings.json"), "utf8"))).toMatchObject({ outputLocale: "zh-CN" });
   expect(await run(["configure", "--locale", "en", "--json"])).toMatchObject({ exitCode: 0 });

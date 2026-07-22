@@ -47,7 +47,7 @@ test("complete configuration orders locale, Skill education/audit, webhook, and 
   expect(result).toMatchObject({
     status: "complete", locale: { status: "configured", value: "zh-CN" },
     skills: { status: "acknowledged", auditStatus: "complete", externalCount: 0 },
-    webhook: { status: "preserved" }, models: { status: "configured" },
+    webhook: { status: "preserved" }, modelSetup: { status: "configured" },
   });
   expect(ui.confirmSkillRisk).not.toHaveBeenCalled();
 });
@@ -64,7 +64,7 @@ test("default-No Skill risk refusal stops webhook and model changes", async () =
 
   expect(result).toMatchObject({
     status: "canceled", skills: { status: "declined", auditStatus: "partial" },
-    webhook: { status: "not_started" }, models: { status: "not_started" },
+    webhook: { status: "not_started" }, modelSetup: { status: "not_started" },
     followUps: ["horsepower configure --interactive"],
   });
   expect(applyWebhook).not.toHaveBeenCalled();
@@ -84,7 +84,7 @@ test("installer context reuses its pre-activation gate without suppressing bound
   expect(auditSkills).not.toHaveBeenCalled();
   expect(result).toMatchObject({
     status: "incomplete", skills: { status: "preconfirmed" },
-    models: { status: "skipped", followUp: "horsepower setup --interactive" },
+    modelSetup: { status: "skipped", followUp: "horsepower setup --interactive" },
   });
 });
 

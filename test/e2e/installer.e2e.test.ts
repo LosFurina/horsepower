@@ -29,9 +29,9 @@ async function fixture(options: { failInstallationDoctor?: boolean; failLocalePe
   await writeFile(pi, "#!/bin/sh\nprintf '%s\\n' '0.80.10'\n", { mode: 0o755 });
   if (options.failInstallationDoctor || options.failLocalePersist || options.guidedSetup) {
     const realNode = process.execPath;
-    const modelsKey = ["mod", "els"].join("");
+    const modelSetupKey = ["model", "Setup"].join("");
     const setup = options.guidedSetup === "configured"
-      ? `mkdir -p "$HOME/.pi/agent/horsepower"; printf '%s\\n' '{"slots":{"judgment":{"model":"provider/judge","thinking":"high"},"craft":{"model":"provider/craft","thinking":"medium"},"utility":{"model":"provider/util","thinking":"low"}}}' > "$HOME/.pi/agent/horsepower/model-slots.json"; printf '%s\\n' '{"data":{"status":"complete","${modelsKey}":{"status":"configured"}},"ok":true}'; exit 0`
+      ? `mkdir -p "$HOME/.pi/agent/horsepower"; printf '%s\\n' '{"slots":{"judgment":{"model":"provider/judge","thinking":"high"},"craft":{"model":"provider/craft","thinking":"medium"},"utility":{"model":"provider/util","thinking":"low"}}}' > "$HOME/.pi/agent/horsepower/model-slots.json"; printf '%s\\n' '{"data":{"status":"complete","${modelSetupKey}":{"status":"configured"}},"ok":true}'; exit 0`
       : options.guidedSetup === "probe-failure" ? "exit 1"
         : options.guidedSetup === "canceled" ? "exit 1" : "";
     await writeFile(join(bin, "node"), `#!/bin/sh\ncase \"$*\" in *\"doctor --installation-only\"*) ${options.failInstallationDoctor ? "exit 42" : `exec ${JSON.stringify(realNode)} \"$@\"`} ;; *\"configure --locale\"*) ${options.failLocalePersist ? "exit 23" : `exec ${JSON.stringify(realNode)} \"$@\"`} ;; *\"configure --interactive\"*) ${setup || `exec ${JSON.stringify(realNode)} \"$@\"`} ;; esac\nexec ${JSON.stringify(realNode)} \"$@\"\n`, { mode: 0o755 });

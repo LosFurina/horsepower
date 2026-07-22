@@ -48,7 +48,7 @@ test("guided setup renders every human prompt in the effective locale while iden
     status: "incomplete", locale: { status: "configured", value: "zh-CN" }, skills: { status: "acknowledged" },
     webhook: { status: "skipped" }, followUps: ["horsepower setup --interactive"],
   };
-  Reflect.set(summary, ["mod", "els"].join(""), { status: "skipped" });
+  Reflect.set(summary, ["model", "Setup"].join(""), { status: "skipped" });
   await terminal.showConfigurationSummary("zh-CN", summary as never);
   const rendered = await readFile(output, "utf8");
   expect(rendered).toContain("当前 Pi 模型");

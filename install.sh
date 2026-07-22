@@ -262,7 +262,7 @@ if [ "$INTERACTIVE" -eq 1 ]; then
     INSTALLER_CONTEXT_WRITER=$!
     if HOME="$HOME_DIR" HORSEPOWER_INSTALLER_CONTEXT_FD=9 HORSEPOWER_INSTALLER_NONCE="$INSTALLER_NONCE" HORSEPOWER_TTY_INPUT="$TTY_INPUT" HORSEPOWER_TTY_OUTPUT="$TTY_OUTPUT" HORSEPOWER_TTY_INPUT_OFFSET="$TTY_CONSUMED" "$CLI_LINK" configure --interactive --json 9<"$INSTALLER_CONTEXT" >"$CONFIGURATION_JSON" 2>"$CONFIGURATION_ERROR"; then
       CONFIGURATION_COMPLETE=1
-      MODEL_STATUS=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(String(r.data.models.status))' "$CONFIGURATION_JSON" 2>/dev/null || printf unknown)
+      MODEL_STATUS=$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(String(r.data.modelSetup.status))' "$CONFIGURATION_JSON" 2>/dev/null || printf unknown)
       [ "$MODEL_STATUS" = "configured" ] && MODEL_SETUP_COMPLETE=1
     fi
     wait "$INSTALLER_CONTEXT_WRITER" || true

@@ -27,7 +27,7 @@ export interface CompleteConfigurationResult {
   locale: { status: "configured" | "preserved"; value: OutputLocale };
   skills: { status: "acknowledged" | "declined" | "preconfirmed" | "not_started"; auditStatus?: SkillAuditResult["status"]; externalCount?: number };
   webhook: { status: "preserved" | "skipped" | "disabled" | "configured" | "canceled" | "not_started" };
-  models: { status: "configured" | "skipped" | "canceled" | "not_started"; followUp?: "horsepower setup --interactive" };
+  modelSetup: { status: "configured" | "skipped" | "canceled" | "not_started"; followUp?: "horsepower setup --interactive" };
   followUps: string[];
 }
 
@@ -55,12 +55,12 @@ function finish(result: CompleteConfigurationResult): CompleteConfigurationResul
     || result.webhook.status === "not_started" || result.webhook.status === "canceled";
   result.followUps = completeJourneyStopped
     ? ["horsepower configure --interactive"]
-    : result.models.status === "configured" ? [] : ["horsepower setup --interactive"];
-  if (!completeJourneyStopped && result.models.status !== "configured") result.models.followUp = "horsepower setup --interactive";
-  result.status = result.skills.status === "not_started" || result.skills.status === "declined" || result.webhook.status === "canceled" || result.models.status === "canceled"
+    : result.modelSetup.status === "configured" ? [] : ["horsepower setup --interactive"];
+  if (!completeJourneyStopped && result.modelSetup.status !== "configured") result.modelSetup.followUp = "horsepower setup --interactive";
+  result.status = result.skills.status === "not_started" || result.skills.status === "declined" || result.webhook.status === "canceled" || result.modelSetup.status === "canceled"
     ? "canceled"
     : result.webhook.status === "configured" || result.webhook.status === "preserved" || result.webhook.status === "skipped" || result.webhook.status === "disabled"
-      ? result.models.status === "configured" ? "complete" : "incomplete"
+      ? result.modelSetup.status === "configured" ? "complete" : "incomplete"
       : "incomplete";
   return result;
 }
@@ -73,7 +73,7 @@ export async function runCompleteConfiguration(options: CompleteConfigurationOpt
     if (!selected) {
       const canceled = finish({
         status: "canceled", locale: { status: "preserved", value: locale }, skills: { status: "not_started" },
-        webhook: { status: "not_started" }, models: { status: "not_started" }, followUps: [],
+        webhook: { status: "not_started" }, modelSetup: { status: "not_started" }, followUps: [],
       });
       await options.terminal.showConfigurationSummary(locale, canceled);
       return canceled;
@@ -96,7 +96,7 @@ export async function runCompleteConfiguration(options: CompleteConfigurationOpt
       const declined = finish({
         status: "canceled", locale: { status: localeStatus, value: locale },
         skills: { status: "declined", auditStatus: audit.status, externalCount: audit.externalCount },
-        webhook: { status: "not_started" }, models: { status: "not_started" }, followUps: [],
+        webhook: { status: "not_started" }, modelSetup: { status: "not_started" }, followUps: [],
       });
       await options.terminal.showConfigurationSummary(locale, declined);
       return declined;
@@ -106,13 +106,13 @@ export async function runCompleteConfiguration(options: CompleteConfigurationOpt
 
   const webhookAction = await options.terminal.chooseWebhookAction(locale, options.existingWebhook === true);
   if (webhookAction === "cancel") {
-    const canceled = finish({ status: "canceled", locale: { status: localeStatus, value: locale }, skills, webhook: { status: "canceled" }, models: { status: "not_started" }, followUps: [] });
+    const canceled = finish({ status: "canceled", locale: { status: localeStatus, value: locale }, skills, webhook: { status: "canceled" }, modelSetup: { status: "not_started" }, followUps: [] });
     await options.terminal.showConfigurationSummary(locale, canceled);
     return canceled;
   }
   const webhookConfiguration = webhookAction === "configure" ? await options.terminal.readWebhookConfiguration(locale) : undefined;
   if (webhookAction === "configure" && !webhookConfiguration) {
-    const canceled = finish({ status: "canceled", locale: { status: localeStatus, value: locale }, skills, webhook: { status: "canceled" }, models: { status: "not_started" }, followUps: [] });
+    const canceled = finish({ status: "canceled", locale: { status: localeStatus, value: locale }, skills, webhook: { status: "canceled" }, modelSetup: { status: "not_started" }, followUps: [] });
     await options.terminal.showConfigurationSummary(locale, canceled);
     return canceled;
   }
@@ -121,7 +121,7 @@ export async function runCompleteConfiguration(options: CompleteConfigurationOpt
   const modelStatus = modelAction === "configure" ? await options.setupModels(locale) : modelAction === "skip" ? "skipped" : "canceled";
   const result = finish({
     status: "incomplete", locale: { status: localeStatus, value: locale }, skills,
-    webhook: { status: webhookStatus }, models: { status: modelStatus }, followUps: [],
+    webhook: { status: webhookStatus }, modelSetup: { status: modelStatus }, followUps: [],
   });
   await options.terminal.showConfigurationSummary(locale, result);
   return result;

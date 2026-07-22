@@ -778,6 +778,16 @@ test("privacy scanner permits comparisons, arrows, placeholders, and runtime ref
   }
 });
 
+test("privacy scanner accepts the complete configuration source without weakening concrete binding detection", async () => {
+  const sectionKey = ["mod", "els"].join("");
+  const source = await readFile("src/cli/configuration.ts");
+  expect(() => scanPublicContent([{ path: "src/cli/configuration.ts", content: source }])).not.toThrow();
+  expect(() => scanPublicContent([{
+    path: "src/private-binding.ts",
+    content: Buffer.from(`const result = { ${sectionKey}: { judgment: "private-production-v9" } };`),
+  }])).toThrow(/Forbidden public content \(concrete-model\)/u);
+});
+
 test("privacy scanner detects current GitHub credential shapes without matching near misses", () => {
   const classic = `${["gh", "p"].join("")}_${"a".repeat(36)}`;
   const fineGrained = `${["github", "pat"].join("_")}_${"A1_".repeat(27)}Z`;
