@@ -26,6 +26,7 @@ export interface CliOptions {
   platform: NodeJS.Platform;
   models?: ModelCatalog;
   modelCatalog?: PiModelCatalog;
+  loadModelCatalog?: () => Promise<PiModelCatalog>;
   capabilityProbe?: ModelCapabilityProbe;
   modelCapabilityDiagnostics?: readonly {
     id: string;
@@ -349,11 +350,19 @@ export function createCli(options: CliOptions) {
   function requireSupportedPlatform(): void {
     if (options.platform !== "linux" && options.platform !== "darwin") throw new Error(`Unsupported platform: ${options.platform}`);
   }
-  function setupCatalog(): PiModelCatalog | undefined {
+  let loadedModelCatalog: Promise<PiModelCatalog> | undefined;
+  function knownModelCatalog(): PiModelCatalog | undefined {
     if (options.modelCatalog) return options.modelCatalog;
     if (!options.models) return undefined;
     const modelIds = Object.keys(options.models).sort();
     return { status: "available", modelIds, models: options.models, revision: createHash("sha256").update(JSON.stringify(options.models)).digest("hex") };
+  }
+  async function setupCatalog(): Promise<PiModelCatalog | undefined> {
+    const known = knownModelCatalog();
+    if (known) return known;
+    if (!options.loadModelCatalog) return undefined;
+    loadedModelCatalog ??= options.loadModelCatalog();
+    return loadedModelCatalog;
   }
   async function setup(parsed: ReturnType<typeof flags>, localeOverride?: OutputLocale): Promise<CommandResult> {
     only(parsed, ["judgment", "judgment-thinking", "craft", "craft-thinking", "utility", "utility-thinking"], ["interactive"]);
@@ -365,7 +374,7 @@ export function createCli(options: CliOptions) {
     if (parsed.switches.has("interactive")) {
       const setupLocale = localeOverride ?? await resolveOutputLocale(paths.global.settings, paths.project.settings);
       (options.terminal as SetupTerminal & { setLocale?: (locale: OutputLocale) => void }).setLocale?.(setupLocale);
-      const guided = await collectGuidedSetup(setupCatalog(), options.capabilityProbe, options.terminal!);
+      const guided = await collectGuidedSetup(await setupCatalog(), options.capabilityProbe, options.terminal!);
       if (guided.status !== "selected") return { data: guided, ok: guided.status === "skipped", exitCode: guided.status === "skipped" ? 0 : 1, summaryId: guided.status === "skipped" ? "setup.skipped" : "setup.canceled" };
       selections = guided.selections;
       prevalidated = guided.validations;
@@ -388,7 +397,7 @@ export function createCli(options: CliOptions) {
       parseWebhookSettings(settings.webhook, projectSettings.webhook);
       return {
         data: await commitSetup({
-          catalog: setupCatalog(), probe: options.capabilityProbe, ...(prevalidated ? { prevalidated } : { forceLiveProbe: true }), currentGlobal: globalSlots,
+          catalog: await setupCatalog(), probe: options.capabilityProbe, ...(prevalidated ? { prevalidated } : { forceLiveProbe: true }), currentGlobal: globalSlots,
           project: projectSlots, settings, modelSlotsPath: paths.global.modelSlots,
           settingsPath: paths.global.settings, write: writeConfigs,
         }, selections),
@@ -687,7 +696,7 @@ export function createCli(options: CliOptions) {
       }
     }
     checks.push(await openspecCheck(outputLocale));
-    const catalog = setupCatalog();
+    const catalog = knownModelCatalog();
     if (configurationValid && catalog?.status === "unavailable") {
       checks.push({
         id: "model-catalog", status: "skipped", catalogStatus: "unavailable",

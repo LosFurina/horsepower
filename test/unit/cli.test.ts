@@ -147,6 +147,14 @@ test("skill-audit is observation-only with stable JSON, localized human output, 
   expect((await zh.run(["skill-audit"])).stdout).toContain("技能暴露审计：complete");
 });
 
+test("skill-audit does not initialize the extension-backed model catalog", async () => {
+  const loadModelCatalog = vi.fn(async () => ({ status: "unavailable" as const, reason: "registry-error" as const }));
+  const { run } = await harness({ models: undefined, loadModelCatalog });
+
+  expect((await run(["skill-audit", "--json"])).exitCode).toBe(0);
+  expect(loadModelCatalog).not.toHaveBeenCalled();
+});
+
 test("strictly parses commands and emits deterministic JSON with stable exit codes", async () => {
   const { run } = await harness();
   expect(await run(["unknown", "--json"])).toEqual({

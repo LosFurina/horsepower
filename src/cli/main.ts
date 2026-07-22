@@ -49,21 +49,25 @@ async function verifiedInstallerContext(): Promise<boolean> {
 }
 
 const interactive = Boolean((process.stdin.isTTY && process.stderr.isTTY) || process.platform !== "win32");
-let modelCatalog;
-try {
-  const cwd = process.cwd();
-  const agentDir = getAgentDir();
-  const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
-  const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
-  const { modelRuntime: runtime } = await createAgentSessionServices({ cwd, agentDir, settingsManager });
-  const enabledModels = settingsManager.getEnabledModels();
-  modelCatalog = await loadSelectablePiModelCatalog(
-    runtime,
-    enabledModels,
-    async (patterns) => (await resolveModelScope([...patterns], runtime)).map(({ model }) => model),
-  );
-} catch {
-  modelCatalog = { status: "unavailable" as const, reason: "registry-error" as const };
+async function loadModelCatalog() {
+  try {
+    const cwd = process.cwd();
+    const agentDir = getAgentDir();
+    const projectTrusted = !hasTrustRequiringProjectResources(cwd) || new ProjectTrustStore(agentDir).get(cwd) === true;
+    const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+    const services = await createAgentSessionServices({ cwd, agentDir, settingsManager });
+    if (services.diagnostics.some(({ type }) => type === "warning" || type === "error")) {
+      return { status: "unavailable" as const, reason: "registry-error" as const };
+    }
+    const runtime = services.modelRuntime;
+    return await loadSelectablePiModelCatalog(
+      runtime,
+      settingsManager.getEnabledModels(),
+      async (patterns) => (await resolveModelScope([...patterns], runtime)).map(({ model }) => model),
+    );
+  } catch {
+    return { status: "unavailable" as const, reason: "registry-error" as const };
+  }
 }
 const terminal = createSetupTerminal();
 const cli = createCli({
@@ -73,7 +77,7 @@ const cli = createCli({
   runOpenSpec: createOpenSpecCliRunner(),
   interactive,
   confirm,
-  modelCatalog,
+  loadModelCatalog,
   capabilityProbe: createPiCapabilityProbe(),
   terminal,
   configurationTerminal: terminal,
