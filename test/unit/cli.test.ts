@@ -1551,13 +1551,13 @@ test("uninstall refuses regular, unrelated, and hostile symlink targets without 
 
 test("preflight enforces semantic release compatibility boundaries", async () => {
   for (const [name, compatibility, expectedExit] of [
-    ["boundaries", { node: ">=22.19.0", pi: ">=0.80.10 <1.0.0", openspec: ">=1.6.0 <2.0.0" }, 0],
-    ["arbitrary-node", { node: "supported", pi: ">=0.80.10 <1.0.0", openspec: ">=1.6.0 <2.0.0" }, 1],
-    ["old-node", { node: ">=22.18.0", pi: ">=0.80.10 <1.0.0", openspec: ">=1.6.0 <2.0.0" }, 1],
+    ["boundaries", { node: ">=22.19.0", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" }, 0],
+    ["arbitrary-node", { node: "supported", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" }, 1],
+    ["old-node", { node: ">=22.18.0", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" }, 1],
     ["arbitrary-pi", { node: ">=22.19.0", pi: "compatible", openspec: ">=1.6.0 <2.0.0" }, 1],
     ["old-pi", { node: ">=22.19.0", pi: "0.80.9", openspec: ">=1.6.0 <2.0.0" }, 1],
-    ["arbitrary-openspec", { node: ">=22.19.0", pi: ">=0.80.10 <1.0.0", openspec: "latest" }, 1],
-    ["old-openspec", { node: ">=22.19.0", pi: ">=0.80.10 <1.0.0", openspec: ">=1.5.9" }, 1],
+    ["arbitrary-openspec", { node: ">=22.19.0", pi: ">=0.80.10 <0.82.0", openspec: "latest" }, 1],
+    ["old-openspec", { node: ">=22.19.0", pi: ">=0.80.10 <0.82.0", openspec: ">=1.5.9" }, 1],
   ] as const) {
     const { root, run } = await harness();
     const staged = join(root, `staged-${name}`);
@@ -1627,7 +1627,7 @@ test("doctor reports malformed managed release topology as actionable installati
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     if (hostile === "trivial") await writeFile(manifestPath, JSON.stringify({ version: "0.1.0" }));
     if (hostile === "compatibility") {
-      manifest.compatibility = { node: "", pi: ">=0.80.10 <1.0.0", openspec: ">=1.6.0 <2.0.0" };
+      manifest.compatibility = { node: "", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" };
       await writeFile(manifestPath, JSON.stringify(manifest));
     }
     if (hostile === "entrypoint") {

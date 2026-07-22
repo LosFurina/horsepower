@@ -6,7 +6,7 @@ export interface ReleaseCompatibility {
 
 export const supportedCompatibility = {
   node: ">=22.19.0",
-  pi: ">=0.80.10 <1.0.0",
+  pi: ">=0.80.10 <0.82.0",
   openspec: ">=1.6.0 <2.0.0",
 } as const satisfies ReleaseCompatibility;
 

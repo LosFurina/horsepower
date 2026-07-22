@@ -265,11 +265,11 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
   expect(settings.webhook).toMatchObject({ auth: { mode: "bearer", token: sampleValue }, notifications: { change: true, dispatch: false } });
 });
 
-test("incompatible Pi is rejected before release download or managed filesystem mutation", async () => {
+test.each(["0.80.9", "0.82.0", "0.81.1-beta.1"])("incompatible Pi %s is rejected before release download or managed filesystem mutation", async (piVersion) => {
   const fixturePaths = await fixture();
-  await writeFile(fixturePaths.pi, "#!/bin/sh\nprintf '%s\\n' '0.80.9'\n", { mode: 0o755 });
+  await writeFile(fixturePaths.pi, `#!/bin/sh\nprintf '%s\\n' '${piVersion}'\n`, { mode: 0o755 });
   await expect(runInstaller(fixturePaths, [], "file:///release-must-not-be-read"))
-    .rejects.toMatchObject({ stderr: expect.stringContaining("Pi >=0.80.10 <1.0.0 is required") });
+    .rejects.toMatchObject({ stderr: expect.stringContaining("Pi >=0.80.10 <0.82.0 is required") });
   await expect(access(join(fixturePaths.home, ".pi"))).rejects.toThrow();
 });
 

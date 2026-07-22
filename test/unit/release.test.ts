@@ -86,7 +86,7 @@ test("builds the exact Pi layout with strict manifest digests and canonical mode
   const manifest = JSON.parse(manifestEntry?.content?.toString("utf8") ?? "null");
   expect(manifest).toEqual({
     version: "1.2.3-alpha.1",
-    compatibility: { node: ">=22.19.0", pi: ">=0.80.10 <1.0.0", openspec: ">=1.6.0 <2.0.0" },
+    compatibility: { node: ">=22.19.0", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" },
     entryPoints: {
       cli: "bin/horsepower",
       extension: "pi/extensions/horsepower/index.js",
@@ -108,7 +108,7 @@ test("builds the exact Pi layout with strict manifest digests and canonical mode
 
 test("release manifest compatibility is generated from the shared source contract", async () => {
   const { supportedCompatibility } = await import("../../src/compatibility.js").catch(() => ({ supportedCompatibility: undefined }));
-  expect(supportedCompatibility).toEqual({ node: ">=22.19.0", pi: ">=0.80.10 <1.0.0", openspec: ">=1.6.0 <2.0.0" });
+  expect(supportedCompatibility).toEqual({ node: ">=22.19.0", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" });
   const repositoryRoot = await fixtureRepository();
   const result = await buildRelease({
     repositoryRoot,
@@ -287,7 +287,7 @@ test("strict staged validation rejects unknown manifest fields", async () => {
   }
   const manifest = {
     version: "1.2.3-alpha.1",
-    compatibility: { node: ">=22.19.0", pi: ">=0.80.10 <1.0.0", openspec: ">=1.6.0 <2.0.0" },
+    compatibility: { node: ">=22.19.0", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" },
     entryPoints: {
       cli: "bin/horsepower",
       extension: "pi/extensions/horsepower/index.js",

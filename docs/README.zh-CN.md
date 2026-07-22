@@ -8,7 +8,7 @@ Horsepower 是 Pi 的显式、模型中立多 Agent runtime。它协调持久 Pi
 
 - Linux 或 macOS
 - Node.js 22.19+
-- Pi 0.80.10 或更新版本（低于 1.0.0）
+- Pi 0.80.10 或更新版本（低于 0.82.0）
 - 官方 OpenSpec 1.6.0+
 
 从 `raw/main` 下载并检查仓库自带的 `install.sh`。脚本只从 `LosFurina/horsepower` GitHub Releases 页面下载安装 asset；默认会解析并安装仓库当前的 Latest Release：

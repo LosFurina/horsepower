@@ -6,7 +6,7 @@ LOCALE=""
 NO_SETUP=0
 REPOSITORY="https://github.com/LosFurina/horsepower"
 readonly NODE_COMPATIBILITY='>=22.19.0'
-readonly PI_COMPATIBILITY='>=0.80.10 <1.0.0'
+readonly PI_COMPATIBILITY='>=0.80.10 <0.82.0'
 readonly OPENSPEC_COMPATIBILITY='>=1.6.0 <2.0.0'
 
 usage() {
@@ -66,7 +66,7 @@ if PI_VERSION=$(pi --version 2>/dev/null); then :; else fail "Pi $PI_COMPATIBILI
 node -e '
 const value = process.argv[1];
 const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
-process.exit(match && match[4] === undefined && Number(match[1]) === 0 && (Number(match[2]) > 80 || (Number(match[2]) === 80 && Number(match[3]) >= 10)) ? 0 : 1);
+process.exit(match && match[4] === undefined && Number(match[1]) === 0 && (Number(match[2]) === 81 || (Number(match[2]) === 80 && Number(match[3]) >= 10)) ? 0 : 1);
 ' "$PI_VERSION" || fail "Pi $PI_COMPATIBILITY is required; found ${PI_VERSION:-unknown}"
 command -v openspec >/dev/null 2>&1 || fail "Install official @fission-ai/openspec $OPENSPEC_COMPATIBILITY: https://github.com/Fission-AI/OpenSpec"
 if OPENSPEC_VERSION=$(openspec --version 2>/dev/null); then :; else
