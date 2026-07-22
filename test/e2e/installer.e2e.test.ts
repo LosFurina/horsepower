@@ -267,10 +267,18 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
 
 test("incompatible Pi is rejected before release download or managed filesystem mutation", async () => {
   const fixturePaths = await fixture();
-  await writeFile(fixturePaths.pi, "#!/bin/sh\nprintf '%s\\n' '0.80.11'\n", { mode: 0o755 });
+  await writeFile(fixturePaths.pi, "#!/bin/sh\nprintf '%s\\n' '0.80.9'\n", { mode: 0o755 });
   await expect(runInstaller(fixturePaths, [], "file:///release-must-not-be-read"))
-    .rejects.toMatchObject({ stderr: expect.stringContaining("Pi 0.80.10 is required") });
+    .rejects.toMatchObject({ stderr: expect.stringContaining("Pi >=0.80.10 <1.0.0 is required") });
   await expect(access(join(fixturePaths.home, ".pi"))).rejects.toThrow();
+});
+
+test("installer accepts a newer compatible Pi release", async () => {
+  const fixturePaths = await fixture();
+  await writeFile(fixturePaths.pi, "#!/bin/sh\nprintf '%s\\n' '0.81.1'\n", { mode: 0o755 });
+  await expect(runInstaller(fixturePaths)).resolves.toMatchObject({
+    stdout: expect.stringContaining("Horsepower installed successfully."),
+  });
 });
 
 test.each(["1.5.9", "2.0.0", "1.6.0-beta.1", "OpenSpec 1.6.0", "01.6.0"])(

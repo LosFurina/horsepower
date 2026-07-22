@@ -8,7 +8,7 @@ Horsepower is an explicit, model-neutral multi-Agent runtime for Pi. It coordina
 
 - Linux or macOS
 - Node.js 22.19 or newer
-- Pi 0.80.10
+- Pi 0.80.10 or newer (before 1.0.0)
 - Official OpenSpec 1.6.0 or newer
 
 Download and inspect the repository-owned `install.sh` from `raw/main`. The script downloads installable assets only from the `LosFurina/horsepower` GitHub Releases page; by default it resolves and installs the repository's current Latest Release:
