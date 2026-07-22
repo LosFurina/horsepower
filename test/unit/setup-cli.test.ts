@@ -63,7 +63,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-test("guided setup lists current models and probes only each selected exact pair", async () => {
+test("guided setup trusts Pi-configured models without probing upstream", async () => {
   const terminal = {
     showModels: vi.fn(),
     chooseModel: vi.fn(async ({ slot }: { slot: keyof typeof slots }) => slots[slot].model),
@@ -81,11 +81,8 @@ test("guided setup lists current models and probes only each selected exact pair
   expect(result.exitCode).toBe(0);
   expect(terminal.showModels).toHaveBeenCalledWith(catalog.modelIds);
   expect(terminal.chooseModel.mock.calls.map(([request]) => request.slot)).toEqual(["judgment", "craft", "utility"]);
-  expect((setup.probe.probe.mock.calls as unknown as Array<[{ model: string; thinking: string }]>).map(([request]) => request)).toEqual([
-    slots.judgment,
-    slots.craft,
-    slots.utility,
-  ]);
+  expect(setup.probe.probe).not.toHaveBeenCalled();
+  expect(terminal.chooseProbeAction).not.toHaveBeenCalled();
   expect(writes).toHaveLength(1);
   expect(writes[0]).toHaveLength(2);
   expect(JSON.parse(result.stdout)).toMatchObject({
@@ -96,51 +93,24 @@ test("guided setup lists current models and probes only each selected exact pair
   });
 });
 
-test("guided setup supports retry and reselect without probing unselected pairs", async () => {
-  const modelChoices = [visibleIds.judge, visibleIds.craft, visibleIds.craft, visibleIds.utility];
-  const thinkingChoices = ["high", "max", "medium", "low"];
-  const actions = ["retry", "reselect"];
+test("guided setup cancellation before selection preserves prior slot bytes", async () => {
   const terminal = {
     showModels: vi.fn(),
-    chooseModel: vi.fn(async () => modelChoices.shift()),
-    chooseThinking: vi.fn(async () => thinkingChoices.shift()),
-    chooseProbeAction: vi.fn(async () => actions.shift()),
+    chooseModel: vi.fn(async () => undefined),
+    chooseThinking: vi.fn(),
+    chooseProbeAction: vi.fn(),
   };
-  const observations: Array<"inconclusive" | "unsupported" | "supported"> = ["inconclusive", "supported", "unsupported", "supported", "supported"];
-  const probe = { probe: vi.fn(async (_request: { model: string; thinking: string }) => ({ status: observations.shift()!, evidence: { code: "fixture" } })) };
-  const setup = await harness({ terminal, capabilityProbe: probe });
-
-  expect((await setup.run(["setup", "--interactive", "--json"])).exitCode).toBe(0);
-  expect(probe.probe.mock.calls.map(([request]: [{ model: string; thinking: string }]) => `${request.model}:${request.thinking}`)).toEqual([
-    `${visibleIds.judge}:high`,
-    `${visibleIds.judge}:high`,
-    `${visibleIds.craft}:max`,
-    `${visibleIds.craft}:medium`,
-    `${visibleIds.utility}:low`,
-  ]);
-});
-
-test.each(["skip", "cancel"] as const)("guided setup %s preserves prior slot bytes and returns a stable status", async (action) => {
-  const terminal = {
-    showModels: vi.fn(),
-    chooseModel: vi.fn(async () => slots.judgment.model),
-    chooseThinking: vi.fn(async () => slots.judgment.thinking),
-    chooseProbeAction: vi.fn(async () => action),
-  };
-  const probe = { probe: vi.fn(async () => ({ status: "inconclusive" as const, evidence: { code: "timeout" } })) };
-  const setup = await harness({ terminal, capabilityProbe: probe });
+  const setup = await harness({ terminal });
   const before = Buffer.from('{"future":{"preserve":"exactly"}}\n');
   await mkdir(dirname(setup.slotsPath), { recursive: true });
   await writeFile(setup.slotsPath, before);
 
   const result = await setup.run(["setup", "--interactive", "--json"]);
 
-  expect(result.exitCode).toBe(action === "cancel" ? 1 : 0);
+  expect(result.exitCode).toBe(1);
   expect(await readFile(setup.slotsPath)).toEqual(before);
-  expect(JSON.parse(result.stdout)).toMatchObject({
-    ok: action === "skip",
-    data: { status: action === "skip" ? "skipped" : "canceled" },
-  });
+  expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, data: { status: "canceled" } });
+  expect(terminal.chooseProbeAction).not.toHaveBeenCalled();
 });
 
 test("guided setup conclusions are localized in zh-CN while machine fields stay stable", async () => {
@@ -164,58 +134,7 @@ test("guided setup conclusions are localized in zh-CN while machine fields stay 
   });
 });
 
-test("explicit setup preserves prior bytes and reports probe cancellation stably", async () => {
-  const probe = {
-    probe: vi.fn(async ({ model }: { model: string }) => ({
-      status: model === slots.craft.model ? "inconclusive" as const : "supported" as const,
-      evidence: { code: model === slots.craft.model ? "aborted" : "completed" },
-    })),
-  };
-  const setup = await harness({ capabilityProbe: probe });
-  const before = Buffer.from('{"prior":"exact bytes"}\n');
-  await mkdir(dirname(setup.slotsPath), { recursive: true });
-  await writeFile(setup.slotsPath, before);
-
-  const result = await setup.run(explicitArgs);
-
-  expect(probe.probe).toHaveBeenCalledTimes(3);
-  expect(await readFile(setup.slotsPath)).toEqual(before);
-  expect(JSON.parse(result.stderr)).toMatchObject({
-    ok: false,
-    error: { code: "SETUP_CANCELED", status: "canceled", slot: "craft", evidenceCode: "aborted" },
-  });
-});
-
-test.each(["unsupported", "inconclusive"] as const)("explicit setup validates all slots and preserves exact bytes on %s", async (failedStatus) => {
-  const probe = {
-    probe: vi.fn(async ({ model }: { model: string }) => ({
-      status: model === slots.craft.model ? failedStatus : "supported",
-      evidence: { code: failedStatus === "unsupported" ? "thinking_rejected" : "timeout" },
-    })),
-  };
-  const setup = await harness({ capabilityProbe: probe });
-  const before = Buffer.from('{ "slots": {"old": true}, "format": "unchanged" }\n');
-  await mkdir(dirname(setup.slotsPath), { recursive: true });
-  await writeFile(setup.slotsPath, before);
-
-  const result = await setup.run(explicitArgs);
-
-  expect(probe.probe).toHaveBeenCalledTimes(3);
-  expect(await readFile(setup.slotsPath)).toEqual(before);
-  expect(JSON.parse(result.stderr)).toMatchObject({
-    ok: false,
-    error: {
-      code: failedStatus === "unsupported" ? "MODEL_CAPABILITY_UNSUPPORTED" : "MODEL_CAPABILITY_INCONCLUSIVE",
-      status: failedStatus,
-      slot: "craft",
-      model: slots.craft.model,
-      thinking: slots.craft.thinking,
-      evidenceCode: failedStatus === "unsupported" ? "thinking_rejected" : "timeout",
-    },
-  });
-});
-
-test("authoritative exact exclusion remains unsupported after explicit live validation", async () => {
+test("authoritative exact exclusion remains unsupported without an upstream probe", async () => {
   const exactCatalog = {
     ...catalog,
     [entriesKey]: {
@@ -227,7 +146,7 @@ test("authoritative exact exclusion remains unsupported after explicit live vali
 
   const result = await setup.run(explicitArgs);
 
-  expect(setup.probe.probe).toHaveBeenCalledTimes(3);
+  expect(setup.probe.probe).not.toHaveBeenCalled();
   expect(JSON.parse(result.stderr)).toMatchObject({
     error: {
       code: "MODEL_CAPABILITY_UNSUPPORTED",
@@ -238,7 +157,7 @@ test("authoritative exact exclusion remains unsupported after explicit live vali
   });
 });
 
-test("explicit setup live-probes all three even when the catalog declares exact support", async () => {
+test("explicit setup accepts exact declared support without an upstream probe", async () => {
   const declaredCatalog = {
     ...catalog,
     [entriesKey]: {
@@ -250,7 +169,7 @@ test("explicit setup live-probes all three even when the catalog declares exact 
   const setup = await harness({ modelCatalog: declaredCatalog });
 
   expect((await setup.run(explicitArgs)).exitCode).toBe(0);
-  expect(setup.probe.probe).toHaveBeenCalledTimes(3);
+  expect(setup.probe.probe).not.toHaveBeenCalled();
 });
 
 test("explicit setup validates all three before one atomic commit and reports its revision", async () => {
@@ -261,7 +180,7 @@ test("explicit setup validates all three before one atomic commit and reports it
 
   const result = JSON.parse((await setup.run(explicitArgs)).stdout);
 
-  expect(setup.probe.probe).toHaveBeenCalledTimes(3);
+  expect(setup.probe.probe).not.toHaveBeenCalled();
   expect(writes).toHaveLength(1);
   expect(writes[0]).toHaveLength(2);
   expect(result).toMatchObject({
@@ -287,7 +206,7 @@ test("explicit setup preserves prior bytes and returns a stable write error when
 
   const result = await setup.run(explicitArgs);
 
-  expect(setup.probe.probe).toHaveBeenCalledTimes(3);
+  expect(setup.probe.probe).not.toHaveBeenCalled();
   expect(await readFile(setup.slotsPath)).toEqual(before);
   expect(JSON.parse(result.stderr)).toMatchObject({
     ok: false,

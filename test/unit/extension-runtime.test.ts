@@ -117,7 +117,7 @@ test("shares process-local capability evidence across one-shot and persistent cr
   await runtime.execute({ action: "single", handoffMode: "inline", ...common, taskScope: "one", name: "one", task: "work" }, context);
   await runtime.execute({ action: "create", handoffMode: "inline", ...common, taskScope: "two", name: "two" }, context);
 
-  expect(capabilityProbe.probe).toHaveBeenCalledTimes(1);
+  expect(capabilityProbe.probe).not.toHaveBeenCalled();
   expect(oneShot.single).toHaveBeenCalledTimes(1);
   expect(manager.create).toHaveBeenCalledTimes(1);
   await runtime.shutdown();

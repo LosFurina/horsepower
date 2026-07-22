@@ -10,7 +10,7 @@ export interface CapabilityEvidenceKey {
 }
 
 export interface SupportedCapabilityEvidence {
-  source: "declared" | "live-probe";
+  source: "declared" | "user-configured";
   code: string;
 }
 

@@ -83,25 +83,16 @@ function validateSelection(catalog: Extract<PiModelCatalog, { status: "available
 
 async function verify(
   catalog: Extract<PiModelCatalog, { status: "available" }>,
-  probe: ModelCapabilityProbe | undefined,
+  _probe: ModelCapabilityProbe | undefined,
   slot: RequiredSetupSlot,
   selection: ModelBinding,
-  forceLiveProbe = false,
+  _forceLiveProbe = false,
 ): Promise<SetupValidation> {
   validateSelection(catalog, slot, selection);
   const declared = catalog.models[selection.model]?.thinkingLevels;
-  const probed: CapabilityProbeResult | undefined = forceLiveProbe
-    ? probe
-      ? await probe.probe(selection)
-      : { status: "inconclusive", evidence: { code: "probe_unavailable" } }
-    : undefined;
   const result: CapabilityProbeResult = declared !== undefined && !declared.includes(selection.thinking)
     ? { status: "unsupported", evidence: { code: "declared_exact_exclusion" } }
-    : probed ?? (declared?.includes(selection.thinking)
-      ? { status: "supported", evidence: { code: "declared_exact_support" } }
-      : probe
-        ? await probe.probe(selection)
-        : { status: "inconclusive", evidence: { code: "probe_unavailable" } });
+    : { status: "supported", evidence: { code: declared?.includes(selection.thinking) ? "declared_exact_support" : "user_configured" } };
   return { slot, ...selection, status: result.status, evidenceCode: result.evidence.code };
 }
 
@@ -168,20 +159,11 @@ export async function collectGuidedSetup(
       if (!thinking) return { status: "canceled", catalogRevision: catalog.revision };
       const selection = { model, thinking };
       validateSelection(catalog, slot, selection);
-      for (;;) {
-        const validation = await verify(catalog, probe, slot, selection);
-        if (validation.status === "supported") {
-          selections[slot] = selection;
-          validations.push(validation);
-          selected = true;
-          break;
-        }
-        const result = { status: validation.status, evidence: { code: validation.evidenceCode } } as Exclude<CapabilityProbeResult, { status: "supported" }>;
-        const action = await terminal.chooseProbeAction({ slot, selection, result });
-        if (!action || action === "cancel") return { status: "canceled", catalogRevision: catalog.revision };
-        if (action === "skip") return { status: "skipped", catalogRevision: catalog.revision };
-        if (action === "reselect") break;
-      }
+      const validation = await verify(catalog, probe, slot, selection);
+      if (validation.status !== "supported") throw failure(validation);
+      selections[slot] = selection;
+      validations.push(validation);
+      selected = true;
     }
   }
   return { status: "selected", selections, validations };

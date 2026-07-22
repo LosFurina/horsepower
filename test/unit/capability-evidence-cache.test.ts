@@ -8,7 +8,7 @@ const key = {
   catalogRevision: "catalog-a",
 } as const;
 
-const supported = { source: "live-probe", code: "accepted" } as const;
+const supported = { source: "user-configured", code: "accepted" } as const;
 
 test("reuses only positive evidence for the exact model, thinking, and catalog revision", async () => {
   const { createCapabilityEvidenceCache } = await import("../../src/capabilities/evidence-cache.js");
@@ -63,7 +63,7 @@ test("explicit invalidation removes only matching positive evidence", async () =
 test("bounds retained evidence codes", async () => {
   const { createCapabilityEvidenceCache, MAX_CAPABILITY_EVIDENCE_CODE_LENGTH } = await import("../../src/capabilities/evidence-cache.js");
   const cache = createCapabilityEvidenceCache({ now: () => 1_000 });
-  cache.recordSupported(key, { source: "live-probe", code: "x".repeat(MAX_CAPABILITY_EVIDENCE_CODE_LENGTH + 20) });
+  cache.recordSupported(key, { source: "user-configured", code: "x".repeat(MAX_CAPABILITY_EVIDENCE_CODE_LENGTH + 20) });
 
   expect(cache.get(key)?.code).toHaveLength(MAX_CAPABILITY_EVIDENCE_CODE_LENGTH);
 });

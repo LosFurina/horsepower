@@ -18,36 +18,22 @@ async function gateFixture(now = 0) {
   return { cache, clock, gate, probe };
 }
 
-test("reuses only fresh exact evidence and reprobes missing, stale, revision-mismatched, or invalidated selections", async () => {
+test("records user-configured evidence without probing upstream", async () => {
   const { cache, clock, gate, probe } = await gateFixture();
-  probe.probe.mockResolvedValue({ status: "supported", evidence: { code: "accepted" } });
-
   await gate.ensure(selection);
   await gate.ensure(selection);
-  expect(probe.probe).toHaveBeenCalledTimes(1);
+  expect(probe.probe).not.toHaveBeenCalled();
 
   await gate.ensure({ ...selection, thinking: "low" });
   await gate.ensure({ ...selection, catalogRevision: "catalog-r2" });
-  expect(probe.probe).toHaveBeenCalledTimes(3);
+  expect(probe.probe).not.toHaveBeenCalled();
 
   cache.invalidate(selection);
   await gate.ensure(selection);
   clock.now = 10 * 60 * 1_000 + 1;
   await gate.ensure(selection);
-  expect(probe.probe).toHaveBeenCalledTimes(5);
-});
-
-test.each(["unsupported", "inconclusive"] as const)("rejects %s probes with bounded remediation and no positive evidence", async (status) => {
-  const { cache, gate, probe } = await gateFixture();
-  probe.probe.mockResolvedValue({ status, evidence: { code: "x".repeat(2_000), detail: "private provider output" } });
-
-  const error = await gate.ensure(selection).catch((cause: unknown) => cause) as Error & { code?: string; status?: string };
-
-  expect(error).toMatchObject({ code: "MODEL_CAPABILITY_UNVERIFIED", status });
-  expect(error.message).toContain("horsepower setup --interactive");
-  expect(Buffer.byteLength(error.message, "utf8")).toBeLessThanOrEqual(512);
-  expect(error.message).not.toContain("private provider output");
-  expect(cache.get(selection)).toBeUndefined();
+  expect(probe.probe).not.toHaveBeenCalled();
+  expect(cache.get(selection)).toMatchObject({ source: "user-configured", code: "user_configured" });
 });
 
 test("authoritative exact catalog support avoids a live probe", async () => {
@@ -62,8 +48,8 @@ test("authoritative exact catalog support avoids a live probe", async () => {
 test("explicit actual-worker rejection invalidates only matching evidence and returns bounded remediation", async () => {
   const { cache, gate } = await gateFixture();
   const other = { ...selection, thinking: "low" as const };
-  cache.recordSupported(selection, { source: "live-probe", code: "accepted" });
-  cache.recordSupported(other, { source: "live-probe", code: "accepted" });
+  cache.recordSupported(selection, { source: "user-configured", code: "accepted" });
+  cache.recordSupported(other, { source: "user-configured", code: "accepted" });
 
   const remediation = gate.handleWorkerRejection(selection, {
     kind: "capability_rejection",

@@ -55,21 +55,18 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-test("interactive setup probes exact choices and explicitly reselects a rejected thinking value", async () => {
+test("interactive setup accepts Pi-configured choices without probing upstream", async () => {
   const fixture = await localFixture({ acceptedThinking: ["high"] });
   const home = join(fixture.root, "home");
   const project = join(fixture.root, "project");
   await mkdir(project, { recursive: true });
-  const choices = ["max", "high", "high", "high"] as const;
+  const choices = ["max", "high", "high"] as const;
   let choice = 0;
   const terminal: SetupTerminal = {
     showModels: async (ids) => expect(ids).toEqual([genericId]),
     chooseModel: async () => genericId,
     chooseThinking: async () => choices[choice++],
-    chooseProbeAction: async ({ result }) => {
-      expect(result).toMatchObject({ status: "unsupported", evidence: { code: "INVALID_THINKING" } });
-      return "reselect";
-    },
+    chooseProbeAction: async () => { throw new Error("setup must not request probe remediation"); },
   };
   const registry = { getAll: () => [{ provider: genericId.split("/")[0]!, id: genericId.split("/")[1]!, reasoning: true }] };
   const cli = createCli({
@@ -88,13 +85,11 @@ test("interactive setup probes exact choices and explicitly reselects a rejected
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, data: { status: "configured" } });
   const configured = JSON.parse(await readFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), "utf8"));
   expect(Object.values(configured.slots)).toEqual([
-    { model: genericId, thinking: "high" },
+    { model: genericId, thinking: "max" },
     { model: genericId, thinking: "high" },
     { model: genericId, thinking: "high" },
   ]);
-  expect((await fixture.events()).map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([
-    "probe:max", "probe:high", "probe:high", "probe:high",
-  ]);
+  expect(await fixture.events()).toEqual([]);
 });
 
 async function runtimeHarness() {
@@ -145,7 +140,7 @@ async function runtimeHarness() {
   return { fixture, runtime, context, common, setRevision: () => { revisionFlag = true; } };
 }
 
-test("one-shot and persistent workers reuse fresh evidence and revision changes force an exact reprobe", async () => {
+test("one-shot and persistent workers do not preflight upstream across revisions", async () => {
   const { fixture, runtime, context, common, setRevision } = await runtimeHarness();
   await runtime.execute({ action: "single", ...common, taskScope: "fresh", name: "first", task: "first" }, context);
   await runtime.execute({ action: "create", ...common, taskScope: "reuse", name: "persistent" }, context);
@@ -153,7 +148,7 @@ test("one-shot and persistent workers reuse fresh evidence and revision changes 
   await runtime.execute({ action: "single", ...common, taskScope: "revision", name: "second", task: "second" }, context);
 
   expect((await fixture.events()).map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([
-    "probe:high", "one-shot:high", "persistent:high", "probe:high", "one-shot:high",
+    "one-shot:high", "persistent:high", "one-shot:high",
   ]);
   await runtime.shutdown();
 });
@@ -174,9 +169,9 @@ test("explicit worker rejections invalidate evidence and never retry with downgr
 
   const events = await fixture.events();
   expect(events.map(({ kind, thinking }) => `${kind}:${thinking}`)).toEqual([
-    "probe:high", "one-shot:high",
-    "one-shot:high", "probe:high", "one-shot:high",
-    "persistent:high", "probe:high", "persistent:high",
+    "one-shot:high",
+    "one-shot:high", "one-shot:high",
+    "persistent:high", "persistent:high",
   ]);
   expect(events.every(({ thinking }) => thinking === "high")).toBe(true);
   await runtime.shutdown();
