@@ -48,15 +48,97 @@ The only tool is `horsepower_subagent`. Legacy `single`, `parallel`, and `chain`
 
 Persistent `create` acknowledges process and initial-message admission promptly, and persistent `send`/`steer` with `wait: false` acknowledges acceptance or queuing promptly without intentionally waiting for the turn to finish. Each acknowledgement carries stable `workerId` and `messageId` identity and a current status snapshot; a fast turn may already be `completed`, but the acknowledgement is not a completion wait. Reuse the same worker and conversation for later messages, including after idle periods. Use `status` or cursor-based `read` to observe the same worker/message and completion, and use `abort` or explicit `destroy` when needed. A wait timeout stops only the wait and preserves the worker turn; abort preserves the documented worker lifecycle, while explicit destroy and process cleanup are responsible for releasing the worker. Workers do not survive host Pi process termination.
 
+### Persistent-worker list
+
+Run `/horsepower-workers` to append a durable, TUI-only snapshot of persistent workers created by `create` in the **current Captain Pi process**. The card remains in the transcript across later renders but is observational only: it is not sent to the model, does not create or advance work, and is not runtime or terminal truth. Re-run the command for a fresh snapshot. The structured `horsepower_subagent` `list` action remains available independently of TUI rendering.
+
+The empty card explicitly says that no current persistent worker exists. It does **not** mean no one-shot work has run: completed or terminal `single`, `parallel`, and `chain` children are one-shot processes and are never included in this list. Each non-empty card includes every current worker (up to the eight-worker runtime limit) in deterministic order with bounded identity, lifecycle/message correlation, queued-message count, and available telemetry. Elapsed time, authoritative aggregate input/output usage, and the latest normalized assistant utterance are shown only when available; missing values are omitted rather than guessed.
+
+Worker-list snapshots exclude prompts and message bodies, reasoning, raw events/provider payloads, unrestricted tool output, credentials, absolute private and managed-handoff paths, report bodies, and complete transcripts. Fields and the aggregate card are UTF-8-safe and bounded. Runtime-list, locale, append, or rendering failures remain observational and produce a bounded, actionable visible diagnostic rather than silent success; they do not retry recursively or change worker state. Outside interactive TUI, command invocation reports an explicit UI-unavailable outcome, while RPC command discovery and the structured `list` tool contract remain available.
+
 Operation cards are stable, attributed, observational views of one-shot and persistent execution. `elapsed` means non-negative time since the current dispatch/message was accepted; `input` and `output` mean aggregate authoritative Pi-reported token counts for that dispatch/message, not estimates or authoritative billing, and are omitted when unavailable. `latest` is only the newest completed assistant utterance after normalization, credential/private-path redaction, control-character cleanup, and bounded UTF-8-safe truncation. Telemetry resets for each substantive message and is not terminal truth. Cards exclude prompts, reasoning, partial deltas, user/system text, raw provider payloads, unrestricted tool output, credentials, private or handoff paths, full reports, and complete transcripts. Collection or rendering failure remains observational and cannot alter execution, worker lifetime, handoff validation, or terminal truth.
+
+### Parallel parent/child operation cards
+
+A `parallel` dispatch is still one Captain tool call and one Pi partial-result replacement surface. Horsepower therefore projects a **parent summary** plus a **stable child row/section per admitted invocation** (canonical input/`accepted` order, at most eight children, concurrency still capped at four processes). Each partial `onUpdate` snapshot must retain every admitted child simultaneously; an interleaved event updates only the child selected by authoritative `invocationId` and must not erase, reattribute, or reorder siblings.
+
+Parent counters (`total`, pending/running, `completed`, `failed`, `canceled`) are derived from child state, not caller-supplied totals. Each child reuses single-card identity and telemetry semantics: dispatch name, agent/role, requested→resolved slot, concrete model, thinking level, handoff mode, invocation/run IDs, current operation/status, non-negative `elapsed`, authoritative usage when present, and bounded `latest` utterance. Human labels follow `outputLocale` (`en` / `zh-CN`); names, roles, slots, model IDs, thinking values, modes, statuses, and IDs remain untranslated machine values. Per-field and aggregate UTF-8-safe bounds apply; identity for every admitted child is never omitted to save space.
+
+**Terminal retention:** when a child completes, fails, or is canceled, its visible terminal presentation freezes against later non-terminal observational updates while siblings continue. First authoritative terminal settlement remains lifecycle truth; cards never invent missing usage, reports, or completion. Projection state is ephemeral and discarded when the parent tool call settles—it is never execution, campaign, handoff, or verification authority.
+
+**Privacy exclusions (unchanged):** prompts, reasoning, partial assistant deltas, user/system text, raw provider payloads, unrestricted tool output, credentials, private/handoff filesystem paths, full reports, and complete transcripts stay out of parent and child card text and structured details.
+
+**Observational rendering failures:** if projection construction or Pi's partial-result callback throws, Horsepower continues the dispatch, records only bounded delivery evidence where applicable, and still reports actual per-child and parent terminal truth. Rendering defects cannot authorize work, cancel workers, alter handoff validation, or override first-terminal-wins settlement.
 
 If `Esc` cancels a blocking wait, Horsepower reports the structured canceled run/invocation identity and actual cancellation truth, never fabricates an absent managed report or completion, and leaves no hidden active child/run. If cancellation races completion, the first authoritative settlement wins.
 
-Before implementation work, `/horsepower-campaign` loads one apply-ready change's current OpenSpec tasks. The user explicitly selects all unfinished tasks, unfinished tasks by section, or exact unfinished task IDs, confirms the normalized list, and then selects `multi_agent` or `main_agent`. A campaign is scoped to one change, those canonical task IDs, and the current Pi process. Ranges, free-form labels, completed tasks, and cross-change IDs are rejected. Selected tasks are revalidated before every work-producing dispatch; relevant drift requires a new campaign. Successful confirmation starts exactly one Captain turn automatically—no separate `go` message is needed.
+Before implementation work, `/horsepower-campaign` discovers apply-ready unfinished OpenSpec changes in the current project through the official OpenSpec CLI and presents eligible candidates with bounded progress context for explicit selection—never free-form change-ID entry and never auto-selection, even when only one candidate exists. Zero eligible changes reports an actionable no-candidate result with no side effects; canceling the picker also creates nothing. After the user selects a change, Horsepower loads that change's current OpenSpec tasks. The user explicitly selects all unfinished tasks, unfinished tasks by section, or exact unfinished task IDs, confirms the normalized list, and then selects `multi_agent` or `main_agent`. A campaign is scoped to one change, those canonical task IDs, and the current Pi process. Ranges, free-form labels, completed tasks, and cross-change IDs are rejected. Candidate eligibility and the selected task snapshot are revalidated before campaign creation, and selected tasks are revalidated before every work-producing dispatch; missing, completed, invalid, or drifted state fails closed and requires a fresh `/horsepower-campaign` discovery. Successful confirmation starts exactly one Captain turn automatically—no separate `go` message is needed.
 
 One-shot workers stream bounded, redacted assistant/tool lifecycle updates. Each display includes dispatch name, agent and role, requested/resolved slot, concrete model, thinking level, and handoff mode. Every accepted dispatch returns a structured `completed`, `failed`, or `canceled` result; managed failures terminalize created handoffs instead of leaving silent orphans. `main_agent` blocks implementation workers unless the user separately authorizes a bounded reviewer.
 
 Review campaigns bind one implementation campaign, exact task scope, fixed acceptance scope, and positive finite budget. Every in-scope root cause begins `pending`. Only the Captain may apply `accepted`, `rejected`, `needs_clarification`, or `blocked_needs_human` with a bounded technical rationale; reviewer verdicts, recommendations, confidence, agreement, duplicate examples, disposition, and resolution never dispatch work or extend/reset budget. A `fix` dispatch must name one `reviewFindingRootCauseId` that is accepted, in-scope, unresolved, and in the same project/change/campaign before budget is consumed. An accepted finding remains `open` until the Captain supplies fresh targeted verification mapped to `review-finding:<rootCauseId>`. Campaign outcome `accepted` requires every in-scope finding to be technically rejected with rationale or accepted and resolved. Truthful `scope_changed`, `blocked_needs_human`, and `canceled` outcomes remain available.
+
+## Confirmed test-and-gate plans
+
+Horsepower-assisted OpenSpec authoring has no implicit testing default. For every new or materially revised change, the Captain recommends and explains—but the user explicitly selects—one `testIntensity` and one `gateStrictness`:
+
+| Profile | Current-change meaning |
+| --- | --- |
+| `targeted` | Directly changed acceptance and focused regression cases. |
+| `standard` | `targeted` plus applicable unit, integration, failure-path, and selected E2E coverage. |
+| `exhaustive` | `standard` plus applicable boundaries, adversarial/error, concurrency, platform, compatibility, and full regression coverage. |
+| `required` | Repository baseline and all existing mandatory completion gates. |
+| `strict` | `required` plus applicable full suites and zero unresolved required failures. |
+| `release` | `strict` plus applicable deterministic release/privacy, packaged artifact, immutable install/update, rollback, and real-environment acceptance. |
+| `custom` | Explicit bounded cases or gates; it cannot weaken any applicable mandatory floor. |
+
+Mandatory OpenSpec validity, security/privacy, compatibility, lifecycle and terminal truth, current-scope claim matching, and E2E-or-valid-waiver rules always apply regardless of profile. Release- or installation-affecting work must retain applicable archive/privacy, packaged CLI, immutable installation/update, rollback, and real-Pi acceptance gates.
+
+The expanded plan belongs in exactly one `## Test and Gate Plan` section of the official change `design.md`; official `tasks.md` references its stable IDs. Horsepower does not create a private plan registry and never edits official generated `.pi/skills/openspec-*` or `.pi/prompts/opsx-*`. A complete case looks like:
+
+```md
+## Test and Gate Plan
+
+### Profiles
+- testIntensity: standard
+- gateStrictness: strict
+
+### Test Cases
+
+#### TC-1: cancellation is side-effect-free
+- maps: scenario:Implementation campaign includes explicit test-and-gate confirmation/User rejects plan during campaign creation, task:4.3
+- level: e2e
+- purpose: prevent canceled confirmation from authorizing work
+- preconditions: apply-ready fixture change and an existing active campaign
+- action: launch Pi RPC, invoke /horsepower-campaign, cancel final confirmation
+- expected: no new campaign or kickoff; existing campaign is byte-for-byte unchanged
+- failure: cancellation leaked implementation authority
+- disposition: required
+
+### Gates
+
+#### G-1: focused and real-Pi acceptance
+- maps: scenario:Implementation campaign includes explicit test-and-gate confirmation/User rejects plan during campaign creation, task:4.3
+- intent: npm run test:e2e -- test/e2e/test-gate-plan.e2e.test.ts
+- scope: authoring and campaign confirmation paths
+- pass: exit 0 with TC-1 and all mapped cases observed
+- disposition: required
+- phase: completion
+- waiver: only when Pi is unavailable, with a concrete reason and mapped alternative evidence
+- floor: e2e
+```
+
+Every gate must declare explicit `maps` acceptance refs. Horsepower never infers gate coverage from `scope` prose.
+
+Before writing the finalized selection, the Captain presents the recommendation, meaningful alternatives, every case's level/setup/action/expectation/failure meaning, and every gate's phase/pass/waiver consequence. The user must affirm the fully expanded plan; cancellation, unsupported input, timeout, or non-affirmation leaves it unconfirmed. `custom` must enumerate its contents. If an exact future command is not yet knowable, record the concrete harness intent and observable behavior and add an official task to reconcile the exact command before completion.
+
+`/horsepower-campaign` then presents the normalized tasks, `multi_agent` or `main_agent` mode, both machine profile values, and every in-scope `TC-*`/`G-*` explanation in the configured locale, followed by one combined confirmation. Cancellation or invalidity creates nothing and does not replace an active campaign. The campaign snapshots normalized official facts only for process-lifetime authorization. Semantic changes to profiles, cases, gates, mappings, command intent, fixtures/environment, expectations, waiver rules, selected-task acceptance, or requirement scenarios require a newly confirmed campaign; formatting and unrelated prose do not.
+
+At completion, each applicable required `TC-*` and `G-*` must map to fresh successful Captain-observed evidence in the existing `verification` manifest, alongside current acceptance claims. Advisory checks remain truthful but neither satisfy nor independently block required claims. A plan-permitted waiver still needs a concrete reason and mapped alternative evidence.
+
+### Migrating an existing change
+
+An apply-ready change without a valid plan is not grandfathered and no text marker can prove earlier consent. Revise its official `design.md` and `tasks.md`, present the complete recommendation/alternatives and expanded entries to the user, obtain fresh affirmative confirmation, and create a new campaign. Diagnostics preserve stable codes and machine tokens while localizing remediation. Do not infer confirmation from generated prose, git history, a worker/reviewer recommendation, or a previous change.
 
 ## Managed handoffs
 

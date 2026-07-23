@@ -4,6 +4,7 @@ export interface OpenSpecCliRunnerOptions {
   executable?: string;
   stdoutByteLimit?: number;
   stderrByteLimit?: number;
+  timeoutMs?: number;
   spawnProcess?: (
     command: string,
     args: readonly string[],
@@ -22,6 +23,7 @@ export function createOpenSpecCliRunner(options: OpenSpecCliRunnerOptions = {}) 
   const spawnProcess = options.spawnProcess ?? spawn;
   const stdoutLimit = options.stdoutByteLimit ?? 1024 * 1024;
   const stderrLimit = options.stderrByteLimit ?? 64 * 1024;
+  const timeoutMs = options.timeoutMs ?? 10_000;
   return async (args: readonly string[], context: { cwd: string }) => {
     const child = spawnProcess(options.executable ?? "openspec", args, {
       cwd: context.cwd,
@@ -40,12 +42,23 @@ export function createOpenSpecCliRunner(options: OpenSpecCliRunnerOptions = {}) 
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderr = appendBounded(stderr, typeof chunk === "string" ? Buffer.from(chunk) : chunk, stderrLimit).value;
     });
-    const { code, notFound } = await new Promise<{ code: number; notFound?: true }>((resolve, reject) => {
+    const { code, notFound, timedOut } = await new Promise<{ code: number; notFound?: true; timedOut?: true }>((resolve, reject) => {
+      let settled = false;
+      const finish = (result: { code: number; notFound?: true; timedOut?: true }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish({ code: 124, timedOut: true });
+      }, timeoutMs);
       child.once("error", (cause: NodeJS.ErrnoException) => {
-        if (cause.code === "ENOENT") resolve({ code: 127, notFound: true });
-        else reject(cause);
+        if (cause.code === "ENOENT") finish({ code: 127, notFound: true });
+        else { clearTimeout(timer); reject(cause); }
       });
-      child.once("close", (code) => resolve({ code: code ?? 1 }));
+      child.once("close", (code) => finish({ code: code ?? 1 }));
     });
     if (notFound) {
       return { code: 127, stdout: "", stderr: "OpenSpec CLI not found", truncated: false };
@@ -55,6 +68,7 @@ export function createOpenSpecCliRunner(options: OpenSpecCliRunnerOptions = {}) 
       stdout: stdout.toString("utf8"),
       stderr: stderr.toString("utf8"),
       truncated,
+      ...(timedOut ? { timedOut: true } : {}),
     };
   };
 }

@@ -17,6 +17,7 @@ function campaignSelection(ids: readonly string[]) {
     selectedTaskIds: [...ids],
     selectedTasks: ids.map((id) => ({ id, description: `Task ${id}`, status: "pending" as const, sectionId: id.split(".")[0]! })),
     inventoryDigest: "a".repeat(64),
+    planDigest: "c".repeat(64),
   };
 }
 function taskInventory(projectRoot: string, ids: readonly string[]) {
@@ -24,6 +25,43 @@ function taskInventory(projectRoot: string, ids: readonly string[]) {
     changeId, projectRoot, digest: "a".repeat(64),
     sections: [{ id: "1", title: "Tasks", tasks: ids.map((id) => ({ id, description: `Task ${id}`, status: "pending" as const, sectionId: id.split(".")[0]! })) }],
   });
+}
+function planFixture(ids: readonly string[], digest = "c".repeat(64)) {
+  return {
+    changeId: "change-a",
+    testIntensity: "standard" as const,
+    gateStrictness: "required" as const,
+    cases: ids.map((id, index) => ({
+      id: `TC-${index + 1}`,
+      title: `Case for ${id}`,
+      maps: [`task:${id}`],
+      level: "unit" as const,
+      purpose: `Prove task ${id}`,
+      preconditions: "fixture",
+      action: "exercise",
+      expected: "pass",
+      failure: "fail",
+      disposition: "required" as const,
+    })),
+    gates: [{
+      id: "G-1",
+      title: "OpenSpec",
+      maps: ids.map((id) => `task:${id}`),
+      intent: "openspec validate --strict",
+      scope: "selected change",
+      pass: "exit 0",
+      disposition: "required" as const,
+      phase: "campaign" as const,
+      waiver: "none",
+      floor: "openspec" as const,
+    }],
+    nonApplicability: [] as Array<{ id: string; title: string; covers: string[]; reason: string }>,
+    coverageRefs: ids.map((id) => `task:${id}`),
+    digest,
+  };
+}
+function loadPlan(ids: readonly string[], digest = "c".repeat(64)) {
+  return async () => planFixture(ids, digest);
 }
 
 const modelRegistry = {
@@ -77,6 +115,7 @@ test("campaign creation binds only to a resolved existing OpenSpec change", asyn
   const runtime = createHorsepowerRuntime({
     homeDir: "/missing-home", bundledAgentsDir: "/missing-agents", runOpenSpec, readText,
     loadTaskInventory: taskInventory("/project", ["1.1"]),
+    loadTestAndGatePlan: loadPlan(["1.1"]),
   });
 
   await expect(runtime.beginImplementationCampaign({
@@ -120,6 +159,7 @@ test("shares process-local capability evidence across one-shot and persistent cr
   const runtime = createHorsepowerRuntime({
     homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText,
     oneShot: oneShot as never, capabilityProbe, loadTaskInventory: taskInventory(project, ["1.1", "1.2"]),
+    loadTestAndGatePlan: loadPlan(["1.1", "1.2"]),
   });
   const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1", "1.2"]), mode: "multi_agent" });
   const common = { changeId: "change-a", agent: "coder", modelSlot: "craft", implementationCampaignId: campaign.campaignId, workKind: "implementation" };
@@ -164,7 +204,7 @@ test("dispatch revalidates selected task snapshot before worker side effects whi
   ] });
   const oneShot = { single: vi.fn(async (input) => ({ name: input.name, text: "done" })), parallel: vi.fn(), chain: vi.fn() };
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
-  const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, runOpenSpec, readText, loadTaskInventory, oneShot: oneShot as never });
+  const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, runOpenSpec, readText, loadTaskInventory, loadTestAndGatePlan: loadPlan(["1.1"]), oneShot: oneShot as never });
   const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1"]), mode: "multi_agent" });
   const context = { captain: true, cwd: project, modelRegistry: modelRegistry as never };
   const input = { action: "single", handoffMode: "inline", changeId: "change-a", agent: "coder", modelSlot: "craft", task: "work", taskScope: "1.1", workKind: "implementation", implementationCampaignId: campaign.campaignId };
@@ -214,6 +254,7 @@ test("configured dispatch notification uses injected transport and shutdown aban
       notifications: { dispatch: true }, fetch: fetch as never, sleep, retryDelaysMs: [0, 1_000],
     },
     loadTaskInventory: taskInventory(project, ["1.1"]),
+    loadTestAndGatePlan: loadPlan(["1.1"]),
   });
 
   const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1"]), mode: "multi_agent" });
@@ -248,9 +289,10 @@ test("explicit change run permits valid terminal report and rejects invalid corr
   const runtime = createHorsepowerRuntime({
     homeDir: "/home", bundledAgentsDir: "/agents", manager: manager as never, runOpenSpec, readText,
     loadTaskInventory: taskInventory("/project", ["1.1", "1.2"]),
+    loadTestAndGatePlan: loadPlan(["1.1", "1.2"]),
     acceptanceSnapshot: async ({ runId }) => {
       snapshotRuns.push(runId);
-      return { digest: "scope-digest", refs: ["task:1.1"] };
+      return { digest: "scope-digest", refs: ["task:1.1"], plannedChecks: [] };
     },
   });
   await runtime.beginImplementationCampaign({
@@ -268,11 +310,12 @@ test("explicit change run permits valid terminal report and rejects invalid corr
     status: "completed", summary: "complete",
     verification: {
       observedAt: begun.startedAt,
-      e2eWaiver: {
-        reason: "No external interface",
-        alternativeEvidence: [{ id: "focused-1", summary: "focused integration test", acceptanceRefs: ["task:1.1"] }],
-      },
+      commands: [{ id: "focused-1", kind: "e2e", command: "npm test", exitCode: 0, summary: "focused integration test", acceptanceRefs: ["task:1.1"] }],
       acceptance: [{ ref: "task:1.1", evidenceIds: ["focused-1"] }],
+      plannedChecks: [
+        { ref: "TC-1", evidenceIds: ["focused-1"] },
+        { ref: "G-1", evidenceIds: ["focused-1"] },
+      ],
     },
   }, ctx)).resolves.toMatchObject({ run: { runId: begun.runId, changeId: "change-a", status: "completed", verification: { scopeDigest: "scope-digest" } } });
   expect(snapshotRuns).toEqual([begun.runId]);
@@ -403,6 +446,7 @@ test("shutdown waits for an admitted one-shot, terminal notification, then destr
       fetch: fetch as never,
     },
     loadTaskInventory: taskInventory(project, ["1.1"]),
+    loadTestAndGatePlan: loadPlan(["1.1"]),
   });
   const ctx = { captain: true, cwd: project, modelRegistry: modelRegistry as never };
 
@@ -543,7 +587,8 @@ test("advancing actions use official OpenSpec checks in the active cwd", async (
     return (await import("node:fs/promises")).readFile(path, "utf8");
   });
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
-  const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText, loadTaskInventory: taskInventory(project, ["1.1"]) });
+  const runtime = createHorsepowerRuntime({ homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText, loadTaskInventory: taskInventory(project, ["1.1"]),
+    loadTestAndGatePlan: loadPlan(["1.1"]) });
 
   const campaign = await runtime.beginImplementationCampaign({ changeId: "change-a", projectId: project, ...campaignSelection(["1.1"]), mode: "multi_agent" });
   await runtime.execute({

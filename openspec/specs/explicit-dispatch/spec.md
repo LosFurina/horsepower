@@ -145,7 +145,7 @@ The Captain SHALL classify campaign findings by root cause against the declared 
 - **THEN** Horsepower leaves the accepted finding unresolved
 
 ### Requirement: User-selected implementation campaign mode
-Before the first work-producing action in an implementation campaign, the user SHALL explicitly select `multi_agent` or `main_agent` for one apply-ready change and a non-empty canonical set of current unfinished OpenSpec task IDs. Horsepower SHALL discover and present the selected change's bounded task inventory, offer all unfinished tasks, unfinished tasks by section, or manually selected exact task IDs, and show the normalized tasks for confirmation before creating the campaign. Horsepower SHALL NOT infer, persist as a default, or reuse mode or task selection across scope changes, task drift, campaigns, changes, or Pi processes. Arbitrary strings, numeric ranges, nonexistent IDs, and completed tasks SHALL NOT become campaign authority.
+Before the first work-producing action in an implementation campaign, Horsepower SHALL discover eligible unfinished changes from the current official OpenSpec project and the user SHALL explicitly select one discovered change, a non-empty canonical set of current unfinished OpenSpec task IDs, and either `multi_agent` or `main_agent`. Horsepower SHALL present the selected change's bounded task inventory, offer all unfinished tasks, unfinished tasks by section, or manually selected exact task IDs, and show the normalized tasks for confirmation before creating the campaign. Horsepower SHALL NOT require free-form change-ID entry, silently select a discovered change, infer scope or mode, persist either choice as a default, or reuse authorization across scope changes, task drift, campaigns, changes, or Pi processes. Arbitrary strings, numeric ranges, nonexistent IDs, and completed tasks SHALL NOT become campaign authority.
 
 #### Scenario: User selects all unfinished tasks
 - **WHEN** the user chooses all unfinished tasks for an apply-ready change and confirms the normalized task list and execution mode
@@ -169,11 +169,23 @@ Before the first work-producing action in an implementation campaign, the user S
 
 #### Scenario: Campaign has no user choice
 - **WHEN** the Captain attempts a work-producing action without a matching active implementation campaign
-- **THEN** Horsepower rejects it before creating a run, worker, handoff, or task evidence and returns the explicit campaign-selection remediation
+- **THEN** Horsepower rejects it before creating a run, worker, handoff, or task evidence and directs the user to the explicit discovered-change campaign selection flow
+
+#### Scenario: One eligible change is discovered
+- **WHEN** current-project discovery returns exactly one apply-ready change with unfinished tasks
+- **THEN** Horsepower presents that change for explicit user confirmation and does not silently select its task scope or execution mode
+
+#### Scenario: Multiple eligible changes are discovered
+- **WHEN** current-project discovery returns multiple apply-ready changes with unfinished tasks
+- **THEN** Horsepower presents a bounded deterministic selection list with stable change IDs and bounded progress context
+
+#### Scenario: User cancels change selection
+- **WHEN** the user cancels or dismisses the discovered-change picker
+- **THEN** Horsepower creates no implementation campaign, run, worker, handoff, or task evidence
 
 #### Scenario: Campaign scope changes
 - **WHEN** a work-producing action falls outside the campaign's declared task scope or belongs to another OpenSpec change
-- **THEN** Horsepower rejects it until the user explicitly starts or switches an implementation campaign for that scope
+- **THEN** Horsepower rejects it until the user explicitly starts or switches an implementation campaign for that discovered change and scope
 
 #### Scenario: Campaign scope or selected tasks change
 - **WHEN** a work-producing action falls outside the campaign's canonical selected task IDs or current selected-task state differs from its confirmed snapshot
@@ -286,7 +298,7 @@ The `/horsepower-campaign` command SHALL render task inventory, selection choice
 - **THEN** the custom campaign context uses the effective output locale for its human instruction while preserving campaign ID, change ID, canonical task IDs, mode, and other machine fields unchanged
 
 ### Requirement: Observable bounded one-shot execution
-Every `single`, `parallel`, and `chain` dispatch SHALL emit ordered bounded progress through the active Pi tool update callback from authorization through exactly one terminal event. Progress SHALL distinguish accepted, starting, assistant, tool start/update/end, managed-handoff creation/report validation, completed, failed, and canceled stages as applicable. Horsepower SHALL normalize and redact worker events and SHALL NOT expose raw prompts, provider payloads, credentials, unbounded tool output, report bodies, or private handoff paths. Progress delivery failure SHALL NOT change worker execution or terminal truth.
+Every `single`, `parallel`, and `chain` dispatch SHALL emit ordered bounded progress through the active Pi tool update callback from authorization through exactly one terminal event. Progress SHALL distinguish accepted, starting, assistant, tool start/update/end, managed-handoff creation/report validation, completed, failed, and canceled stages as applicable. A parallel dispatch SHALL project one bounded parent summary and a stable simultaneously visible child state for every admitted invocation; interleaved events SHALL update only the child selected by authoritative invocation identity and SHALL NOT replace, erase, or reattribute another child's latest state. Horsepower SHALL normalize and redact worker events and SHALL NOT expose raw prompts, provider payloads, credentials, unbounded tool output, report bodies, or private handoff paths. Progress delivery failure SHALL NOT change worker execution or terminal truth.
 
 #### Scenario: One-shot worker uses tools
 - **WHEN** a worker emits assistant and tool lifecycle events while executing a valid one-shot dispatch
@@ -294,7 +306,11 @@ Every `single`, `parallel`, and `chain` dispatch SHALL emit ordered bounded prog
 
 #### Scenario: Parallel workers emit interleaved progress
 - **WHEN** two or more parallel workers make progress concurrently
-- **THEN** every update carries a stable invocation identity so interleaved events remain attributable without serializing the workers
+- **THEN** the parent summary and every admitted child remain visible and each event updates only the stable child state matching its invocation identity without serializing the workers
+
+#### Scenario: One parallel child becomes terminal
+- **WHEN** a parallel child completes, fails, or is canceled while another child remains active
+- **THEN** the terminal child retains its final visible state, the active child continues updating independently, and the parent counts reflect both states
 
 #### Scenario: Progress contains sensitive or oversized fields
 - **WHEN** raw Pi events contain prompts, credentials, private paths, provider payloads, or output beyond configured bounds
@@ -305,7 +321,7 @@ Every `single`, `parallel`, and `chain` dispatch SHALL emit ordered bounded prog
 - **THEN** Horsepower continues the dispatch, records bounded delivery evidence, and reports the worker's actual terminal status
 
 ### Requirement: Complete resolved worker identity
-Before worker spawn, Horsepower SHALL construct an immutable identity from resolved runtime facts and SHALL include it in the tool title, every progress event, and terminal result. The identity SHALL contain dispatch name, agent name, agent role as the human-readable horse class/level, requested model slot, resolved model slot, concrete model, thinking level, handoff mode, and stable invocation ID; it SHALL add the opaque run ID after lifecycle creation. Human labels SHALL use `outputLocale`, while names, roles, slots, model IDs, thinking values, modes, and IDs remain untranslated machine values.
+Before worker spawn, Horsepower SHALL construct an immutable identity from resolved runtime facts and SHALL include it in the tool title, every progress event, and terminal result. The identity SHALL contain dispatch name, agent name, agent role as the human-readable horse class/level, requested model slot, resolved model slot, concrete model, thinking level, handoff mode, and stable invocation ID; it SHALL add the opaque run ID after lifecycle creation. For a parallel dispatch, the operation-card projection SHALL retain the complete identity for every child in canonical input order for the lifetime of the parent tool call, bounded by the existing eight-child limit. Human labels SHALL use `outputLocale`, while names, roles, slots, model IDs, thinking values, modes, and IDs remain untranslated machine values.
 
 #### Scenario: Single worker title is rendered
 - **WHEN** a single dispatch resolves its agent and model slot
@@ -319,9 +335,36 @@ Before worker spawn, Horsepower SHALL construct an immutable identity from resol
 - **WHEN** a parent dispatch contains multiple invocations
 - **THEN** Horsepower shows a bounded parent summary and a complete stable identity for each child
 
+#### Scenario: Parallel events arrive out of child order
+- **WHEN** child progress events interleave in an order different from the submitted task order
+- **THEN** Horsepower preserves canonical child presentation order and correlates each update by stable invocation ID rather than arrival position
+
 #### Scenario: Caller supplies misleading display text
 - **WHEN** caller-provided names contain control characters, excessive text, or conflict with resolved agent/model facts
 - **THEN** Horsepower bounds and sanitizes the human title while structured identity remains derived from authoritative resolved facts
+
+### Requirement: Parallel operation-card state is bounded and terminally truthful
+Horsepower SHALL maintain an observational per-tool-call projection for at most eight parallel children. The projection SHALL expose stable machine details for parent totals and each child's latest normalized operation, status, telemetry, and terminal state, and SHALL render equivalent bounded human-facing content in `en` or `zh-CN`. Projection state SHALL be discarded when the tool call settles and SHALL never become execution, lifecycle, campaign, handoff, or verification authority.
+
+#### Scenario: Parallel dispatch is admitted
+- **WHEN** a valid parallel dispatch admits multiple children
+- **THEN** the visible parent summary reports total, pending or running, completed, failed, and canceled counts and presents every child in canonical input order
+
+#### Scenario: Child telemetry changes
+- **WHEN** one child receives newer authoritative usage or a newer eligible latest utterance
+- **THEN** only that child's elapsed, usage, utterance, operation, and status snapshot changes while all other child snapshots remain intact
+
+#### Scenario: Final result is rendered
+- **WHEN** the parallel tool call reaches its first authoritative terminal settlement
+- **THEN** the final projection and structured result agree on each child identity and known terminal outcome without fabricating missing usage or completion
+
+#### Scenario: Projection exceeds display space
+- **WHEN** eight children and their bounded identities or telemetry approach configured display limits
+- **THEN** Horsepower applies deterministic per-field and aggregate bounds without omitting a child identity or exposing hidden raw content
+
+#### Scenario: Rendering fails
+- **WHEN** projection construction or Pi rendering throws
+- **THEN** worker scheduling, execution, cancellation, managed-report validation, and first-terminal-wins truth remain unchanged
 
 ### Requirement: Terminally reliable dispatch and managed handoff
 Every accepted work-producing dispatch SHALL return a non-empty structured result and reach exactly one terminal status of `completed`, `failed`, or `canceled`. If a dispatch run or managed handoff has been created, validation, capability, spawn, stream, worker, report, cleanup, or tool-delivery failure SHALL pass through an idempotent finalizer that terminalizes all created lifecycle artifacts before returning. Horsepower SHALL NOT return an absent tool result or leave `report: null` and `terminal: null` as an orphan after failure.
@@ -477,3 +520,60 @@ Horsepower SHALL derive the latest worker utterance only from completed eligible
 #### Scenario: Progress limits are exhausted
 - **WHEN** latest-utterance or telemetry updates would exceed the aggregate event or byte budget
 - **THEN** Horsepower drops further observational updates without changing worker execution or terminal truth
+
+### Requirement: Implementation campaign includes explicit test-and-gate confirmation
+Before creating an implementation campaign, `/horsepower-campaign` SHALL load the current official OpenSpec test-and-gate plan, present the selected test intensity, gate strictness, every bounded concrete test case and gate consequence in the effective locale, and require affirmative user confirmation together with the normalized task scope and execution mode. Campaign authority SHALL snapshot the normalized plan digest and acceptance mappings for exactly one change and selected current tasks. Cancellation or failed plan confirmation SHALL create no campaign, replace no active campaign, and trigger no Captain turn.
+
+#### Scenario: User confirms campaign and test plan
+- **WHEN** the user reviews the current tasks, mode, testing profile, gate profile, concrete cases, and gates and affirmatively confirms the combined scope
+- **THEN** Horsepower creates one campaign containing the official plan digest and starts exactly one kickoff under the existing delivery rules
+
+#### Scenario: User rejects plan during campaign creation
+- **WHEN** the user declines or cancels the test-and-gate confirmation
+- **THEN** Horsepower creates no campaign, preserves any current campaign unchanged, and directs the user to revise the official OpenSpec plan
+
+#### Scenario: Plan is absent or invalid
+- **WHEN** the selected change has no current complete confirmed plan or Horsepower cannot parse and map it unambiguously
+- **THEN** campaign creation fails before state mutation and reports the exact planning remediation
+
+#### Scenario: Chinese campaign confirmation
+- **WHEN** effective output locale is `zh-CN`
+- **THEN** profile consequences, case explanations, gate explanations, confirmation, and diagnostics are Chinese while IDs, profile values, commands, paths, and acceptance references remain untranslated
+
+### Requirement: Dispatch revalidates confirmed plan authority
+Before any work-producing action consumes budget or creates a run, worker, or handoff, Horsepower SHALL reload the official test-and-gate plan and compare its normalized digest and selected-task acceptance mappings with the active implementation campaign snapshot. A missing, invalid, unconfirmed, broadened, weakened, or drifted plan SHALL revoke authorization until the user explicitly confirms a new campaign. Worker/reviewer recommendations and automatic continuation SHALL NOT update or renew test-and-gate authority.
+
+#### Scenario: Plan remains current
+- **WHEN** the current official plan digest and selected-task mappings equal the campaign snapshot
+- **THEN** dispatch authorization may continue under the existing mode, task, slot, handoff, and budget rules
+
+#### Scenario: Plan drifts before dispatch
+- **WHEN** the current normalized plan or mapped acceptance differs from the campaign snapshot
+- **THEN** Horsepower rejects the action before accounting or process creation and requires explicit user reconfirmation
+
+#### Scenario: Reviewer recommends stronger tests
+- **WHEN** a reviewer or worker recommends changing cases or gates
+- **THEN** Horsepower treats the recommendation as advisory and does not alter campaign authority until official OpenSpec artifacts are revised and the user confirms a new campaign
+
+#### Scenario: Automatic campaign continuation occurs
+- **WHEN** eligible automatic Pi compaction continues an existing campaign
+- **THEN** continuation carries only the already confirmed digest and still fails closed if the current official plan has drifted
+
+### Requirement: Planned gates constrain completion evidence
+At terminal completion, Horsepower SHALL reconcile the fresh claim-matched verification manifest not only with current acceptance scope but also with every applicable required gate and test-case mapping in the campaign-confirmed current plan. Planned advisory checks MAY be reported without blocking completion; a required check SHALL have fresh successful mapped evidence or an explicitly permitted valid waiver. Profile selection SHALL NOT allow stale, failed, worker-only, unmapped, or fabricated evidence.
+
+#### Scenario: Every required planned gate passes
+- **WHEN** current acceptance, required test cases, and required gates all map to fresh successful Captain-observed evidence
+- **THEN** the existing completion gate may permit `completed`
+
+#### Scenario: Required planned gate is missing
+- **WHEN** a required gate or case has no fresh successful evidence and no plan-permitted valid waiver
+- **THEN** Horsepower rejects completion and identifies the uncovered test-case or gate ID
+
+#### Scenario: Advisory planned check fails
+- **WHEN** a check explicitly confirmed as advisory fails
+- **THEN** Horsepower reports the truthful failure but does not treat that check alone as satisfying or blocking a required acceptance claim unless another mandatory contract applies
+
+#### Scenario: Plan permits an applicable waiver
+- **WHEN** a required planned check has a documented waiver condition that currently applies
+- **THEN** Horsepower still requires the existing concrete-reason and mapped-alternative-evidence waiver contract before completion

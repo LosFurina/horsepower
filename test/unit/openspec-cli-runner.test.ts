@@ -55,3 +55,15 @@ test("runs the official OpenSpec CLI with shell disabled and bounded output", as
     options: { cwd: "/project", shell: false, stdio: ["pipe", "pipe", "pipe"] },
   }]);
 });
+
+test("kills a timed-out CLI process and returns a bounded timeout fact", async () => {
+  const child = new FakeChild();
+  const killed: string[] = [];
+  Object.assign(child, { kill: (signal: string) => { killed.push(signal); return true; } });
+  const { createOpenSpecCliRunner } = await import("../../src/openspec/cli-runner.js");
+  const run = createOpenSpecCliRunner({ timeoutMs: 1, spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams });
+  await expect(run(["list", "--json"], { cwd: "/project" })).resolves.toEqual({
+    code: 124, stdout: "", stderr: "", truncated: false, timedOut: true,
+  });
+  expect(killed).toEqual(["SIGKILL"]);
+});

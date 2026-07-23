@@ -10,17 +10,23 @@ interface FakePi {
   commands: Array<{ name: string; options: Record<string, unknown> }>;
   handlers: Map<string, Array<(event: unknown, ctx: unknown) => unknown>>;
   messages: Array<{ message: unknown; options?: unknown }>;
+  entries: Array<{ type: string; data: unknown }>;
+  entryRenderers: Map<string, unknown>;
   registerTool(tool: Record<string, unknown>): void;
   registerCommand(name: string, options: Record<string, unknown>): void;
+  registerEntryRenderer(type: string, renderer: unknown): void;
+  appendEntry(type: string, data: unknown): void;
   on(event: string, handler: (event: unknown, ctx: unknown) => unknown): void;
   sendMessage(message: unknown, options?: unknown): void;
 }
 
 function fakePi(): FakePi {
   return {
-    tools: [], commands: [], handlers: new Map(), messages: [],
+    tools: [], commands: [], handlers: new Map(), messages: [], entries: [], entryRenderers: new Map(),
     registerTool(tool) { this.tools.push(tool); },
     registerCommand(name, options) { this.commands.push({ name, options }); },
+    registerEntryRenderer(type, renderer) { this.entryRenderers.set(type, renderer); },
+    appendEntry(type, data) { this.entries.push({ type, data }); },
     on(event, handler) { this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]); },
     sendMessage(message, options) { this.messages.push({ message, options }); },
   };
@@ -95,18 +101,25 @@ test("user commands create implementation mode and bounded reviewer authorizatio
     { id: "4.8", description: "Already done", status: "complete" as const, sectionId: "4" },
   ] }] };
   const loadImplementationTaskInventory = vi.fn(async () => inventory);
-  const beginImplementationCampaign = vi.fn(async (input) => ({ campaignId: "implementation-1", ...input }));
+  const beginImplementationCampaign = vi.fn(async (input) => ({ campaignId: "implementation-1", ...input, plan: { digest: "f".repeat(64) } }));
   const authorizeImplementationReviewer = vi.fn(async (input) => ({ remaining: input.budget }));
-  const runtime = { execute: vi.fn(), loadImplementationTaskInventory, beginImplementationCampaign, authorizeImplementationReviewer };
+  const loadImplementationTestAndGatePlan = vi.fn(async () => ({
+    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
+    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
+    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
+    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
+  }));
+  const runtime = { execute: vi.fn(), discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]), loadImplementationTaskInventory, loadImplementationTestAndGatePlan, beginImplementationCampaign, authorizeImplementationReviewer };
   const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
   registerHorsepowerExtension(pi as never, {
     acquireRuntime: () => ({ value: runtime, cleanup: vi.fn(), abandon: vi.fn() }),
   });
   const ctx = context() as ReturnType<typeof context> & { ui: ReturnType<typeof context>["ui"] & { select: ReturnType<typeof vi.fn>; input: ReturnType<typeof vi.fn>; confirm: ReturnType<typeof vi.fn> } };
   ctx.ui.select = vi.fn()
+    .mockResolvedValueOnce("horsepower-alpha1 — 1/2 tasks complete")
     .mockResolvedValueOnce("All unfinished tasks")
     .mockResolvedValueOnce("Main Agent direct execution");
-  ctx.ui.input = vi.fn().mockResolvedValueOnce("horsepower-alpha1");
+  ctx.ui.input = vi.fn();
   ctx.ui.confirm = vi.fn(async () => true);
   const campaign = pi.commands.find((command) => command.name === "horsepower-campaign")!.options.handler as (args: string, ctx: unknown) => Promise<void>;
   await campaign("", ctx);
@@ -114,7 +127,7 @@ test("user commands create implementation mode and bounded reviewer authorizatio
   expect(beginImplementationCampaign).toHaveBeenCalledWith({
     changeId: "horsepower-alpha1", projectId: "/active/project", selectedTaskIds: ["4.7"],
     selectedTasks: [{ id: "4.7", description: "Do work", status: "pending", sectionId: "4" }],
-    inventoryDigest: "a".repeat(64), mode: "main_agent",
+    inventoryDigest: "a".repeat(64), planDigest: "f".repeat(64), mode: "main_agent",
   });
   expect(pi.messages).toEqual([{ message: expect.objectContaining({ customType: "horsepower-campaign", details: expect.objectContaining({ campaignId: "implementation-1", mode: "main_agent" }) }), options: { deliverAs: "followUp", triggerTurn: true } }]);
 
@@ -140,12 +153,26 @@ test.each([
   const beginImplementationCampaign = vi.fn(async (input) => ({ campaignId: "campaign", ...input }));
   const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
   registerHorsepowerExtension(pi as never, {
-    acquireRuntime: () => ({ value: { execute: vi.fn(), loadImplementationTaskInventory: vi.fn(async () => inventory), beginImplementationCampaign }, cleanup: vi.fn(), abandon: vi.fn() }),
+    acquireRuntime: () => ({ value: {
+      execute: vi.fn(),
+      discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
+      loadImplementationTaskInventory: vi.fn(async () => inventory),
+      loadImplementationTestAndGatePlan: vi.fn(async () => ({
+    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
+    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
+    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
+    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
+  })),
+      beginImplementationCampaign,
+    }, cleanup: vi.fn(), abandon: vi.fn() }),
     resolveOutputLocale: async () => locale,
   });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn().mockResolvedValueOnce("change-a").mockResolvedValueOnce(entry);
-  ctx.ui.select = vi.fn().mockResolvedValueOnce(scope).mockResolvedValueOnce(mode);
+  ctx.ui.input = vi.fn().mockResolvedValueOnce(entry);
+  ctx.ui.select = vi.fn()
+    .mockResolvedValueOnce(locale === "zh-CN" ? "change-a — 1/2 个任务已完成" : "change-a — 1/2 tasks complete")
+    .mockResolvedValueOnce(scope)
+    .mockResolvedValueOnce(mode);
   ctx.ui.confirm = vi.fn(async () => true);
   await (pi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", ctx);
   expect(beginImplementationCampaign).toHaveBeenCalledWith(expect.objectContaining({ selectedTaskIds: expected, mode: "multi_agent" }));
@@ -164,11 +191,20 @@ test("large campaign inventory preserves every selectable task ID in bounded UI 
   const beginImplementationCampaign = vi.fn(async (input) => ({ campaignId: "campaign-large", ...input }));
   const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
   registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: {
-    execute: vi.fn(), loadImplementationTaskInventory: vi.fn(async () => inventory), beginImplementationCampaign,
+    execute: vi.fn(),
+    discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
+    loadImplementationTaskInventory: vi.fn(async () => inventory),
+    loadImplementationTestAndGatePlan: vi.fn(async () => ({
+      changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
+      cases: [{ id: "TC-1", title: "Case", maps: inventory.sections[0]!.tasks.map((t) => `task:${t.id}`), level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
+      gates: [{ id: "G-1", title: "Gate", maps: inventory.sections[0]!.tasks.map((t) => `task:${t.id}`), intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
+      nonApplicability: [], coverageRefs: [], digest: "f".repeat(64),
+    })),
+    beginImplementationCampaign,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn(async () => "change-large");
-  ctx.ui.select = vi.fn().mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
+  ctx.ui.input = vi.fn();
+  ctx.ui.select = vi.fn().mockResolvedValueOnce("change-large — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
   ctx.ui.confirm = vi.fn(async () => true);
 
   await (pi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", ctx);
@@ -176,7 +212,10 @@ test("large campaign inventory preserves every selectable task ID in bounded UI 
   const expectedIds = tasks.map(({ id }) => id);
   expect(beginImplementationCampaign).toHaveBeenCalledWith(expect.objectContaining({ selectedTaskIds: expectedIds }));
   expect(ctx.ui.notify.mock.calls.every(([message]: [string]) => Buffer.byteLength(message, "utf8") <= 40 * 1024)).toBe(true);
-  expect(ctx.ui.confirm).toHaveBeenCalledWith("Confirm this normalized task scope?", "1000 task(s)");
+  expect(ctx.ui.confirm).toHaveBeenCalledWith(
+    "Confirm these exact profiles, test cases, gates, task scope, and execution mode? No option is selected by default.",
+    expect.stringContaining("1000 task(s)"),
+  );
   expect(pi.messages).toHaveLength(1);
   expect((pi.messages[0]!.message as any).details.selectedTaskIds).toEqual(expectedIds);
   expect(Buffer.byteLength((pi.messages[0]!.message as any).content, "utf8")).toBeLessThan(40 * 1024);
@@ -190,16 +229,25 @@ test("campaign with no unfinished tasks returns an actionable outcome without cr
   const beginImplementationCampaign = vi.fn();
   const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
   registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: {
-    execute: vi.fn(), loadImplementationTaskInventory: vi.fn(async () => inventory), beginImplementationCampaign,
+    execute: vi.fn(),
+    discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 1 }]),
+    loadImplementationTaskInventory: vi.fn(async () => inventory),
+    loadImplementationTestAndGatePlan: vi.fn(async () => ({
+    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
+    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
+    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
+    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
+  })),
+    beginImplementationCampaign,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn(async () => "change-done");
-  ctx.ui.select = vi.fn(); ctx.ui.confirm = vi.fn();
+  ctx.ui.input = vi.fn();
+  ctx.ui.select = vi.fn(async () => "change-done — 1/1 tasks complete");
+  ctx.ui.confirm = vi.fn();
 
   await (pi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", ctx);
 
   expect(ctx.ui.notify).toHaveBeenCalledWith("No unfinished tasks are available", "info");
-  expect(ctx.ui.select).not.toHaveBeenCalled();
   expect(beginImplementationCampaign).not.toHaveBeenCalled();
   expect(pi.messages).toEqual([]);
 });
@@ -213,11 +261,23 @@ test("campaign cancellation and creation failure never kick off while repeated c
   const canceledPi = fakePi();
   const canceledBegin = vi.fn();
   registerHorsepowerExtension(canceledPi as never, { acquireRuntime: () => ({ value: {
-    execute: vi.fn(), loadImplementationTaskInventory: vi.fn(async () => inventory), beginImplementationCampaign: canceledBegin,
+    execute: vi.fn(),
+    discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
+    loadImplementationTaskInventory: vi.fn(async () => inventory),
+    loadImplementationTestAndGatePlan: vi.fn(async () => ({
+    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
+    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
+    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
+    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
+  })),
+    beginImplementationCampaign: canceledBegin,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const canceledCtx = context() as any;
-  canceledCtx.ui.input = vi.fn(async () => "change-a");
-  canceledCtx.ui.select = vi.fn(async () => "All unfinished tasks");
+  canceledCtx.ui.input = vi.fn();
+  canceledCtx.ui.select = vi.fn()
+    .mockResolvedValueOnce("change-a — 1/2 tasks complete")
+    .mockResolvedValueOnce("All unfinished tasks")
+    .mockResolvedValueOnce("Multi-Agent team");
   canceledCtx.ui.confirm = vi.fn(async () => false);
   await (canceledPi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", canceledCtx);
   expect(canceledBegin).not.toHaveBeenCalled();
@@ -227,13 +287,22 @@ test("campaign cancellation and creation failure never kick off while repeated c
   let id = 0;
   const repeatedBegin = vi.fn(async (input) => ({ campaignId: `campaign-${++id}`, ...input }));
   registerHorsepowerExtension(repeatedPi as never, { acquireRuntime: () => ({ value: {
-    execute: vi.fn(), loadImplementationTaskInventory: vi.fn(async () => inventory), beginImplementationCampaign: repeatedBegin,
+    execute: vi.fn(),
+    discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
+    loadImplementationTaskInventory: vi.fn(async () => inventory),
+    loadImplementationTestAndGatePlan: vi.fn(async () => ({
+    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
+    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
+    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
+    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
+  })),
+    beginImplementationCampaign: repeatedBegin,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const repeatedCtx = context() as any;
-  repeatedCtx.ui.input = vi.fn().mockResolvedValueOnce("change-a").mockResolvedValueOnce("change-a");
+  repeatedCtx.ui.input = vi.fn();
   repeatedCtx.ui.select = vi.fn()
-    .mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team")
-    .mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
+    .mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team")
+    .mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
   repeatedCtx.ui.confirm = vi.fn(async () => true);
   const handler = repeatedPi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any;
   await handler("", repeatedCtx);
@@ -247,12 +316,24 @@ test("campaign cancellation and creation failure never kick off while repeated c
 
   const failedPi = fakePi();
   registerHorsepowerExtension(failedPi as never, { acquireRuntime: () => ({ value: {
-    execute: vi.fn(), loadImplementationTaskInventory: vi.fn(async () => inventory), beginImplementationCampaign: vi.fn(async () => { throw new Error("creation failed"); }),
+    execute: vi.fn(),
+    discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
+    loadImplementationTaskInventory: vi.fn(async () => inventory),
+    loadImplementationTestAndGatePlan: vi.fn(async () => ({
+    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
+    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
+    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
+    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
+  })),
+    beginImplementationCampaign: vi.fn(async () => { throw new Error("PLAN_INVALID: creation failed"); }),
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const failedCtx = context() as any;
-  failedCtx.ui.input = vi.fn(async () => "change-a"); failedCtx.ui.select = vi.fn().mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team"); failedCtx.ui.confirm = vi.fn(async () => true);
-  await expect((failedPi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", failedCtx)).rejects.toThrow("creation failed");
+  failedCtx.ui.input = vi.fn();
+  failedCtx.ui.select = vi.fn().mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
+  failedCtx.ui.confirm = vi.fn(async () => true);
+  await (failedPi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", failedCtx);
   expect(failedPi.messages).toEqual([]);
+  expect(failedCtx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/invalid|revise/i), "error");
 });
 
 test("tool localizes principal conclusions while preserving English evidence and machine fields", async () => {

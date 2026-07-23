@@ -1,12 +1,30 @@
 import { expect, test } from "vitest";
-import { createImplementationCampaignManager } from "../../src/lifecycle/implementation-campaign.js";
+import { createImplementationCampaignManager, type CampaignPlanSnapshot } from "../../src/lifecycle/implementation-campaign.js";
 
 const digest = "a".repeat(64);
+const planDigest = "b".repeat(64);
 const tasks = [
   { id: "4.7", description: "First", status: "pending" as const, sectionId: "4" },
   { id: "4.8", description: "Second", status: "pending" as const, sectionId: "4" },
 ];
-const base = { changeId: "change-a", projectId: "/project", selectedTaskIds: ["4.7", "4.8"], selectedTasks: tasks, inventoryDigest: digest };
+function planFor(taskIds: readonly string[]): CampaignPlanSnapshot {
+  return {
+    digest: planDigest,
+    testIntensity: "standard",
+    gateStrictness: "required",
+    caseRefs: ["TC-1"],
+    gateRefs: ["G-1"],
+    selectedTaskMappings: taskIds.map((taskId) => ({ taskId, caseRefs: ["TC-1"], gateRefs: ["G-1"], nonApplicabilityRefs: [] })),
+  };
+}
+const base = {
+  changeId: "change-a",
+  projectId: "/project",
+  selectedTaskIds: ["4.7", "4.8"],
+  selectedTasks: tasks,
+  inventoryDigest: digest,
+  plan: planFor(["4.7", "4.8"]),
+};
 
 test("requires explicit mode and confirmed canonical task snapshot", () => {
   const campaigns = createImplementationCampaignManager({ makeId: () => "implementation-1" });
@@ -18,13 +36,15 @@ test("requires explicit mode and confirmed canonical task snapshot", () => {
 });
 
 test.each([
-  [{ ...base, selectedTaskIds: ["4.7-4.8"] }, "exact OpenSpec task IDs"],
-  [{ ...base, selectedTaskIds: ["work"] }, "exact OpenSpec task IDs"],
-  [{ ...base, selectedTaskIds: ["4.7"], selectedTasks: [tasks[1]!] }, "missing selected task: 4.7"],
-  [{ ...base, selectedTaskIds: ["4.7"], selectedTasks: [...tasks] }, "unselected tasks"],
-  [{ ...base, selectedTaskIds: ["4.7"], selectedTasks: [{ ...tasks[0]!, status: "complete" as const }] }, "already complete: 4.7"],
+  [{ ...base, selectedTaskIds: ["4.7-4.8"], plan: planFor(["4.7-4.8"]) }, "exact OpenSpec task IDs"],
+  [{ ...base, selectedTaskIds: ["work"], plan: planFor(["work"]) }, "exact OpenSpec task IDs"],
+  [{ ...base, selectedTaskIds: ["4.7"], selectedTasks: [tasks[1]!], plan: planFor(["4.7"]) }, "missing selected task: 4.7"],
+  [{ ...base, selectedTaskIds: ["4.7"], selectedTasks: [...tasks], plan: planFor(["4.7"]) }, "unselected tasks"],
+  [{ ...base, selectedTaskIds: ["4.7"], selectedTasks: [{ ...tasks[0]!, status: "complete" as const }], plan: planFor(["4.7"]) }, "already complete: 4.7"],
   [{ ...base, inventoryDigest: "bad" }, "digest is invalid"],
-] as const)("rejects invalid canonical campaign input", (input, message) => {
+  [{ ...base, plan: { ...planFor(["4.7", "4.8"]), digest: "bad" } }, "plan digest is invalid"],
+  [{ ...base, plan: { ...planFor(["4.7", "4.8"]), selectedTaskMappings: [{ taskId: "4.7", caseRefs: ["TC-1"], gateRefs: ["G-1"], nonApplicabilityRefs: [] }] } }, "task mappings do not match selected tasks"],
+])("rejects invalid canonical campaign input", (input, message) => {
   const campaigns = createImplementationCampaignManager();
   expect(() => campaigns.begin({ ...input, mode: "multi_agent" })).toThrow(message);
 });
@@ -33,8 +53,32 @@ test("rejects a campaign larger than the claim-matched manifest can represent", 
   const selectedTasks = Array.from({ length: 101 }, (_, index) => ({ id: `1.${index + 1}`, description: `Task ${index + 1}`, status: "pending" as const, sectionId: "1" }));
   const campaigns = createImplementationCampaignManager();
   expect(() => campaigns.begin({
-    changeId: "change-a", projectId: "/project", selectedTaskIds: selectedTasks.map(({ id }) => id), selectedTasks, inventoryDigest: digest, mode: "multi_agent",
+    changeId: "change-a", projectId: "/project", selectedTaskIds: selectedTasks.map(({ id }) => id), selectedTasks, inventoryDigest: digest, plan: planFor(selectedTasks.map(({ id }) => id)), mode: "multi_agent",
   })).toThrow("permits at most 100 task IDs");
+});
+
+test("campaign begin snapshots official plan digest and selected-task mappings", () => {
+  const campaigns = createImplementationCampaignManager({ makeId: () => "implementation-plan" });
+  const campaign = campaigns.begin({ ...base, mode: "multi_agent" });
+  expect(campaign.plan).toEqual(planFor(["4.7", "4.8"]));
+  expect(campaigns.currentContinuation("/project")).toMatchObject({ planDigest, inventoryDigest: digest });
+});
+
+test("campaign creation failure is atomic and preserves active authority", () => {
+  let allocation = 0;
+  const campaigns = createImplementationCampaignManager({
+    makeId: () => {
+      allocation += 1;
+      if (allocation === 2) throw new Error("ID allocation failed");
+      return `implementation-${allocation}`;
+    },
+  });
+  const active = campaigns.begin({ ...base, mode: "multi_agent" });
+
+  expect(() => campaigns.begin({ ...base, mode: "main_agent" })).toThrow("ID allocation failed");
+  expect(campaigns.status(active.campaignId, "/project")).toMatchObject({ status: "active" });
+  expect(campaigns.status(active.campaignId, "/project")).not.toHaveProperty("outcome");
+  expect(campaigns.currentContinuation("/project")).toMatchObject({ campaignId: active.campaignId, disposition: "active" });
 });
 
 test("main-Agent mode rejects delegation except separately authorized bounded review", () => {
@@ -60,7 +104,7 @@ test("continuation lease preserves exact identity, bounds generations, and inval
   const campaign = campaigns.begin({ ...base, mode: "multi_agent" });
   expect(campaigns.currentContinuation("/project")).toMatchObject({
     campaignId: campaign.campaignId, changeId: "change-a", selectedTaskIds: ["4.7", "4.8"],
-    inventoryDigest: digest, mode: "multi_agent", generation: 0, disposition: "active",
+    inventoryDigest: digest, planDigest, mode: "multi_agent", generation: 0, disposition: "active",
   });
   const first = campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 7);
   expect(first).toMatchObject({ generation: 7, queuedGeneration: 7 });

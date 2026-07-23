@@ -21,6 +21,19 @@ export interface E2EWaiver {
 
 export type CompletionEvidence = VerificationManifest;
 
+export interface PlannedCheckWaiver {
+  reason: string;
+  /** Must exactly identify the condition authorized by the official plan. */
+  condition: string;
+  alternativeEvidenceIds: readonly string[];
+}
+
+export interface PlannedCheckEvidenceMapping {
+  ref: string;
+  evidenceIds?: readonly string[];
+  waiver?: PlannedCheckWaiver;
+}
+
 export interface VerificationManifest {
   observedAt?: string;
   commands?: readonly VerificationEvidence[];
@@ -28,12 +41,28 @@ export interface VerificationManifest {
   unit?: readonly unknown[];
   e2e?: readonly unknown[];
   acceptance?: readonly { ref: string; evidenceIds: readonly string[] }[];
+  /** Captain-authored reconciliation with the current official plan snapshot. */
+  plannedChecks?: readonly PlannedCheckEvidenceMapping[];
   e2eWaiver?: E2EWaiver;
+}
+
+/**
+ * Narrow lifecycle projection of an official OpenSpec plan. The OpenSpec boundary
+ * remains responsible for parsing, ownership, normalization, and applicability.
+ */
+export interface PlannedAcceptanceCheck {
+  ref: `TC-${number}` | `G-${number}`;
+  kind: "test-case" | "gate";
+  acceptanceRefs: readonly string[];
+  disposition: "required" | "advisory";
+  applicable: boolean;
+  permittedWaiverCondition?: string;
 }
 
 export interface AcceptanceSnapshot {
   digest: string;
   refs: readonly string[];
+  plannedChecks?: readonly PlannedAcceptanceCheck[];
 }
 
 export interface VerificationContext {
@@ -133,6 +162,64 @@ export function verifyFreshEvidence(manifest: VerificationManifest, context: Ver
       if (!evidence.acceptanceRefs.includes(mapping.ref)) throw new Error("VERIFICATION_ACCEPTANCE_CLAIM_MISMATCH: mapped evidence must declare the acceptance reference");
     }
   }
+
+  const plannedChecks = context.currentAcceptanceSnapshot.plannedChecks ?? [];
+  if (plannedChecks.length > 200) throw new Error("VERIFICATION_PLAN_LIMIT: acceptance snapshot permits at most 200 planned checks");
+  const plannedRefs = new Set<string>();
+  for (const check of plannedChecks) {
+    bounded(check.ref, "Planned check reference", 128);
+    if (!/^(?:TC|G)-[1-9]\d*$/u.test(check.ref)) throw new Error(`VERIFICATION_PLAN_INVALID: invalid planned check reference ${check.ref}`);
+    if (plannedRefs.has(check.ref)) throw new Error(`VERIFICATION_PLAN_DUPLICATE: ${check.ref}`);
+    plannedRefs.add(check.ref);
+    if ((check.kind === "test-case") !== check.ref.startsWith("TC-")) throw new Error(`VERIFICATION_PLAN_INVALID: planned check kind does not match ${check.ref}`);
+    if (check.disposition !== "required" && check.disposition !== "advisory") throw new Error(`VERIFICATION_PLAN_INVALID: invalid disposition for ${check.ref}`);
+    if (typeof check.applicable !== "boolean") throw new Error(`VERIFICATION_PLAN_INVALID: invalid applicability for ${check.ref}`);
+    if (!Array.isArray(check.acceptanceRefs) || check.acceptanceRefs.length === 0 || check.acceptanceRefs.length > 20 || new Set(check.acceptanceRefs).size !== check.acceptanceRefs.length) throw new Error(`VERIFICATION_PLAN_INVALID: ${check.ref} requires unique mapped acceptance references`);
+    for (const ref of check.acceptanceRefs) {
+      if (!currentSet.has(ref)) throw new Error(`VERIFICATION_PLAN_SCOPE_DRIFT: ${check.ref} does not match current acceptance scope`);
+    }
+    if (check.permittedWaiverCondition !== undefined) bounded(check.permittedWaiverCondition, `Waiver condition for ${check.ref}`, 500);
+  }
+
+  const planMappings = manifest.plannedChecks ?? [];
+  if (!Array.isArray(planMappings) || planMappings.length > 200) throw new Error("VERIFICATION_PLAN_MAPPING_INVALID: planned check mappings must be a bounded array");
+  const mappedPlanRefs = new Set<string>();
+  for (const mapping of planMappings) {
+    bounded(mapping.ref, "Planned check reference", 128);
+    if (mappedPlanRefs.has(mapping.ref)) throw new Error(`VERIFICATION_PLAN_MAPPING_DUPLICATE: ${mapping.ref}`);
+    mappedPlanRefs.add(mapping.ref);
+    const check = plannedChecks.find((item) => item.ref === mapping.ref);
+    if (!check) throw new Error(`VERIFICATION_PLAN_SCOPE_DRIFT: unknown planned check ${mapping.ref}`);
+    const evidenceIds = mapping.evidenceIds ?? [];
+    if (!Array.isArray(evidenceIds) || evidenceIds.length > 20 || new Set(evidenceIds).size !== evidenceIds.length) throw new Error(`VERIFICATION_PLAN_MAPPING_INVALID: invalid evidence mapping for ${mapping.ref}`);
+    if (mapping.waiver && evidenceIds.length) throw new Error(`VERIFICATION_PLAN_EVIDENCE_AMBIGUOUS: ${mapping.ref} cannot contain evidence and a waiver`);
+    if (mapping.waiver) {
+      if (!check.permittedWaiverCondition) throw new Error(`VERIFICATION_PLAN_WAIVER_NOT_PERMITTED: ${mapping.ref}`);
+      bounded(mapping.waiver.reason, `Waiver reason for ${mapping.ref}`, 500);
+      bounded(mapping.waiver.condition, `Waiver condition for ${mapping.ref}`, 500);
+      if (mapping.waiver.condition !== check.permittedWaiverCondition) throw new Error(`VERIFICATION_PLAN_WAIVER_CONDITION_MISMATCH: ${mapping.ref}`);
+      if (!Array.isArray(mapping.waiver.alternativeEvidenceIds) || mapping.waiver.alternativeEvidenceIds.length === 0 || mapping.waiver.alternativeEvidenceIds.length > 20) throw new Error(`VERIFICATION_PLAN_WAIVER_INVALID: ${mapping.ref} requires mapped alternative evidence`);
+      const waiverClaims = new Set<string>();
+      for (const id of mapping.waiver.alternativeEvidenceIds) {
+        const evidence = all.find((item) => item.id === id);
+        if (!evidence) throw new Error(`VERIFICATION_PLAN_EVIDENCE_REFERENCE_MISSING: ${mapping.ref}`);
+        for (const ref of evidence.acceptanceRefs) waiverClaims.add(ref);
+      }
+      if (check.acceptanceRefs.some((ref) => !waiverClaims.has(ref))) throw new Error(`VERIFICATION_PLAN_CLAIM_MISMATCH: alternative evidence for ${mapping.ref} must cover every acceptance mapping`);
+    } else {
+      if (check.disposition === "required" && check.applicable && evidenceIds.length === 0) throw new Error(`VERIFICATION_PLAN_EVIDENCE_REQUIRED: ${mapping.ref}`);
+      const evidenceClaims = new Set<string>();
+      for (const id of evidenceIds) {
+        const evidence = (manifest.commands ?? []).find((item) => item.id === id);
+        if (!evidence) throw new Error(`VERIFICATION_PLAN_CAPTAIN_EVIDENCE_REQUIRED: ${mapping.ref} requires successful Captain-observed command evidence`);
+        for (const ref of evidence.acceptanceRefs) evidenceClaims.add(ref);
+      }
+      if (evidenceIds.length && check.acceptanceRefs.some((ref) => !evidenceClaims.has(ref))) throw new Error(`VERIFICATION_PLAN_CLAIM_MISMATCH: evidence for ${mapping.ref} must cover every acceptance mapping`);
+    }
+  }
+  const uncoveredPlan = plannedChecks.filter((check) => check.applicable && check.disposition === "required" && !mappedPlanRefs.has(check.ref));
+  if (uncoveredPlan.length) throw new Error(`VERIFICATION_PLAN_EVIDENCE_REQUIRED: ${uncoveredPlan[0]!.ref}`);
+
   if (!manifest.e2eWaiver && (manifest.commands ?? []).length === 0) throw new Error("VERIFICATION_EVIDENCE_REQUIRED: completion requires Captain-observed verification evidence");
   if (manifest.e2eWaiver) {
     bounded(manifest.e2eWaiver.reason, "e2eWaiver reason", 500);

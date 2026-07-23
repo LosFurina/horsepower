@@ -671,6 +671,29 @@ test("safe actions never start dispatches or workers", async () => {
   expect({ creations, dispatches }).toEqual({ creations: 0, dispatches: 0 });
 });
 
+test("structured list returns empty and populated persistent workers without one-shot children", async () => {
+  let listed: unknown[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: () => { throw new Error("unused"); },
+    validateModel: () => undefined,
+    getAgent: () => { throw new Error("unused"); },
+    createWorker: async () => { throw new Error("create must not run for list"); },
+    beginDispatch: () => { throw new Error("dispatch must not run for list"); },
+    reportDispatchTerminal: async () => undefined,
+    listWorkers: () => listed,
+  });
+
+  await expect(captain(orchestration, { action: "list", cwd: "/project" })).resolves.toEqual([]);
+  listed = [{ workerId: "persistent-1", name: "coder-a", status: "idle" }];
+  await expect(captain(orchestration, { action: "list", cwd: "/project" }))
+    .resolves.toEqual([{ workerId: "persistent-1", name: "coder-a", status: "idle" }]);
+  // one-shot single/parallel/chain children are outside listWorkers and must not be fabricated here
+  expect(JSON.stringify(await captain(orchestration, { action: "list", cwd: "/project" })))
+    .not.toMatch(/\b(single|parallel|chain)\b/);
+});
+
 test("Captain terminal reporting uses claim-matched verification without creating work", async () => {
   let report: unknown;
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
