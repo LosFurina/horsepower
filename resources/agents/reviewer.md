@@ -1,7 +1,6 @@
 ---
 name: reviewer
 role: Inspect changes for correctness and requirement fit
-recommendedSlots: [judgment, craft]
 tools: [read, bash]
 standards: [correctness, security]
 ---

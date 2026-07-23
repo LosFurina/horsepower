@@ -9,7 +9,6 @@ const delegationTools = new Set(["horsepower", "horsepower_subagent", "subagent"
 export interface AgentDefinition {
   name: string;
   role: string;
-  recommendedSlots: string[];
   tools: string[];
   standards: string[];
   prompt: string;
@@ -26,7 +25,6 @@ export interface DiscoverAgentsOptions {
 interface AgentFrontmatter {
   name?: unknown;
   role?: unknown;
-  recommendedSlots?: unknown;
   tools?: unknown;
   standards?: unknown;
   model?: unknown;
@@ -48,8 +46,11 @@ function parseAgent(source: string, scope: AgentScope, contents: string): AgentD
     throw new Error(`Agent definition frontmatter must be an object: ${source}`);
   }
   const metadata = parsed as AgentFrontmatter;
+  if (Object.hasOwn(metadata, "recommendedSlots")) {
+    throw new Error(`Agent definition field recommendedSlots was removed; remove it and pass modelSlot explicitly when dispatching: ${source}`);
+  }
   const allowedFields = new Set([
-    "name", "role", "recommendedSlots", "tools", "standards", "model", "provider",
+    "name", "role", "tools", "standards", "model", "provider",
   ]);
   const unknownFields = Object.keys(metadata).filter((field) => !allowedFields.has(field)).sort();
   if (unknownFields.length > 0) {
@@ -69,7 +70,6 @@ function parseAgent(source: string, scope: AgentScope, contents: string): AgentD
   return {
     name: metadata.name,
     role: metadata.role,
-    recommendedSlots: stringArray(metadata.recommendedSlots, "recommendedSlots", source),
     tools: stringArray(metadata.tools, "tools", source)
       .filter((tool) => !delegationTools.has(tool)),
     standards: stringArray(metadata.standards, "standards", source),

@@ -29,7 +29,6 @@ test("discovers a model-neutral agent definition", async () => {
   await writeAgent(bundledDir, "reviewer", `---
 name: reviewer
 role: Inspect changes for correctness
-recommendedSlots: [judgment, craft]
 tools: [read, bash]
 standards: [correctness, security]
 ---
@@ -40,7 +39,6 @@ Review only the requested change and report evidence.
   expect(await module?.discoverAgents({ bundledDir })).toEqual([{
     name: "reviewer",
     role: "Inspect changes for correctness",
-    recommendedSlots: ["judgment", "craft"],
     tools: ["read", "bash"],
     standards: ["correctness", "security"],
     prompt: "Review only the requested change and report evidence.",
@@ -54,7 +52,7 @@ test("applies project-over-global-over-bundled precedence with deterministic nam
   const bundledDir = join(root, "bundled");
   const globalDir = join(root, "global");
   const projectDir = join(root, "project");
-  const definition = (name: string, role: string) => `---\nname: ${name}\nrole: ${role}\nrecommendedSlots: []\ntools: []\nstandards: []\n---\n${role}.\n`;
+  const definition = (name: string, role: string) => `---\nname: ${name}\nrole: ${role}\ntools: []\nstandards: []\n---\n${role}.\n`;
   await writeAgent(bundledDir, "worker", definition("worker", "bundled"));
   await writeAgent(bundledDir, "alpha", definition("alpha", "alpha"));
   await writeAgent(globalDir, "worker", definition("worker", "global"));
@@ -75,7 +73,6 @@ test("removes every delegation tool and preserves an explicitly empty allowlist"
   await writeAgent(bundledDir, "safe", `---
 name: safe
 role: Cannot delegate
-recommendedSlots: []
 tools: [horsepower, horsepower_subagent, subagent]
 standards: []
 ---
@@ -94,7 +91,6 @@ test("rejects concrete model and provider bindings with the definition source pa
   await writeAgent(bundledDir, "private", `---
 name: private
 role: Invalid model-bound role
-recommendedSlots: []
 tools: []
 standards: []
 ${modelKey}: provider/private-model
@@ -113,7 +109,6 @@ Do work.
   await writeAgent(bundledDir, "provider-bound", `---
 name: provider-bound
 role: Invalid provider-bound role
-recommendedSlots: [judgment]
 tools: [read]
 standards: [correctness]
 ${providerKey}: private-provider
@@ -138,7 +133,7 @@ Do work.
   const { discoverAgents } = await import("../../src/agents/catalog.js");
 
   await expect(discoverAgents({ bundledDir })).rejects.toThrow(
-    `Agent definition field recommendedSlots must be an array of strings: ${missingSource}`,
+    `Agent definition field tools must be an array of strings: ${missingSource}`,
   );
 
   await rm(missingSource);
@@ -146,7 +141,6 @@ Do work.
   await writeAgent(bundledDir, "empty", `---
 name: empty
 role: Empty prompt
-recommendedSlots: []
 tools: []
 standards: []
 ---
@@ -163,7 +157,6 @@ test("rejects malformed list metadata instead of silently changing its meaning",
   await writeAgent(bundledDir, "broken", `---
 name: broken
 role: Broken metadata
-recommendedSlots: []
 tools: bash
 standards: []
 ---
@@ -173,6 +166,25 @@ Do work.
 
   await expect(discoverAgents({ bundledDir })).rejects.toThrow(
     `Agent definition field tools must be an array of strings: ${source}`,
+  );
+});
+
+test("rejects legacy recommended-slot metadata with source-attributed migration guidance", async () => {
+  const root = await temporaryDirectory();
+  const bundledDir = join(root, "bundled");
+  const source = join(bundledDir, "legacy.md");
+  await writeAgent(bundledDir, "legacy", `---
+name: legacy
+role: Legacy
+recommendedSlots: [craft]
+tools: []
+standards: []
+---
+Work.
+`);
+  const { discoverAgents } = await import("../../src/agents/catalog.js");
+  await expect(discoverAgents({ bundledDir })).rejects.toThrow(
+    `Agent definition field recommendedSlots was removed; remove it and pass modelSlot explicitly when dispatching: ${source}`,
   );
 });
 

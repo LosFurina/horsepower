@@ -1,8 +1,8 @@
 import { Check, Errors } from "typebox/value";
 import type { AgentDefinition } from "../agents/catalog.js";
 import type { ChangeTerminalReport, DispatchTerminalReport } from "../lifecycle/run-lifecycle.js";
-import type { CompletionEvidence, E2EWaiver } from "../lifecycle/verification-gate.js";
-import type { ReviewCampaign, ReviewCampaignOutcome, ReviewFindingScope } from "../lifecycle/review-campaign.js";
+import type { VerificationManifest } from "../lifecycle/verification-gate.js";
+import type { ReviewCampaign, ReviewCampaignOutcome, ReviewFindingDisposition, ReviewFindingScope } from "../lifecycle/review-campaign.js";
 import { OneShotBatchError, type OneShotExecutor, type OneShotInvocation, type OneShotProgress, type WorkerIdentity } from "../runtime/one-shot.js";
 import type { ResolvedSlot } from "../slots/registry.js";
 import { horsepowerActionSchemas, horsepowerSubagentSchema } from "./schema.js";
@@ -10,7 +10,9 @@ import { horsepowerActionSchemas, horsepowerSubagentSchema } from "./schema.js";
 interface CreateWorkerInput {
   name: string;
   agent: string;
+  role?: string;
   modelSlot: string;
+  resolvedSlot?: string;
   model: string;
   thinking: ResolvedSlot["thinking"];
   cwd: string;
@@ -29,7 +31,7 @@ export interface OrchestrationOptions {
   validateCapability?: (slot: ResolvedSlot) => Promise<void>;
   handleWorkerCapabilityRejection?: (slot: Pick<ResolvedSlot, "model" | "thinking">, cause: unknown) => Error | undefined;
   getAgent(name: string): AgentDefinition | Omit<AgentDefinition, "source" | "scope">;
-  createWorker(input: CreateWorkerInput): Promise<{ workerId: string; activeMessageId?: string }>;
+  createWorker(input: CreateWorkerInput): Promise<{ workerId: string; activeMessageId?: string; initialMessageId?: string; telemetry?: OneShotProgress["telemetry"] }>;
   beginChange?: (input: { changeId: string; projectId: string }) => { runId: string };
   beginDispatch(input: { changeId: string; projectId: string; summary: string }): { runId: string };
   oneShot?: OneShotExecutor;
@@ -37,7 +39,7 @@ export interface OrchestrationOptions {
   onProgress?: (event: OneShotProgress & { identity: WorkerIdentity }) => void;
   sendWorker?: (input: Record<string, unknown>) => Promise<unknown>;
   waitForMessage?: (workerId: string, messageId: string) => Promise<unknown>;
-  messageStatus?: (workerId: string, messageId: string) => "completed" | "failed" | "canceled";
+  messageStatus?: (workerId: string, messageId: string) => "accepted" | "queued" | "running" | "completed" | "failed" | "canceled";
   statusWorker?: (workerId: string) => unknown;
   associateHandoff?: (workerId: string, runId: string) => void;
   listWorkers?: () => unknown;
@@ -54,9 +56,11 @@ export interface OrchestrationOptions {
   prepareHandoffMessage?: (input: { projectPath: string; runId: string; brief: string; producer: { kind: "captain"; id: string } }) => Promise<{ worker: { briefPath: string; reportPath: string }; reportRevision: number }>;
   validateHandoffReport?: (input: { projectPath: string; runId: string; producer: { kind: "worker"; id: string }; expectedRevision?: number }) => Promise<unknown>;
   recordHandoffTerminal?: (input: { projectPath: string; runId: string; status: "failed" | "canceled"; producer?: { kind: "worker"; id: string } }) => Promise<unknown>;
-  beginReviewCampaign?: (input: { changeId: string; projectId: string; acceptanceScope: string; budget: number }) => ReviewCampaign;
-  consumeReviewCampaign?: (input: { campaignId: string; changeId: string; projectId: string; dispatchSummary: string }) => ReviewCampaign;
-  recordReviewFinding?: (input: { campaignId: string; changeId: string; projectId: string; rootCauseId: string; summary: string; scope: ReviewFindingScope; evidenceRef?: string }) => ReviewCampaign;
+  beginReviewCampaign?: (input: { changeId: string; projectId: string; acceptanceScope: string; budget: number; implementationCampaignId: string; taskScope: string }) => ReviewCampaign;
+  consumeReviewCampaign?: (input: { campaignId: string; changeId: string; projectId: string; dispatchSummary: string; kind?: "review" | "fix"; rootCauseId?: string }) => ReviewCampaign;
+  recordReviewFinding?: (input: { campaignId: string; changeId: string; projectId: string; rootCauseId: string; summary: string; scope: ReviewFindingScope; evidenceRef?: string; materiallyConflictsDisposition?: boolean }) => ReviewCampaign;
+  dispositionReviewFinding?: (input: { campaignId: string; changeId: string; projectId: string; rootCauseId: string; disposition: Exclude<ReviewFindingDisposition, "pending">; rationale: string; evidenceRef?: string }) => ReviewCampaign;
+  resolveReviewFinding?: (input: { campaignId: string; changeId: string; projectId: string; rootCauseId: string; verification: VerificationManifest }) => ReviewCampaign;
   extendReviewCampaign?: (input: { campaignId: string; changeId: string; projectId: string; additionalBudget: number; humanAuthorized: boolean; reason: string }) => ReviewCampaign;
   endReviewCampaign?: (input: { campaignId: string; changeId: string; projectId: string; outcome: ReviewCampaignOutcome; summary: string }) => ReviewCampaign;
   reviewCampaignStatus?: (campaignId: string, projectId: string) => ReviewCampaign;
@@ -69,6 +73,12 @@ function required(input: Record<string, unknown>, field: string): string {
 }
 
 function validate(input: unknown): asserts input is Record<string, unknown> {
+  if (input !== null && typeof input === "object") {
+    const raw = input as Record<string, unknown>;
+    if (raw.action === "report_terminal" && raw.status === "completed" && ("e2e" in raw || "e2eWaiver" in raw)) {
+      throw new Error("VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED: replace bare e2e/e2eWaiver with verification: { observedAt, commands, acceptance, e2eWaiver? }");
+    }
+  }
   const action = input !== null && typeof input === "object" && typeof (input as { action?: unknown }).action === "string"
     ? (input as { action: string }).action
     : undefined;
@@ -116,8 +126,8 @@ function preflight(action: string, input: Record<string, unknown>): void {
   } else if (action === "report_terminal") {
     for (const field of ["changeId", "cwd", "runId", "status", "summary"]) required(input, field);
   } else if (action === "begin_review_campaign") {
-    for (const field of ["changeId", "cwd", "acceptanceScope"]) required(input, field);
-  } else if (["record_review_finding", "extend_review_campaign", "end_review_campaign"].includes(action)) {
+    for (const field of ["changeId", "cwd", "implementationCampaignId", "taskScope", "acceptanceScope"]) required(input, field);
+  } else if (["record_review_finding", "disposition_review_finding", "resolve_review_finding", "extend_review_campaign", "end_review_campaign"].includes(action)) {
     for (const field of ["changeId", "cwd", "campaignId"]) required(input, field);
   } else if (action === "review_campaign_status") {
     for (const field of ["cwd", "campaignId"]) required(input, field);
@@ -172,6 +182,16 @@ export function createOrchestration(options: OrchestrationOptions) {
 
   function workerRejection(slot: Pick<ResolvedSlot, "model" | "thinking">, cause: unknown): Error | undefined {
     return options.handleWorkerCapabilityRejection?.(slot, cause);
+  }
+
+  async function observeMessage(workerId: string, messageId: string): Promise<void> {
+    const status = dependency(options.messageStatus, "messageStatus");
+    while (true) {
+      const current = status(workerId, messageId);
+      if (current === "completed") return;
+      if (current === "failed" || current === "canceled") throw new Error(`Persistent worker message ${current}`);
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   async function finalizeDispatchFailure(input: {
@@ -372,6 +392,8 @@ export function createOrchestration(options: OrchestrationOptions) {
     async execute(rawInput: unknown, caller: { captain: boolean }): Promise<unknown> {
       validate(rawInput);
       const action = required(rawInput, "action");
+      const captainOptional = new Set(["status", "list", "read", "abort", "destroy", "doctor", "review_campaign_status"]);
+      if (!captainOptional.has(action) && !caller.captain) throw new Error(`Captain capability is required for ${action}`);
       preflight(action, rawInput);
       const cancellable = new Set(["single", "parallel", "chain", "create", "send", "steer"]);
       if (cancellable.has(action) && options.signal?.aborted) {
@@ -406,6 +428,7 @@ export function createOrchestration(options: OrchestrationOptions) {
         return dependency(options.beginReviewCampaign, "beginReviewCampaign")({
           changeId: changeId!, projectId: options.projectId ?? cwd,
           acceptanceScope: required(rawInput, "acceptanceScope"), budget: rawInput.budget as number,
+          implementationCampaignId: required(rawInput, "implementationCampaignId"), taskScope: required(rawInput, "taskScope"),
         });
       }
       if (action === "record_review_finding") {
@@ -414,6 +437,20 @@ export function createOrchestration(options: OrchestrationOptions) {
           rootCauseId: required(rawInput, "rootCauseId"),
           summary: required(rawInput, "summary"), scope: required(rawInput, "scope") as ReviewFindingScope,
           ...(rawInput.evidenceRef === undefined ? {} : { evidenceRef: required(rawInput, "evidenceRef") }),
+          ...(rawInput.materiallyConflictsDisposition === undefined ? {} : { materiallyConflictsDisposition: rawInput.materiallyConflictsDisposition === true }),
+        });
+      }
+      if (action === "disposition_review_finding") {
+        return dependency(options.dispositionReviewFinding, "dispositionReviewFinding")({
+          campaignId: required(rawInput, "campaignId"), changeId: changeId!, projectId: options.projectId ?? cwd, rootCauseId: required(rawInput, "rootCauseId"),
+          disposition: required(rawInput, "disposition") as Exclude<ReviewFindingDisposition, "pending">, rationale: required(rawInput, "rationale"),
+          ...(rawInput.evidenceRef === undefined ? {} : { evidenceRef: required(rawInput, "evidenceRef") }),
+        });
+      }
+      if (action === "resolve_review_finding") {
+        return dependency(options.resolveReviewFinding, "resolveReviewFinding")({
+          campaignId: required(rawInput, "campaignId"), changeId: changeId!, projectId: options.projectId ?? cwd, rootCauseId: required(rawInput, "rootCauseId"),
+          verification: rawInput.verification as VerificationManifest,
         });
       }
       if (action === "extend_review_campaign") {
@@ -433,8 +470,11 @@ export function createOrchestration(options: OrchestrationOptions) {
 
       const reviewCampaignId = typeof rawInput.reviewCampaignId === "string" ? rawInput.reviewCampaignId : undefined;
       if (reviewCampaignId) {
+        const workKind = typeof rawInput.workKind === "string" ? rawInput.workKind : "review";
+        if (workKind !== "review" && workKind !== "fix") throw new Error("Review campaign dispatch must be review or fix work");
         dependency(options.consumeReviewCampaign, "consumeReviewCampaign")({
-          campaignId: reviewCampaignId, changeId: changeId!, projectId: options.projectId ?? cwd,
+          campaignId: reviewCampaignId, changeId: changeId!, projectId: options.projectId ?? cwd, kind: workKind,
+          ...(workKind === "fix" ? { rootCauseId: required(rawInput, "reviewFindingRootCauseId") } : {}),
           dispatchSummary: `${action} ${typeof rawInput.name === "string" ? rawInput.name : typeof rawInput.workerId === "string" ? rawInput.workerId : "work"}`,
         });
       }
@@ -453,15 +493,12 @@ export function createOrchestration(options: OrchestrationOptions) {
         if (identity.changeId !== changeId) {
           throw new Error(`Run ${runId} belongs to change ${identity.changeId}, not ${changeId}`);
         }
-        const evidence: CompletionEvidence = {
-          ...(rawInput.e2e === undefined ? {} : { e2e: rawInput.e2e as CompletionEvidence["e2e"] & readonly unknown[] }),
-          ...(rawInput.e2eWaiver === undefined ? {} : { e2eWaiver: rawInput.e2eWaiver as E2EWaiver }),
-        };
+        const verification = rawInput.verification as VerificationManifest | undefined;
         return report({
           runId,
           status: required(rawInput, "status") as ChangeTerminalReport["status"],
           summary: required(rawInput, "summary"),
-          evidence,
+          ...(verification === undefined ? {} : { verification }),
           ...(rawInput.evidenceRefs === undefined ? {} : { evidenceRefs: rawInput.evidenceRefs as string[] }),
         });
       }
@@ -492,7 +529,9 @@ export function createOrchestration(options: OrchestrationOptions) {
           const worker = await options.createWorker({
             name,
             agent: agentName,
+            role: agent.role,
             modelSlot,
+            resolvedSlot: slot.resolvedSlot,
             model: slot.model,
             thinking: slot.thinking,
             cwd,
@@ -502,25 +541,40 @@ export function createOrchestration(options: OrchestrationOptions) {
             ...(handoff ? { handoffRunId: run.runId, initialMessage: `Read your assigned brief at ${handoff.worker.briefPath}. Write the completed report to ${handoff.worker.reportPath}.` } : {}),
           });
           createdWorkerId = worker.workerId;
-          let evidence: unknown;
-          if (handoff) {
-            const messageId = typeof (worker as { activeMessageId?: unknown }).activeMessageId === "string" ? (worker as { activeMessageId: string }).activeMessageId : undefined;
+          const persistentIdentity: WorkerIdentity = Object.freeze({
+            name, agent: agentName, role: agent.role, requestedSlot: modelSlot, resolvedSlot: slot.resolvedSlot,
+            model: slot.model, thinking: slot.thinking, handoffMode, invocationId: `${run.runId}-1`, runId: run.runId,
+          });
+          try { options.onProgress?.({ type: "accepted", identity: persistentIdentity, ...("telemetry" in worker && worker.telemetry ? { telemetry: worker.telemetry as never } : {}) }); } catch { /* observational */ }
+          const settleCreate = async () => {
+            if (!handoff) {
+              await options.reportDispatchTerminal({ runId: run.runId, status: "completed", summary: "create completed" });
+              return undefined;
+            }
+            const messageId = typeof worker.initialMessageId === "string"
+              ? worker.initialMessageId
+              : typeof worker.activeMessageId === "string" ? worker.activeMessageId : undefined;
             if (!messageId) throw new Error("Managed persistent create did not start its initial message");
             const abortPersistent = () => { void options.abortWorker?.(worker.workerId); };
             options.signal?.addEventListener("abort", abortPersistent, { once: true });
             if (options.signal?.aborted) abortPersistent();
-            try { await dependency(options.waitForMessage, "waitForMessage")((worker as { workerId: string }).workerId, messageId); }
-            finally { options.signal?.removeEventListener("abort", abortPersistent); }
-            stage = "handoff_report";
-            evidence = await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: run.runId, producer: { kind: "worker", id: (worker as { workerId: string }).workerId } });
-          }
-          await options.reportDispatchTerminal({
-            runId: run.runId,
-            status: "completed",
-            summary: "create completed",
-            ...(evidence ? { evidenceRefs: [JSON.stringify(evidence)] } : {}),
-          });
-          return { ...worker, runId: run.runId, slot, ...(handoff ? { handoff: evidence ?? handoff.reference } : {}) };
+            try {
+              await observeMessage((worker as { workerId: string }).workerId, messageId);
+              stage = "handoff_report";
+              const evidence = await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: run.runId, producer: { kind: "worker", id: (worker as { workerId: string }).workerId } });
+              await options.reportDispatchTerminal({ runId: run.runId, status: "completed", summary: "create completed", evidenceRefs: [JSON.stringify(evidence)] });
+              let telemetry: OneShotProgress["telemetry"];
+              try { telemetry = (options.statusWorker?.(worker.workerId) as { telemetry?: OneShotProgress["telemetry"] } | undefined)?.telemetry; } catch { telemetry = undefined; }
+              try { options.onProgress?.({ type: "completed", identity: persistentIdentity, ...(telemetry ? { telemetry } : {}) }); } catch { /* observational */ }
+              return evidence;
+            } catch (cause) {
+              return finalizeDispatchFailure({ action: "create", runId: run.runId, stage, cause, projectPath: options.projectId ?? cwd, handoffRunIds: [run.runId], ...(options.signal?.aborted ? { status: "canceled" as const } : {}) });
+            } finally { options.signal?.removeEventListener("abort", abortPersistent); }
+          };
+          const settlement = settleCreate();
+          options.trackSettlement?.(settlement);
+          void settlement.catch(() => undefined);
+          return { ...worker, runId: run.runId, slot, ...(handoff ? { handoff: handoff.reference } : {}) };
         } catch (cause) {
           const primary = stage === "worker" ? workerRejection(slot, cause) ?? cause : cause;
           if (createdWorkerId && options.destroyWorker) await options.destroyWorker(createdWorkerId, true).catch(() => undefined);
@@ -608,19 +662,48 @@ export function createOrchestration(options: OrchestrationOptions) {
             handoffRunIds: managed && handoffRunId ? [handoffRunId] : [],
           });
         }
+        let persistentIdentity: WorkerIdentity | undefined;
+        try {
+          const summary = options.statusWorker?.(workerId) as {
+            name?: unknown; agent?: unknown; role?: unknown; modelSlot?: unknown; resolvedSlot?: unknown;
+            model?: unknown; thinking?: unknown; handoffMode?: unknown; telemetry?: OneShotProgress["telemetry"];
+          } | undefined;
+          if (summary && typeof summary.name === "string" && typeof summary.agent === "string" &&
+            typeof summary.modelSlot === "string" && typeof summary.model === "string" && typeof summary.thinking === "string") {
+            const role = typeof summary.role === "string" ? summary.role : options.getAgent(summary.agent).role;
+            persistentIdentity = Object.freeze({
+              name: summary.name, agent: summary.agent, role, requestedSlot: summary.modelSlot,
+              resolvedSlot: typeof summary.resolvedSlot === "string" ? summary.resolvedSlot : summary.modelSlot,
+              model: summary.model, thinking: summary.thinking as ResolvedSlot["thinking"],
+              handoffMode: summary.handoffMode === "managed" ? "managed" : handoffMode,
+              invocationId: `${run.runId}-1`, runId: run.runId,
+            });
+            try { options.onProgress?.({ type: "accepted", identity: persistentIdentity, ...(summary.telemetry ? { telemetry: summary.telemetry } : {}) }); } catch { /* observational */ }
+          }
+        } catch { /* persistent card projection is observational */ }
         const settle = async () => {
           const abortPersistent = () => { void options.abortWorker?.(workerId); };
           options.signal?.addEventListener("abort", abortPersistent, { once: true });
           if (options.signal?.aborted) abortPersistent();
           try {
-            const completed = await waitForMessage(workerId, messageId);
+            const completed = rawInput.wait === false
+              ? (await observeMessage(workerId, messageId), { accepted: true, workerId, messageId, status: messageStatus(workerId, messageId) })
+              : await waitForMessage(workerId, messageId);
             stage = "handoff_report";
             const evidence = managed && handoffRunId ? await dependency(options.validateHandoffReport, "validateHandoffReport")({ projectPath: options.projectId ?? cwd, runId: handoffRunId, producer: { kind: "worker", id: workerId }, ...(reportRevision === undefined ? {} : { expectedRevision: reportRevision }) }) : undefined;
             await options.reportDispatchTerminal({ runId: run.runId, status: "completed", summary: `${action} completed`, ...(evidence ? { evidenceRefs: [JSON.stringify(evidence)] } : {}) });
+            if (persistentIdentity) {
+              let telemetry: OneShotProgress["telemetry"];
+              try { telemetry = (options.statusWorker?.(workerId) as { telemetry?: OneShotProgress["telemetry"] } | undefined)?.telemetry; } catch { telemetry = undefined; }
+              try { options.onProgress?.({ type: "completed", identity: persistentIdentity, ...(telemetry ? { telemetry } : {}) }); } catch { /* observational */ }
+            }
             return evidence ? { handoff: evidence } : completed;
           } catch (cause) {
             let messageTerminal: "completed" | "failed" | "canceled" = "failed";
-            try { messageTerminal = messageStatus(workerId, messageId); } catch { /* diagnostic only */ }
+            try {
+              const observed = messageStatus(workerId, messageId);
+              if (observed === "completed" || observed === "failed" || observed === "canceled") messageTerminal = observed;
+            } catch { /* diagnostic only */ }
             let primary = cause;
             let summary: unknown;
             try { summary = options.statusWorker?.(workerId); } catch { summary = undefined; }
@@ -646,6 +729,10 @@ export function createOrchestration(options: OrchestrationOptions) {
         };
         const settlement = settle();
         options.trackSettlement?.(settlement);
+        if (rawInput.wait === false) {
+          void settlement.catch(() => undefined);
+          return { status: "accepted", runId: run.runId, result: immediate };
+        }
         const settled = await settlement;
         if (settled !== null && typeof settled === "object" &&
           ((settled as { status?: unknown }).status === "failed" || (settled as { status?: unknown }).status === "canceled")) {

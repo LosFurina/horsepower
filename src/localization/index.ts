@@ -95,6 +95,9 @@ const en = {
   "webhook.failed": ({ scope }) => `${scope} failed.`,
   "webhook.canceled": ({ scope }) => `${scope} canceled.`,
   "error.localeInvalid": ({ locale }) => `Unsupported output locale: ${locale}. Use en or zh-CN.`,
+  "error.verification": ({ code }) => `Verification rejected (${code}). Submit fresh Captain-observed claim-matched evidence for the current scope.`,
+  "error.verificationMigration": ({ code }) => `Legacy completion evidence rejected (${code}). Replace bare e2e/e2eWaiver with the verification manifest.`,
+  "error.reviewCampaign": ({ code }) => `Review campaign action rejected (${code}). Inspect the stable finding and campaign states, then record an explicit Captain decision.`,
 } satisfies Record<string, Formatter>;
 
 const zhCN: { [K in keyof typeof en]: Formatter } = {
@@ -186,6 +189,9 @@ const zhCN: { [K in keyof typeof en]: Formatter } = {
   "webhook.failed": ({ scope }) => `${scope} 执行失败。`,
   "webhook.canceled": ({ scope }) => `${scope} 已取消。`,
   "error.localeInvalid": ({ locale }) => `不支持的输出语言：${locale}。请使用 en 或 zh-CN。`,
+  "error.verification": ({ code }) => `验证被拒绝（${code}）。请针对当前范围提交由 Captain 新近观察且 claim-matched 的证据。`,
+  "error.verificationMigration": ({ code }) => `旧完成证据被拒绝（${code}）。请将 bare e2e/e2eWaiver 替换为 verification manifest。`,
+  "error.reviewCampaign": ({ code }) => `Review campaign 操作被拒绝（${code}）。请检查稳定的 finding/campaign 状态，再记录显式 Captain 决策。`,
 };
 
 export const catalogs = { en, "zh-CN": zhCN } as const;

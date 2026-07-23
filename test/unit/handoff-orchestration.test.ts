@@ -8,7 +8,7 @@ function base(overrides: Record<string, unknown> = {}) {
       authorize: async () => { effects += 1; },
       resolveSlot: (slot: string) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high" as const, fallbackPath: [slot], revision: "r" }),
       validateModel: () => undefined,
-      getAgent: (name: string) => ({ name, role: name, prompt: "Prompt.", tools: [], recommendedSlots: [], standards: [] }),
+      getAgent: (name: string) => ({ name, role: name, prompt: "Prompt.", tools: [], standards: [] }),
       createWorker: async () => { effects += 1; return { workerId: "worker-1" }; },
       beginDispatch: () => { effects += 1; return { runId: "run-1" }; },
       reportDispatchTerminal: async () => undefined,

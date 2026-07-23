@@ -59,10 +59,11 @@ test("runs Pi JSON mode with private prompt cleanup and captures text and usage"
     },
   });
 
-  await expect(run(invocation)).resolves.toEqual({
+  await expect(run(invocation)).resolves.toMatchObject({
     name: "review",
     text: "review result",
     usage: { input: 10, output: 5, totalCost: 0.01 },
+    telemetry: { usage: { input: 10, output: 5 }, latestAssistantSummary: "review result" },
   });
   expect(child.stdin.writableEnded).toBe(true);
   expect(args.filter((arg) => arg === "--no-skills")).toHaveLength(1);
@@ -107,6 +108,49 @@ test("emits ordered bounded redacted assistant and tool progress", async () => {
   ]);
   expect(JSON.stringify(progress)).not.toContain("/private/secret");
   expect(Buffer.byteLength(JSON.stringify(progress), "utf8")).toBeLessThan(4_000);
+});
+
+test("reports one-shot elapsed time and authoritative aggregate telemetry with an injected clock", async () => {
+  const child = new FakeJsonChild();
+  const progress: Array<Record<string, unknown>> = [];
+  let tick = 100;
+  const { createPiJsonRunner } = await import("../../src/runtime/one-shot-runner.js");
+  const run = createPiJsonRunner({
+    now: () => tick,
+    spawnProcess: () => {
+      queueMicrotask(() => {
+        tick = 250;
+        child.stdout.write(`${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_end", content: "progress" } })}\n`);
+        child.stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 4, output: 2, cached: 999 } } })}\n`);
+        child.emit("close", 0, null);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    },
+  });
+  const result = await run({ ...invocation, onProgress: (event) => { progress.push(event as unknown as Record<string, unknown>); } });
+  expect(progress.at(-1)).toMatchObject({ telemetry: { elapsedMs: 150, latestAssistantSummary: "progress" } });
+  expect(result.telemetry).toEqual({ elapsedMs: 150, usage: { input: 4, output: 2 }, latestAssistantSummary: "done" });
+});
+
+test("counts projected telemetry and latest summary within aggregate progress bounds", async () => {
+  const child = new FakeJsonChild();
+  const progress: unknown[] = [];
+  const { createPiJsonRunner } = await import("../../src/runtime/one-shot-runner.js");
+  const run = createPiJsonRunner({
+    progressEventLimit: 2,
+    progressByteLimit: 180,
+    spawnProcess: () => {
+      queueMicrotask(() => {
+        child.stdout.write(`${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_end", content: "x".repeat(500) } })}\n`);
+        child.stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } })}\n`);
+        child.emit("close", 0, null);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    },
+  });
+  await expect(run({ ...invocation, onProgress: (event) => progress.push(event) })).resolves.toMatchObject({ text: "done" });
+  expect(progress).toHaveLength(1);
+  expect((progress[0] as { type: string }).type).toBe("starting");
 });
 
 test("progress callback failure is observational", async () => {

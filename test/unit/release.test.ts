@@ -41,7 +41,7 @@ async function fixtureRepository(): Promise<string> {
   await writeFile(join(root, "dist", "cli", "horsepower.js"), "#!/usr/bin/env node\nconsole.log('horsepower');\n");
   await chmod(join(root, "dist", "cli", "horsepower.js"), 0o755);
   await writeFile(join(root, "dist", "extension", "index.js"), "export default function horsepower() {}\n");
-  await writeFile(join(root, "resources", "agents", "coder.md"), "---\nname: coder\nrole: Implement scoped changes\nrecommendedSlots: [craft]\ntools: [read, edit]\nstandards: [correctness]\n---\nImplement directly.\n");
+  await writeFile(join(root, "resources", "agents", "coder.md"), "---\nname: coder\nrole: Implement scoped changes\ntools: [read, edit]\nstandards: [correctness]\n---\nImplement directly.\n");
   await writeFile(join(root, "resources", "skills", "horsepower", "SKILL.md"), "---\nname: horsepower\ndescription: Explicitly dispatch Horsepower workers.\n---\nUse `horsepower_subagent` only when explicit execution is useful.\n");
   await Promise.all([
     mkdir(join(root, "src"), { recursive: true }),
@@ -139,7 +139,7 @@ test("built release scanner executes with the runtime yaml dependency", async ()
   await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: process.cwd() });
   const script = `
     import { scanPublicContent } from ${JSON.stringify(new URL("../../dist/release/release-builder.mjs", import.meta.url).href)};
-    scanPublicContent([{ path: "safe.yaml", content: Buffer.from("recommendedSlots:\\n  - craft\\n") }]);
+    scanPublicContent([{ path: "safe.yaml", content: Buffer.from("slotPolicy:\\n  - craft\\n") }]);
   `;
   await expect(execFileAsync(process.execPath, ["--input-type=module", "--eval", script], { cwd: process.cwd() })).resolves.toMatchObject({ stderr: "" });
 });
@@ -570,13 +570,12 @@ Provider-neutral instructions.
   const safeSemanticSlots = [
     ["resources/agents/coder.md", `---
 role: Implement changes
-recommendedSlots:
-  - craft
+tools: [read]
 ---
 Select models and providers through semantic slots.
 `],
     ["docs/model-neutral.md", "Models and providers are selected through recommended semantic slots, never concrete bindings.\n"],
-    ["config.yaml", `recommendedSlots:
+    ["config.yaml", `slotAliases:
   judgment:
     - craft
 slotPolicy:

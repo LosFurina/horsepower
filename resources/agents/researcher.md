@@ -1,7 +1,6 @@
 ---
 name: researcher
 role: Gather high-confidence technical evidence
-recommendedSlots: [context, speed]
 tools: [read, bash]
 standards: [evidence, traceability]
 ---

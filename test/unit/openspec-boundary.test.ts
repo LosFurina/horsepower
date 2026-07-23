@@ -182,6 +182,42 @@ test("loads bounded tasks only from the resolved official status artifact after 
   expect(reads.at(-1)).toBe(tasksPath);
 });
 
+test("snapshots only exact selected tasks and rejects selected-task identity drift", async () => {
+  const tasksPath = "/project/openspec/changes/horsepower-alpha1/tasks.md";
+  const status = {
+    ...healthy,
+    "status --change horsepower-alpha1 --json": {
+      code: 0, stderr: "", stdout: JSON.stringify({
+        changeName: "horsepower-alpha1", isComplete: true,
+        artifactPaths: { tasks: { resolvedOutputPath: tasksPath } },
+      }),
+    },
+  };
+  const { createOpenSpecBoundary } = await import("../../src/openspec/boundary.js");
+  const boundary = createOpenSpecBoundary({
+    run: async (args) => status[args.join(" ") as keyof typeof status] ?? { code: 1, stdout: "", stderr: "" },
+    inspectPath: async () => ({ isFile: () => true, isSymbolicLink: () => false }),
+    readText: async (path) => path === tasksPath
+      ? "## 1. Work\n- [ ] 1.1 First task\n- [ ] 1.2 Second task\n"
+      : path.endsWith("SKILL.md")
+        ? 'name: openspec-apply-change\nallowed-tools: Bash(openspec:*)\nauthor: openspec\ngeneratedBy: "1.6.0"'
+        : "Implement tasks from an OpenSpec change.",
+  });
+
+  await expect(boundary.snapshotAcceptance({
+    cwd: "/project", changeId: "horsepower-alpha1", selectedTaskIds: ["1.2"],
+    selectedTasks: [{ id: "1.2", description: "Second task", sectionId: "1" }],
+  })).resolves.toMatchObject({ refs: ["task:1.2"], digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  await expect(boundary.snapshotAcceptance({
+    cwd: "/project", changeId: "horsepower-alpha1", selectedTaskIds: ["1.2"],
+    selectedTasks: [{ id: "1.2", description: "Changed task", sectionId: "1" }],
+  })).rejects.toThrow("VERIFICATION_SCOPE_DRIFT");
+  await expect(boundary.snapshotAcceptance({
+    cwd: "/project", changeId: "horsepower-alpha1", selectedTaskIds: ["1.2"],
+    selectedTasks: [{ id: "1.2", description: "Second task", sectionId: "1" }], requireComplete: true,
+  })).rejects.toThrow("VERIFICATION_ACCEPTANCE_UNCHECKED");
+});
+
 test.each([
   ["missing path", undefined, { isFile: (): boolean => true, isSymbolicLink: (): boolean => false }, "no resolved tasks artifact"],
   ["glob path", "/project/openspec/changes/c/tasks/**/*.md", { isFile: (): boolean => true, isSymbolicLink: (): boolean => false }, "no resolved tasks artifact"],

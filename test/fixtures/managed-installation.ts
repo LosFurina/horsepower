@@ -15,7 +15,7 @@ export async function writeFixtureRelease(root: string, version: string): Promis
   }
   await mkdir(join(root, "resources", "agents"), { recursive: true });
   await writeFile(join(root, "resources", "agents", "coder.md"), [
-    "---", "name: coder", "role: Implement scoped changes", "recommendedSlots: [craft]",
+    "---", "name: coder", "role: Implement scoped changes",
     "tools: [read, edit]", "standards: [correctness]", "---", "Implement directly.", "",
   ].join("\n"));
   const digests = Object.fromEntries(await Promise.all(Object.values(fixtureReleaseEntryPoints).map(async (path) => [

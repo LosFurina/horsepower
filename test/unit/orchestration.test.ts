@@ -27,7 +27,7 @@ test("review campaign budget is consumed before a review dispatch creates work",
     authorize: async () => { calls.push("authorize"); },
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: name, prompt: "Review.", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Review.", tools: [], standards: [] }),
     createWorker: async () => { calls.push("worker"); return { workerId: "w" }; },
     beginDispatch: () => { calls.push("dispatch"); return { runId: "run" }; },
     consumeReviewCampaign: (input) => { calls.push(`consume:${input.campaignId}`); throw new Error("Review campaign budget exhausted: campaign-1"); },
@@ -49,7 +49,7 @@ test("workers cannot create or extend review campaigns", async () => {
     beginReviewCampaign: () => { mutations += 1; throw new Error("unexpected"); },
     extendReviewCampaign: () => { mutations += 1; throw new Error("unexpected"); },
   });
-  await expect(orchestration.execute({ action: "begin_review_campaign", changeId: "change-a", cwd: "/project", acceptanceScope: "task", budget: 1 }, { captain: false }))
+  await expect(orchestration.execute({ action: "begin_review_campaign", changeId: "change-a", cwd: "/project", implementationCampaignId: "implementation-1", taskScope: "5.3,5.4", acceptanceScope: "task", budget: 1 }, { captain: false }))
     .rejects.toThrow("Captain capability is required");
   await expect(orchestration.execute({ action: "extend_review_campaign", changeId: "change-a", cwd: "/project", campaignId: "campaign-1", additionalBudget: 1, humanAuthorized: true, reason: "human" }, { captain: false }))
     .rejects.toThrow("Captain capability is required");
@@ -110,7 +110,7 @@ test("rejects an unknown resolved model before spawning any work", async () => {
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("unknown", "model"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: (slot) => { throw new Error(`Unknown model: ${slot.model}`); },
-    getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: [], standards: [] }),
     createWorker: async () => { workers += 1; return { workerId: "unused" }; },
     beginDispatch: () => ({ runId: "unused" }),
     reportDispatchTerminal: async () => undefined,
@@ -130,7 +130,7 @@ test.each(["unsupported", "inconclusive"] as const)("gates persistent creation a
     resolveSlot: (slot) => { calls.push("resolve"); return { requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
     validateModel: () => { calls.push("catalog"); },
     validateCapability: async () => { calls.push("gate"); throw Object.assign(new Error(status), { status }); },
-    getAgent: () => { calls.push("agent"); return { name: "a", role: "a", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }; },
+    getAgent: () => { calls.push("agent"); return { name: "a", role: "a", prompt: "Prompt", tools: [], standards: [] }; },
     createWorker: async () => { calls.push("child"); return { workerId: "w" }; },
     beginDispatch: () => { calls.push("run"); return { runId: "run" }; },
     createHandoff: async () => { calls.push("handoff"); throw new Error("unused"); },
@@ -151,7 +151,7 @@ test.each(["single", "parallel"] as const)("gates %s one-shot after all slot res
     resolveSlot: (slot) => { calls.push(`resolve:${slot}`); return { requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "slot-r" }; },
     validateModel: () => { calls.push("catalog"); },
     validateCapability: async (slot) => { calls.push(`gate:${slot.requestedSlot}`); if (slot.requestedSlot === "craft") throw new Error("unsupported"); },
-    getAgent: (name) => { calls.push(`agent:${name}`); return { name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }; },
+    getAgent: (name) => { calls.push(`agent:${name}`); return { name, role: name, prompt: "Prompt", tools: [], standards: [] }; },
     createWorker: async () => ({ workerId: "unused" }),
     beginDispatch: () => { calls.push("run"); return { runId: "run" }; },
     createHandoff: async () => { calls.push("handoff"); throw new Error("unused"); },
@@ -190,7 +190,7 @@ test("actual worker capability rejection invalidates evidence without fallback o
     validateModel: () => undefined,
     validateCapability: async () => undefined,
     handleWorkerCapabilityRejection: invalidated,
-    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async (input) => { attempts.push({ model: input.model, thinking: input.thinking }); throw rejection; },
     beginDispatch: () => ({ runId: "run" }),
     reportDispatchTerminal: async () => undefined,
@@ -219,7 +219,7 @@ test("parallel worker capability rejection invalidates each matching attempted c
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", slot), thinking: "high", fallbackPath: [slot], revision: "slot-r" }),
     validateModel: () => undefined, validateCapability: async () => undefined,
     handleWorkerCapabilityRejection: invalidated,
-    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: {
       single: async () => ({ name: "unused", text: "unused" }),
@@ -259,7 +259,7 @@ test("one-shot worker capability rejection invalidates evidence without automati
     validateModel: () => undefined,
     validateCapability: async () => undefined,
     handleWorkerCapabilityRejection: invalidated,
-    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: {
       single: async (input) => {
@@ -291,7 +291,7 @@ test("authorizes and executes exactly one explicitly requested persistent creati
     authorize: async () => { calls.push("authorize"); },
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("provider", "model"), thinking: "high", fallbackPath: [slot], revision: "rev" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: "Review", prompt: "Review.", tools: ["read"], recommendedSlots: ["judgment"], standards: [] }),
+    getAgent: (name) => ({ name, role: "Review", prompt: "Review.", tools: ["read"], standards: [] }),
     createWorker: async (input) => { calls.push(`create:${input.name}`); return { workerId: "worker-1" }; },
     beginDispatch: () => ({ runId: "run-1" }),
     reportDispatchTerminal: async () => undefined,
@@ -316,7 +316,7 @@ test("pre-aborted one-shot returns canceled before authorization, accounting, ru
     authorize: async () => { calls.push("authorize"); },
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => { calls.push("model"); },
-    getAgent: (name) => ({ name, role: "Review", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: "Review", prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => { calls.push("worker"); return { workerId: "unused" }; },
     oneShot: { single: async () => { calls.push("spawn"); return { name: "review", text: "unused" }; }, parallel: async () => [], chain: async () => [] },
     beginDispatch: () => { calls.push("run"); return { runId: "unused" }; },
@@ -342,7 +342,7 @@ test("emits immutable complete identity with requested-to-resolved fallback and 
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: "judgment", model: genericId("provider", "model"), thinking: "xhigh", fallbackPath: [slot, "judgment"], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: "Implement a narrowly specified change", prompt: "Prompt", tools: ["read"], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: "Implement a narrowly specified change", prompt: "Prompt", tools: ["read"], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: { single: async (input) => { input.onProgress?.({ type: "tool_start", toolName: "read", toolCallId: "call-1", operation: "read", target: "src/index.ts" }); return { name: input.name, text: "done" }; }, parallel: async () => [], chain: async () => [] },
     beginDispatch: () => ({ runId: "run-identity" }),
@@ -373,7 +373,7 @@ test("during-run abort returns canceled and terminalizes created managed handoff
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: "Review", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: "Review", prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: { single: async () => { controller.abort("captain turn canceled"); throw new Error("One-shot task aborted"); }, parallel: async () => [], chain: async () => [] },
     beginDispatch: () => ({ runId: "run-canceled" }), signal: controller.signal,
@@ -392,6 +392,66 @@ test("during-run abort returns canceled and terminalizes created managed handoff
   expect(dispatchTerminals).toEqual(["canceled"]);
 });
 
+test("external Captain abort cancels an admitted slow managed one-shot without report or orphan", async () => {
+  const controller = new AbortController();
+  let admitted!: () => void;
+  const admittedPromise = new Promise<void>((resolve) => { admitted = resolve; });
+  let activeChildren = 0;
+  const handoffTerminals: Array<{ runId: string; status: string; reportPresent: boolean }> = [];
+  const dispatchTerminals: Array<{ runId: string; status: string }> = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Review", prompt: "Prompt", tools: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    oneShot: {
+      single: async (input) => {
+        activeChildren += 1;
+        admitted();
+        try {
+          await new Promise<never>((_resolve, reject) => {
+            const abort = () => reject(new Error("One-shot task aborted"));
+            input.signal?.addEventListener("abort", abort, { once: true });
+            if (input.signal?.aborted) abort();
+          });
+        } finally {
+          activeChildren -= 1;
+        }
+        throw new Error("unreachable");
+      },
+      parallel: async () => [], chain: async () => [],
+    },
+    beginDispatch: () => ({ runId: "run-external-esc" }), signal: controller.signal,
+    createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } }),
+    recordHandoffTerminal: async ({ runId, status }) => {
+      handoffTerminals.push({ runId, status, reportPresent: false });
+      return { status, reportPresent: false };
+    },
+    reportDispatchTerminal: async ({ runId, status }) => {
+      if (dispatchTerminals.length) throw new Error("Run is already terminal");
+      dispatchTerminals.push({ runId, status });
+    },
+  });
+
+  const running = captain(orchestration, {
+    action: "single", handoffMode: "managed", changeId: "c", cwd: "/p", name: "review", agent: "reviewer", modelSlot: "judgment", task: "review",
+  });
+  await admittedPromise;
+  expect(activeChildren).toBe(1);
+  controller.abort("Esc");
+
+  await expect(running).resolves.toMatchObject({
+    status: "canceled", runId: "run-external-esc",
+    identities: [{ invocationId: "run-external-esc-1", runId: "run-external-esc" }],
+    failure: { code: "DISPATCH_CANCELED", boundary: "cancellation" },
+  });
+  expect(activeChildren).toBe(0);
+  expect(handoffTerminals).toEqual([{ runId: "run-external-esc", status: "canceled", reportPresent: false }]);
+  expect(dispatchTerminals).toEqual([{ runId: "run-external-esc", status: "canceled" }]);
+});
+
 test("orchestration progress callback failure cannot change worker completion", async () => {
   const terminals: string[] = [];
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
@@ -399,7 +459,7 @@ test("orchestration progress callback failure cannot change worker completion", 
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: { single: async (input) => ({ name: input.name, text: "done" }), parallel: async () => [], chain: async () => [] },
     beginDispatch: () => ({ runId: "run-progress-error" }),
@@ -421,7 +481,7 @@ test("dispatches exactly the explicit parallel tasks and reports terminal lifecy
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: name, prompt: `${name}.`, tools: ["read"], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: `${name}.`, tools: ["read"], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: {
       single: async (input) => ({ name: input.name, text: input.task }),
@@ -463,7 +523,7 @@ test("parallel batch failure preserves completed and failed child terminal truth
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: name, prompt: "Review", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Review", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: { single: async () => { throw new Error("unused"); }, parallel: async () => { throw new OneShotBatchError([
       { status: "fulfilled", value: { name: "a", text: "done" } }, { status: "rejected", reason: new Error("b failed") },
@@ -495,7 +555,7 @@ test("terminalizes only managed handoffs that were created before parallel hando
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: { single: async () => ({ name: "unused", text: "unused" }), parallel: async () => [], chain: async () => [] },
     beginDispatch: () => ({ runId: "run-partial" }),
@@ -533,7 +593,7 @@ test.each([
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: { single: executeSingle, parallel: async () => [], chain: async () => [] },
     beginDispatch: () => ({ runId: `run-${expectedStage}` }),
@@ -558,7 +618,7 @@ test("preserves primary managed failure when handoff terminalization also fails"
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => ({ workerId: "unused" }),
     oneShot: { single: async () => { throw new Error("worker primary"); }, parallel: async () => [], chain: async () => [] },
     beginDispatch: () => ({ runId: "run-cleanup" }),
@@ -611,7 +671,7 @@ test("safe actions never start dispatches or workers", async () => {
   expect({ creations, dispatches }).toEqual({ creations: 0, dispatches: 0 });
 });
 
-test("Captain terminal reporting uses E2E evidence without creating work", async () => {
+test("Captain terminal reporting uses claim-matched verification without creating work", async () => {
   let report: unknown;
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
@@ -633,10 +693,14 @@ test("Captain terminal reporting uses E2E evidence without creating work", async
     runId: "run-change",
     status: "completed",
     summary: "done",
-    e2e: [{ command: "npm run e2e", exitCode: 0, summary: "passed" }],
+    verification: {
+      observedAt: "2026-07-21T12:00:00.000Z",
+      commands: [{ id: "e2e-1", kind: "e2e", command: "npm run e2e", exitCode: 0, summary: "passed", acceptanceRefs: ["task:1.1"] }],
+      acceptance: [{ ref: "task:1.1", evidenceIds: ["e2e-1"] }],
+    },
   });
 
-  expect(report).toMatchObject({ runId: "run-change", status: "completed", evidence: { e2e: [{ exitCode: 0 }] } });
+  expect(report).toMatchObject({ runId: "run-change", status: "completed", verification: { commands: [{ id: "e2e-1", exitCode: 0 }] } });
 });
 
 test("rejects change terminal reporting when run belongs to another change", async () => {
@@ -706,9 +770,40 @@ test("clears the timeout when waited settlement completes first", async () => {
   }
 });
 
-test("persistent dispatch waits for terminal settlement despite wait and timeout hints", async () => {
-  let finish!: () => void;
-  const completion = new Promise<void>((resolve) => { finish = resolve; });
+test("managed persistent create acknowledges admission without invoking its completion waiter", async () => {
+  let messageStatus: "running" | "completed" = "running";
+  let tracked: Promise<unknown> | undefined;
+  let waiterCalls = 0;
+  const terminal: string[] = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high", fallbackPath: [slot], revision: "r" }),
+    validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt", tools: [], standards: [] }),
+    beginDispatch: () => ({ runId: "run-create-async" }),
+    createHandoff: async () => ({ worker: { briefPath: "/private/brief", reportPath: "/private/report" }, reference: { stable: true } }),
+    createWorker: async () => ({ workerId: "worker-async", activeMessageId: "message-initial", initialMessageId: "message-initial" }),
+    waitForMessage: async () => { waiterCalls += 1; throw new Error("completion waiter must not be invoked"); },
+    messageStatus: () => messageStatus,
+    validateHandoffReport: async () => ({ artifactId: "report" }),
+    reportDispatchTerminal: async ({ status }) => { terminal.push(status); },
+    trackSettlement: (settlement) => { tracked = settlement; },
+  });
+  const result = await captain(orchestration, { action: "create", handoffMode: "managed", changeId: "c", cwd: "/p", name: "worker", agent: "coder", modelSlot: "judgment", brief: "work" });
+  expect(result).toMatchObject({ workerId: "worker-async", initialMessageId: "message-initial", runId: "run-create-async", handoff: { stable: true } });
+  expect(waiterCalls).toBe(0);
+  expect(terminal).toEqual([]);
+  expect(tracked).toBeDefined();
+  messageStatus = "completed";
+  await tracked;
+  expect(terminal).toEqual(["completed"]);
+});
+
+test.each(["send", "steer"] as const)("%s wait false acknowledges stable message identity without invoking completion waiter", async (action) => {
+  let messageStatus: "running" | "completed" = "running";
+  let waiterCalls = 0;
+  let tracked: Promise<unknown> | undefined;
   const terminal: string[] = [];
   const { createOrchestration } = await import("../../src/orchestration/facade.js");
   const orchestration = createOrchestration({
@@ -719,21 +814,59 @@ test("persistent dispatch waits for terminal settlement despite wait and timeout
     createWorker: async () => ({ workerId: "unused" }),
     beginDispatch: () => ({ runId: "run-send" }),
     reportDispatchTerminal: async (report) => { terminal.push(report.status); },
-    sendWorker: async () => ({ messageId: "message-1" }),
-    waitForMessage: async () => { await completion; return { status: "completed" }; },
-    messageStatus: () => "completed",
+    sendWorker: async (input) => ({ accepted: true, workerId: String(input.workerId), messageId: "message-1", status: "running" }),
+    waitForMessage: async () => { waiterCalls += 1; throw new Error("completion waiter must not be invoked"); },
+    messageStatus: () => messageStatus,
+    trackSettlement: (settlement) => { tracked = settlement; },
   });
 
-  let returned = false;
-  const dispatch = captain(orchestration, {
-    action: "send", handoffMode: "inline", changeId: "x", cwd: "/project", workerId: "w", message: "m",
-    wait: false, timeoutMs: 2,
-  }).finally(() => { returned = true; });
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  expect(returned).toBe(false); expect(terminal).toEqual([]);
-  finish();
-  await expect(dispatch).resolves.toMatchObject({ status: "completed", runId: "run-send" });
+  const dispatch = await captain(orchestration, {
+    action, ...(action === "send" ? { handoffMode: "inline" as const } : {}),
+    changeId: "x", cwd: "/project", workerId: "w", message: "m", wait: false, timeoutMs: 2,
+  });
+  expect(dispatch).toMatchObject({ status: "accepted", runId: "run-send", result: { messageId: "message-1" } });
+  expect(waiterCalls).toBe(0);
+  expect(terminal).toEqual([]);
+  expect(tracked).toBeDefined();
+  messageStatus = "completed";
+  await tracked;
   expect(terminal).toEqual(["completed"]);
+});
+
+test("persistent send projects attributed accepted and completed telemetry without changing settlement", async () => {
+  let status: "running" | "completed" = "running";
+  let tracked: Promise<unknown> | undefined;
+  const progress: Array<Record<string, unknown>> = [];
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined,
+    resolveSlot: () => { throw new Error("unused"); }, validateModel: () => undefined,
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], standards: [] }),
+    createWorker: async () => ({ workerId: "unused" }),
+    beginDispatch: () => ({ runId: "run-persistent-card" }), reportDispatchTerminal: async () => undefined,
+    sendWorker: async () => ({ accepted: true, workerId: "worker-1", messageId: "message-1", status: "running" }),
+    waitForMessage: async () => { throw new Error("not used"); },
+    messageStatus: () => status,
+    statusWorker: () => ({
+      workerId: "worker-1", name: "session", agent: "coder", role: "Implement", modelSlot: "context", resolvedSlot: "judgment",
+      model: "provider/model", thinking: "high", handoffMode: "inline", telemetry: status === "running"
+        ? { elapsedMs: 10 }
+        : { elapsedMs: 20, usage: { input: 5, output: 2 }, latestAssistantSummary: "done" },
+    }),
+    onProgress: (event) => progress.push(event as unknown as Record<string, unknown>),
+    trackSettlement: (settlement) => { tracked = settlement; },
+  });
+
+  await expect(captain(orchestration, {
+    action: "send", handoffMode: "inline", changeId: "c", cwd: "/p", workerId: "worker-1", message: "work", wait: false,
+  })).resolves.toMatchObject({ status: "accepted", runId: "run-persistent-card" });
+  expect(progress).toMatchObject([{ type: "accepted", identity: {
+    name: "session", agent: "coder", role: "Implement", requestedSlot: "context", resolvedSlot: "judgment",
+    model: "provider/model", thinking: "high", invocationId: "run-persistent-card-1", runId: "run-persistent-card",
+  }, telemetry: { elapsedMs: 10 } }]);
+  status = "completed";
+  await tracked;
+  expect(progress.at(-1)).toMatchObject({ type: "completed", telemetry: { elapsedMs: 20, usage: { input: 5, output: 2 }, latestAssistantSummary: "done" } });
 });
 
 test("maps wait-true semantic cancellation to canceled dispatch terminal", async () => {
@@ -847,7 +980,7 @@ test("settles create and persistent-send dispatch runs without creating extra wo
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: ["read"], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: ["read"], standards: [] }),
     createWorker: async () => ({ workerId: "worker-1" }),
     beginDispatch: () => ({ runId: `run-${++runNumber}` }),
     reportDispatchTerminal: async (report) => { terminal.push(report); },
@@ -880,7 +1013,7 @@ test("managed persistent create terminalizes its created handoff when worker sta
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: "Implement", prompt: "Prompt", tools: [], standards: [] }),
     createWorker: async () => { throw new Error("spawn failed"); },
     beginDispatch: () => ({ runId: "run-managed-create" }),
     createHandoff: async ({ runId }) => ({ worker: { briefPath: `/private/${runId}/brief`, reportPath: `/private/${runId}/report` }, reference: { runId } }),
@@ -902,7 +1035,7 @@ test("reports failed create dispatch without spawning replacement work", async (
     authorize: async () => undefined,
     resolveSlot: (slot) => ({ requestedSlot: slot, resolvedSlot: slot, model: genericId("p", "m"), thinking: "high", fallbackPath: [slot], revision: "r" }),
     validateModel: () => undefined,
-    getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name) => ({ name, role: name, prompt: "Prompt.", tools: [], standards: [] }),
     createWorker: async () => { throw new Error("startup failed"); },
     beginDispatch: () => ({ runId: "run-create" }),
     reportDispatchTerminal: async (report) => { terminal.push(report.status); },
@@ -956,4 +1089,17 @@ test("rejects invalid input before authorization or worker creation with a path-
     agent: "reviewer",
   })).rejects.toThrow("$.modelSlot: required");
   expect(calls).toBe(0);
+});
+
+test("legacy completion payload fails closed with actionable replacement shape before runtime mutation", async () => {
+  const report = vi.fn();
+  const { createOrchestration } = await import("../../src/orchestration/facade.js");
+  const orchestration = createOrchestration({
+    authorize: async () => undefined, resolveSlot: () => { throw new Error("unused"); }, validateModel: () => undefined,
+    getAgent: () => { throw new Error("unused"); }, createWorker: async () => ({ workerId: "unused" }), beginDispatch: () => ({ runId: "unused" }),
+    reportDispatchTerminal: async () => undefined, reportChangeTerminal: report,
+  });
+  await expect(captain(orchestration, { action: "report_terminal", cwd: "/project", changeId: "change-a", runId: "run-1", status: "completed", summary: "legacy", e2e: [{ command: "npm run test:e2e", exitCode: 0, summary: "passed" }] }))
+    .rejects.toThrow(/VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED.*verification.*observedAt.*commands.*acceptance/);
+  expect(report).not.toHaveBeenCalled();
 });

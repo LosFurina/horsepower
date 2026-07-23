@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "../slots/registry.js";
+import type { ProgressTelemetry } from "./progress-telemetry.js";
 
-export type OneShotProgress =
+export type OneShotProgress = ({ telemetry?: ProgressTelemetry } & (
   | { type: "accepted" }
   | { type: "starting" }
   | { type: "assistant"; summary: string }
@@ -10,7 +11,8 @@ export type OneShotProgress =
   | { type: "report_validated"; runId: string }
   | { type: "completed" }
   | { type: "failed"; stage: string; summary: string }
-  | { type: "canceled"; summary: string };
+  | { type: "canceled"; summary: string }
+));
 
 export interface WorkerIdentity {
   name: string;
@@ -51,6 +53,7 @@ export interface OneShotResult {
   text: string;
   displayText?: string;
   usage?: OneShotUsage;
+  telemetry?: import("./progress-telemetry.js").ProgressTelemetry;
 }
 
 export interface OneShotExecutor {

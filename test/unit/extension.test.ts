@@ -48,6 +48,46 @@ test("registers only Horsepower-namespaced tools and commands without altering c
   expect(pi.tools.some((tool) => ["subagent", "team_create"].includes(String(tool.name)))).toBe(false);
 });
 
+test("automatic compaction queues one bounded continuation after settlement", async () => {
+  const pi = fakePi();
+  const prepare = vi.fn(async (input: { campaignId: string; projectId: string; generation?: number }) => ({
+    campaignId: input.campaignId, projectId: input.projectId, changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent" as const, generation: input.generation ?? 1,
+  }));
+  const runtime = {
+    execute: vi.fn(), currentCampaignContinuation: vi.fn(() => ({ campaignId: "campaign-1", projectId: "/active/project", changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent" as const, generation: 0 })),
+    prepareCampaignContinuation: prepare,
+  };
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: runtime, cleanup: vi.fn(), abandon: vi.fn() }) });
+  const settled = { cwd: "/active/project", isIdle: () => true, hasPendingMessages: () => false };
+  pi.handlers.get("session_before_compact")![0]!({ reason: "threshold", willRetry: false }, settled);
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, settled);
+  pi.handlers.get("agent_settled")![0]!({}, settled);
+  pi.handlers.get("agent_settled")![0]!({}, settled);
+  await Promise.resolve();
+  expect(prepare).toHaveBeenCalledOnce();
+  expect(pi.messages).toHaveLength(1);
+  expect((pi.messages[0]!.message as any).details).toEqual(expect.objectContaining({ campaignId: "campaign-1", changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent", generation: 1 }));
+  expect(JSON.stringify(pi.messages[0])).not.toContain("/private");
+});
+
+test.each([
+  [{ reason: "manual", willRetry: false, compactionEntry: {} }, "manual"],
+  [{ reason: "overflow", willRetry: true, compactionEntry: {} }, "native retry"],
+  [{ reason: "threshold", willRetry: false }, "failed/aborted"],
+] as const)("compaction stop case $1", async (event, _label) => {
+  const pi = fakePi();
+  const prepare = vi.fn(async () => undefined);
+  const runtime = { execute: vi.fn(), currentCampaignContinuation: vi.fn(() => ({ campaignId: "c", projectId: "/active/project", changeId: "x", selectedTaskIds: ["1.1"], mode: "main_agent" as const, generation: 0 })), prepareCampaignContinuation: prepare };
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: runtime, cleanup: vi.fn(), abandon: vi.fn() }) });
+  const ctx = { cwd: "/active/project", isIdle: () => true, hasPendingMessages: () => false };
+  pi.handlers.get("session_compact")![0]!(event, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await Promise.resolve();
+  expect(prepare).not.toHaveBeenCalled(); expect(pi.messages).toHaveLength(0);
+});
+
 test("user commands create implementation mode and bounded reviewer authorization", async () => {
   const pi = fakePi();
   const inventory = { changeId: "horsepower-alpha1", projectRoot: "/active/project", digest: "a".repeat(64), sections: [{ id: "4", title: "Work", tasks: [
@@ -306,6 +346,36 @@ test("forwards the Pi abort signal and observable progress as non-empty partial 
   expect(updates[0]).toMatchObject({ details: { progress: { type: "tool_start", toolName: "read", operation: "read", target: "src/index.ts" } } });
   expect(JSON.stringify(updates[0])).toContain("inventory · coder (Implement) · craft→craft · provider/model · thinking=high · managed");
   expect(JSON.stringify(updates[0])).toContain("operation: read\\ntarget: src/index.ts\\nstatus: started");
+});
+
+test("renders bounded telemetry cards and omits unavailable or private fields", async () => {
+  const pi = fakePi();
+  const identity = { name: "inventory", agent: "coder", role: "Implement", requestedSlot: "craft", resolvedSlot: "craft", model: "provider/model", thinking: "high" as const, handoffMode: "managed" as const, invocationId: "inv-1" };
+  const execute = vi.fn(async (_input: unknown, runtime: HorsepowerRuntimeContext) => {
+    runtime.onProgress?.({ type: "assistant", identity, summary: "safe", telemetry: { elapsedMs: 1250, usage: { input: 7, output: 3 }, latestAssistantSummary: "latest [private-path]" } });
+    runtime.onProgress?.({ type: "accepted", identity, telemetry: { elapsedMs: 0 } });
+    return { status: "completed" };
+  });
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: { execute }, cleanup: vi.fn(), abandon: vi.fn() }) });
+  const updates: Array<{ content: Array<{ text: string }>; details: unknown }> = [];
+  await (pi.tools[0] as { execute(...args: unknown[]): Promise<unknown> }).execute("call", { action: "single" }, undefined, (update: typeof updates[number]) => updates.push(update), context());
+  expect(updates[0]!.content[0]!.text).toContain("elapsed: 1250ms\ninput tokens: 7\noutput tokens: 3\nlatest: latest [private-path]");
+  expect(updates[1]!.content[0]!.text).toContain("elapsed: 0ms");
+  expect(updates[1]!.content[0]!.text).not.toContain("tokens:");
+  expect(JSON.stringify(updates)).not.toContain(["", "Users", ""].join("/"));
+});
+
+test("telemetry card rendering failure remains observational", async () => {
+  const pi = fakePi();
+  const execute = vi.fn(async (_input: unknown, runtime: HorsepowerRuntimeContext) => {
+    runtime.onProgress?.({ type: "accepted", identity: { name: "n", agent: "coder", role: "r", requestedSlot: "craft", resolvedSlot: "craft", model: "p/m", thinking: "high", handoffMode: "inline", invocationId: "i" }, telemetry: { elapsedMs: 1 } });
+    return { status: "completed", terminalTruth: true };
+  });
+  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
+  registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: { execute }, cleanup: vi.fn(), abandon: vi.fn() }) });
+  const result = await (pi.tools[0] as { execute(...args: unknown[]): Promise<unknown> }).execute("call", { action: "single" }, undefined, () => { throw new Error("TUI failed"); }, context());
+  expect(result).toMatchObject({ details: { status: "completed", terminalTruth: true } });
 });
 
 test("one-shot process failures never collapse to an empty tool result", async () => {

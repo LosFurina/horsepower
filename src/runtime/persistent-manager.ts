@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ThinkingLevel } from "../slots/registry.js";
 import { capabilityRejectionError, type CapabilityRejectionError } from "./capability-rejection.js";
 import { createEventStream, type EventStream, type EventStreamReadOptions, type EventStreamReadResult } from "./event-stream.js";
+import { addProgressUsage, normalizeAssistantSummary, telemetrySnapshot, type ProgressTelemetry, type ProgressUsage } from "./progress-telemetry.js";
 
 export type WorkerStatus = "starting" | "idle" | "running" | "failed" | "destroying" | "destroyed";
 export type MessageStatus = "accepted" | "queued" | "running" | "completed" | "failed" | "canceled";
@@ -10,7 +11,9 @@ export type DeliveryMode = "reject" | "followUp" | "steer";
 export interface WorkerLaunchInput {
   name: string;
   agent: string;
+  role?: string;
   modelSlot: string;
+  resolvedSlot?: string;
   model: string;
   thinking: ThinkingLevel;
   cwd: string;
@@ -34,18 +37,22 @@ export interface WorkerSummary {
   workerId: string;
   name: string;
   agent: string;
+  role?: string;
   modelSlot: string;
+  resolvedSlot?: string;
   model: string;
   thinking: ThinkingLevel;
   cwd: string;
   status: WorkerStatus;
   activeMessageId?: string;
+  initialMessageId?: string;
   queuedMessageIds: string[];
   createdAt: number;
   lastActivityAt: number;
   error?: string;
   handoffMode?: "managed" | "inline";
   handoffRunId?: string;
+  telemetry?: ProgressTelemetry;
 }
 
 interface MessageState {
@@ -57,6 +64,12 @@ interface MessageState {
   failure?: CapabilityRejectionError;
   abortObserved?: boolean;
   abortRequested?: boolean;
+  startedAt: number;
+  stoppedAt?: number;
+  usage: ProgressUsage;
+  latestAssistantSummary?: string;
+  progressEvents: number;
+  progressBytes: number;
   promise: Promise<MessageState>;
   resolve: (state: MessageState) => void;
   reject: (error: Error) => void;
@@ -78,6 +91,8 @@ export interface PersistentWorkerManagerOptions {
   eventByteLimit?: number;
   gracefulShutdownMs?: number;
   now?: () => number;
+  progressEventLimit?: number;
+  progressByteLimit?: number;
 }
 
 export interface SendWorkerInput {
@@ -96,6 +111,7 @@ export interface SendWorkerResult {
   text?: string;
   error?: string;
   timedOut?: true;
+  telemetry?: ProgressTelemetry;
 }
 
 function assistantText(event: Readonly<Record<string, unknown>>): string {
@@ -119,6 +135,9 @@ export class PersistentWorkerManager {
   readonly #gracefulShutdownMs: number;
   readonly #now: () => number;
   readonly #creationSettlements = new Set<Promise<void>>();
+  readonly #progressEventLimit: number;
+  readonly #progressByteLimit: number;
+  readonly #creatingNames = new Set<string>();
   #creating = 0;
   #shuttingDown = false;
 
@@ -128,11 +147,13 @@ export class PersistentWorkerManager {
     this.#eventByteLimit = options.eventByteLimit ?? 10 * 1024 * 1024;
     this.#gracefulShutdownMs = options.gracefulShutdownMs ?? 1000;
     this.#now = options.now ?? Date.now;
+    this.#progressEventLimit = options.progressEventLimit ?? 200;
+    this.#progressByteLimit = options.progressByteLimit ?? 64 * 1024;
   }
 
   async create(input: WorkerLaunchInput): Promise<WorkerSummary> {
     if (this.#shuttingDown) throw new Error("Persistent worker manager is shutting down");
-    if ([...this.#workers.values()].some((worker) => worker.summary.name === input.name)) {
+    if ([...this.#workers.values()].some((worker) => worker.summary.name === input.name) || this.#creatingNames.has(input.name)) {
       throw new Error(`Persistent worker name already exists: ${input.name}`);
     }
     if (this.#workers.size + this.#creating >= this.#maxWorkers) {
@@ -140,6 +161,7 @@ export class PersistentWorkerManager {
     }
 
     this.#creating += 1;
+    this.#creatingNames.add(input.name);
     let settleCreation!: () => void;
     const creationSettlement = new Promise<void>((resolve) => { settleCreation = resolve; });
     this.#creationSettlements.add(creationSettlement);
@@ -155,7 +177,9 @@ export class PersistentWorkerManager {
           workerId,
           name: input.name,
           agent: input.agent,
+          ...(input.role ? { role: input.role } : {}),
           modelSlot: input.modelSlot,
+          ...(input.resolvedSlot ? { resolvedSlot: input.resolvedSlot } : {}),
           model: input.model,
           thinking: input.thinking,
           cwd: input.cwd,
@@ -184,10 +208,12 @@ export class PersistentWorkerManager {
       }
       state.summary.status = "idle";
       this.#append(state, "worker.created");
+      let initialMessageId: string | undefined;
       if (input.initialMessage !== undefined) {
-        await this.send({ workerId, message: input.initialMessage, wait: false });
+        const initial = await this.send({ workerId, message: input.initialMessage, wait: false });
+        initialMessageId = initial.messageId;
       }
-      return this.status(workerId);
+      return { ...this.status(workerId), ...(initialMessageId ? { initialMessageId } : {}) };
     } catch (cause) {
       if (workerId) this.#workers.delete(workerId);
       if (connection) {
@@ -197,18 +223,22 @@ export class PersistentWorkerManager {
       throw cause;
     } finally {
       this.#creating -= 1;
+      this.#creatingNames.delete(input.name);
       this.#creationSettlements.delete(creationSettlement);
       settleCreation();
     }
   }
 
   status(workerId: string): WorkerSummary {
-    return structuredClone(this.#require(workerId).summary);
+    const worker = this.#require(workerId);
+    const active = worker.summary.activeMessageId ? worker.messages.get(worker.summary.activeMessageId) : undefined;
+    const latest = active ?? [...worker.messages.values()].at(-1);
+    return structuredClone({ ...worker.summary, ...(latest ? { telemetry: this.#telemetry(worker, latest) } : {}) });
   }
 
   list(): WorkerSummary[] {
     return [...this.#workers.values()]
-      .map((worker) => structuredClone(worker.summary))
+      .map((worker) => this.status(worker.summary.workerId))
       .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
   }
 
@@ -252,6 +282,10 @@ export class PersistentWorkerManager {
       promise,
       resolve,
       reject,
+      startedAt: this.#now(),
+      usage: {},
+      progressEvents: 0,
+      progressBytes: 0,
     };
     worker.messages.set(messageId, message);
     this.#append(worker, "message.accepted", messageId, input.message);
@@ -437,6 +471,7 @@ export class PersistentWorkerManager {
       messageId: message.messageId,
       status: message.status,
       text: message.finalText ?? "",
+      telemetry: this.#telemetry(this.#require(workerId), message),
       ...(message.error === undefined ? {} : { error: message.error }),
     };
   }
@@ -447,15 +482,28 @@ export class PersistentWorkerManager {
     return worker;
   }
 
-  #append(worker: WorkerState, type: string, messageId?: string, text?: string, error?: string): void {
+  #append(worker: WorkerState, type: string, messageId?: string, text?: string, error?: string, details?: unknown): void {
+    if (type === "progress" && details !== undefined && messageId !== undefined) {
+      const message = worker.messages.get(messageId);
+      if (!message) return;
+      const bytes = Buffer.byteLength(JSON.stringify(details), "utf8");
+      if (message.progressEvents >= this.#progressEventLimit || message.progressBytes + bytes > this.#progressByteLimit) return;
+      message.progressEvents += 1;
+      message.progressBytes += bytes;
+    }
     worker.events.append({
       type,
       timestamp: this.#now(),
       ...(messageId === undefined ? {} : { messageId }),
       ...(text === undefined ? {} : { text }),
       ...(error === undefined ? {} : { error }),
+      ...(details === undefined ? {} : { details }),
     });
     worker.summary.lastActivityAt = this.#now();
+  }
+
+  #telemetry(_worker: WorkerState, message: MessageState): ProgressTelemetry {
+    return telemetrySnapshot(message.startedAt, () => message.stoppedAt ?? this.#now(), message.usage, message.latestAssistantSummary);
   }
 
   #processEvent(worker: WorkerState, event: Readonly<Record<string, unknown>>): void {
@@ -496,7 +544,7 @@ export class PersistentWorkerManager {
     }
     if (event.type === "message_end" && activeId) {
       const message = worker.messages.get(activeId);
-      const value = event.message as { stopReason?: unknown; errorMessage?: unknown } | undefined;
+      const value = event.message as { stopReason?: unknown; errorMessage?: unknown; usage?: unknown } | undefined;
       if (value?.stopReason === "error" || value?.stopReason === "aborted") {
         message!.error = typeof value.errorMessage === "string"
           ? value.errorMessage
@@ -506,9 +554,18 @@ export class PersistentWorkerManager {
         const text = assistantText(event);
         if (text) {
           message!.finalText = text;
-          delete message!.error;
-          delete message!.abortObserved;
+          const summary = normalizeAssistantSummary(text);
+          if (summary === undefined) delete message!.latestAssistantSummary;
+          else message!.latestAssistantSummary = summary;
         }
+        const usage = value?.usage as Record<string, unknown> | undefined;
+        message!.usage = addProgressUsage(message!.usage, {
+          ...(typeof usage?.input === "number" ? { input: usage.input } : {}),
+          ...(typeof usage?.output === "number" ? { output: usage.output } : {}),
+        });
+        delete message!.error;
+        delete message!.abortObserved;
+        this.#append(worker, "progress", activeId, undefined, undefined, { telemetry: this.#telemetry(worker, message!) });
       }
       return;
     }
@@ -534,6 +591,7 @@ export class PersistentWorkerManager {
     if (!activeId) return;
     const message = worker.messages.get(activeId);
     if (!message) return;
+    message.stoppedAt ??= this.#now();
     if (message.error || message.abortRequested) {
       message.status = message.abortObserved || message.abortRequested ? "canceled" : "failed";
       message.error ??= "Worker turn settled after abort";
@@ -554,7 +612,7 @@ export class PersistentWorkerManager {
     } else {
       message.status = "completed";
       message.resolve(message);
-      this.#append(worker, "turn.completed", activeId, message.finalText ?? "");
+      this.#append(worker, "turn.completed", activeId, message.latestAssistantSummary ?? "");
     }
     delete worker.summary.activeMessageId;
     if (worker.queue.length === 0 && worker.summary.status !== "destroying") {

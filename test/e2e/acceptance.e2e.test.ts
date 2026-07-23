@@ -33,7 +33,7 @@ test("managed brief/report survives a new store instance and remains until expli
   expect(await afterRestart.list({ projectPath })).toEqual([]);
 });
 
-test("Captain completion gate rejects unit-only completion and a real receiver gets English and Chinese terminal webhooks", async () => {
+test("Captain completion gate rejects stale/legacy evidence and a real receiver gets claim-matched English and Chinese terminal webhooks", async () => {
   const received: Array<Record<string, unknown>> = [];
   const server = createServer((request, response) => {
     let body = ""; request.setEncoding("utf8"); request.on("data", (chunk) => { body += chunk; });
@@ -42,18 +42,33 @@ test("Captain completion gate rejects unit-only completion and a real receiver g
   await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
   const address = server.address(); if (!address || typeof address === "string") throw new Error("receiver did not bind");
   const notifier = createWebhookNotifier({ config: { url: `http://127.0.0.1:${address.port}/terminal`, auth: { mode: "none" } }, retryDelaysMs: [] });
-  const lifecycle = createRunLifecycle({ notifications: { change: true } });
+  let now = Date.parse("2026-07-22T12:00:00.000Z");
+  const lifecycle = createRunLifecycle({
+    notifications: { change: true }, now: () => new Date(now),
+    acceptanceSnapshot: async ({ changeId }) => ({ digest: `scope:${changeId}`, refs: ["task:5.4"] }),
+  });
+  const verification = (observedAt: string) => ({
+    observedAt,
+    commands: [{ id: "e2e-current", kind: "e2e" as const, command: "npm run test:e2e", exitCode: 0, summary: "Current adjudicated closure passed", acceptanceRefs: ["task:5.4"] }],
+    acceptance: [{ ref: "task:5.4", evidenceIds: ["e2e-current"] }],
+  });
   const english = lifecycle.beginChange({ changeId: "change-english", projectId: "project-public" }, { enabled: true, outputLocale: "en", notify: notifier.notify });
-  await lifecycle.reportChangeTerminal({ runId: english.runId, status: "completed", summary: "English internal completion", evidence: { e2e: [{ command: "npm run test:e2e", exitCode: 0, summary: "passed" }] } });
+  now += 1_000;
+  await expect(lifecycle.reportChangeTerminal({ runId: english.runId, status: "completed", summary: "legacy", evidence: { e2e: [{ command: "npm run test:e2e", exitCode: 0, summary: "passed" }] } })).rejects.toThrow("VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED");
+  expect(lifecycle.status(english.runId).status).toBe("running");
+  await lifecycle.reportChangeTerminal({ runId: english.runId, status: "completed", summary: "English internal completion", verification: verification(new Date(now).toISOString()) });
   await lifecycle.waitForDelivery(english.runId);
+
   const run = lifecycle.beginChange({ changeId: "change-public", projectId: "project-public" }, { enabled: true, outputLocale: "zh-CN", notify: notifier.notify });
-  await expect(lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "English internal completion", evidence: { unit: [{ command: "npm test", exitCode: 0, summary: "passed" }] } })).rejects.toThrow("E2E evidence");
+  now += 11 * 60 * 1_000;
+  await expect(lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "stale", verification: verification(run.startedAt) })).rejects.toThrow("VERIFICATION_EVIDENCE_STALE");
   expect(lifecycle.status(run.runId).status).toBe("running");
-  await lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "English internal completion", evidence: { e2e: [{ command: "npm run test:e2e", exitCode: 0, summary: "passed" }] }, evidenceRefs: ["artifact-public"] });
+  await lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "English internal completion", verification: verification(new Date(now).toISOString()), evidenceRefs: ["artifact-public"] });
   await expect(lifecycle.waitForDelivery(run.runId)).resolves.toMatchObject({ delivered: true });
   expect(received).toHaveLength(2);
   expect(received[0]).toMatchObject({ scope: "change", status: "completed", outputLocale: "en", summary: "change completed." });
   expect(received[1]).toMatchObject({ scope: "change", status: "completed", outputLocale: "zh-CN", summary: "change 已完成。" });
   expect(JSON.stringify(received)).not.toContain("English internal completion");
+  expect(JSON.stringify(received)).not.toContain("npm run test:e2e");
   notifier.abandon(); await lifecycle.shutdown(); await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 });

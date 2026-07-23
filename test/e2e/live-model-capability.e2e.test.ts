@@ -1,3 +1,4 @@
+import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -35,11 +36,13 @@ async function localFixture(state: FixtureState) {
   await writeFile(statePath, JSON.stringify(state));
   await chmod(fixtureExecutable, 0o755);
   const environment = { ...process.env, HORSEPOWER_FIXTURE_STATE: statePath, HORSEPOWER_FIXTURE_LOG: logPath };
+  const spawnFixture = (_command: string, args: readonly string[], options: SpawnOptionsWithoutStdio) =>
+    spawn(process.execPath, [fixtureExecutable, ...args], options) as ChildProcessWithoutNullStreams;
   return {
     root,
-    probe: createPiCapabilityProbe({ executable: fixtureExecutable, environment }),
-    oneShot: createOneShotExecutor({ run: createPiJsonRunner({ executable: fixtureExecutable, environment, temporaryRoot: root }) }),
-    manager: new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter({ executable: fixtureExecutable, environment, temporaryRoot: root }) }),
+    probe: createPiCapabilityProbe({ executable: fixtureExecutable, environment, spawnProcess: spawnFixture }),
+    oneShot: createOneShotExecutor({ run: createPiJsonRunner({ executable: fixtureExecutable, environment, temporaryRoot: root, spawnProcess: spawnFixture }) }),
+    manager: new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter({ executable: fixtureExecutable, environment, temporaryRoot: root, spawnProcess: spawnFixture }) }),
     async set(patch: Partial<FixtureState>) {
       const current = JSON.parse(await readFile(statePath, "utf8")) as FixtureState;
       await writeFile(statePath, JSON.stringify({ ...current, ...patch }));
@@ -104,7 +107,7 @@ async function runtimeHarness() {
   await writeFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), JSON.stringify({ slots: {
     judgment: binding, craft: binding, utility: binding,
   } }));
-  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: []\nstandards: []\n---\nWork only.\n");
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\ntools: []\nstandards: []\n---\nWork only.\n");
   const runOpenSpec = async (args: readonly string[]) => {
     if (args[0] === "--version") return { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false };
     if (args[0] === "doctor") return { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: project } }), stderr: "", truncated: false };

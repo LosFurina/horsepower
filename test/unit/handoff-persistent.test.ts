@@ -20,16 +20,18 @@ test("managed create requires a Captain brief and validated initial report", asy
   const options = {
     authorize: async () => undefined,
     resolveSlot: (slot: string) => ({ requestedSlot: slot, resolvedSlot: slot, model: "p/m", thinking: "high" as const, fallbackPath: [slot], revision: "r" }), validateModel: () => undefined,
-    getAgent: (name: string) => ({ name, role: name, prompt: "Prompt", tools: [], recommendedSlots: [], standards: [] }),
+    getAgent: (name: string) => ({ name, role: name, prompt: "Prompt", tools: [], standards: [] }),
     beginDispatch: () => ({ runId: "run-create" }), reportDispatchTerminal: async ({ status }: { status: string }) => { events.push(`terminal:${status}`); },
     createHandoff: async () => ({ worker: { briefPath: "/private/brief.md", reportPath: "/private/report.md" }, reference: { runId: "run-create" } }),
-    createWorker: async ({ initialMessage }: { initialMessage?: string }) => { events.push(`create:${initialMessage}`); return { workerId: "w", activeMessageId: "initial" }; },
+    createWorker: async ({ initialMessage }: { initialMessage?: string }) => { events.push(`create:${initialMessage}`); return { workerId: "w", initialMessageId: "initial" }; },
     waitForMessage: async () => { events.push("wait"); return { status: "completed" }; },
+    messageStatus: () => "completed" as const,
     validateHandoffReport: async () => { events.push("validate"); return { artifactId: "report" }; }, recordHandoffTerminal: async () => undefined,
   };
   await expect(createOrchestration(options as never).execute({ action: "create", handoffMode: "managed", changeId: "c", cwd: "/p", name: "w", agent: "a", modelSlot: "judgment" }, { captain: true })).rejects.toThrow("$.brief: required for managed create");
   await createOrchestration(options as never).execute({ action: "create", handoffMode: "managed", changeId: "c", cwd: "/p", name: "w", agent: "a", modelSlot: "judgment", brief: "do work" }, { captain: true });
-  expect(events).toEqual(["create:Read your assigned brief at /private/brief.md. Write the completed report to /private/report.md.", "wait", "validate", "terminal:completed"]);
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual(["create:Read your assigned brief at /private/brief.md. Write the completed report to /private/report.md.", "validate", "terminal:completed"]);
 });
 
 test("managed substantive send creates message evidence and requires report", async () => {

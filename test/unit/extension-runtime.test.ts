@@ -99,7 +99,7 @@ test("shares process-local capability evidence across one-shot and persistent cr
     craft: { model: "provider/model", thinking: "high" },
     utility: { model: "provider/model", thinking: "off" },
   } }));
-  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: []\nstandards: []\n---\nCode only.\n");
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\ntools: []\nstandards: []\n---\nCode only.\n");
   const manager = fakeManager();
   manager.create.mockResolvedValue({ workerId: "worker-1" });
   const oneShot = {
@@ -148,7 +148,7 @@ test("dispatch revalidates selected task snapshot before worker side effects whi
   await writeFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), JSON.stringify({ slots: {
     judgment: { model: "provider/model", thinking: "high" }, craft: { model: "provider/model", thinking: "high" }, utility: { model: "provider/model", thinking: "off" },
   } }));
-  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: []\nstandards: []\n---\nCode only.\n");
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\ntools: []\nstandards: []\n---\nCode only.\n");
   const runOpenSpec = vi.fn(async (args: readonly string[]) => args[0] === "--version"
     ? { code: 0, stdout: "1.6.0\n", stderr: "", truncated: false }
     : args[0] === "doctor" ? { code: 0, stdout: JSON.stringify({ root: { healthy: true, path: project } }), stderr: "", truncated: false }
@@ -190,7 +190,7 @@ test("configured dispatch notification uses injected transport and shutdown aban
     craft: { model: "provider/model", thinking: "high" },
     utility: { model: "provider/model", thinking: "off" },
   } }));
-  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: [read]\nstandards: []\n---\nCode only.\n");
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\ntools: [read]\nstandards: []\n---\nCode only.\n");
   const manager = fakeManager();
   manager.create.mockResolvedValue({ workerId: "worker-1" });
   const fetch = vi.fn(async () => new Response("unavailable", { status: 503 }));
@@ -243,11 +243,22 @@ test("explicit change run permits valid terminal report and rejects invalid corr
   const readText = vi.fn(async (path: string) => path.endsWith("SKILL.md")
     ? "name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: 1.6.0\n"
     : "Implement tasks from an OpenSpec change");
+  const snapshotRuns: string[] = [];
   const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
-  const runtime = createHorsepowerRuntime({ homeDir: "/home", bundledAgentsDir: "/agents", manager: manager as never, runOpenSpec, readText });
+  const runtime = createHorsepowerRuntime({
+    homeDir: "/home", bundledAgentsDir: "/agents", manager: manager as never, runOpenSpec, readText,
+    loadTaskInventory: taskInventory("/project", ["1.1", "1.2"]),
+    acceptanceSnapshot: async ({ runId }) => {
+      snapshotRuns.push(runId);
+      return { digest: "scope-digest", refs: ["task:1.1"] };
+    },
+  });
+  await runtime.beginImplementationCampaign({
+    changeId: "change-a", projectId: "/project", ...campaignSelection(["1.1"]), mode: "multi_agent",
+  });
   const ctx = { captain: true, cwd: "/project", modelRegistry: modelRegistry as never };
 
-  const begun = await runtime.execute({ action: "begin_change", changeId: "change-a" }, ctx) as { runId: string };
+  const begun = await runtime.execute({ action: "begin_change", changeId: "change-a" }, ctx) as { runId: string; startedAt: string };
   await expect(runtime.execute({
     action: "report_terminal", changeId: "change-b", runId: begun.runId,
     status: "failed", summary: "wrong change",
@@ -255,8 +266,16 @@ test("explicit change run permits valid terminal report and rejects invalid corr
   await expect(runtime.execute({
     action: "report_terminal", changeId: "change-a", runId: begun.runId,
     status: "completed", summary: "complete",
-    e2eWaiver: { reason: "No external interface", alternativeEvidence: ["focused integration test"] },
-  }, ctx)).resolves.toMatchObject({ run: { runId: begun.runId, changeId: "change-a", status: "completed" } });
+    verification: {
+      observedAt: begun.startedAt,
+      e2eWaiver: {
+        reason: "No external interface",
+        alternativeEvidence: [{ id: "focused-1", summary: "focused integration test", acceptanceRefs: ["task:1.1"] }],
+      },
+      acceptance: [{ ref: "task:1.1", evidenceIds: ["focused-1"] }],
+    },
+  }, ctx)).resolves.toMatchObject({ run: { runId: begun.runId, changeId: "change-a", status: "completed", verification: { scopeDigest: "scope-digest" } } });
+  expect(snapshotRuns).toEqual([begun.runId]);
 });
 
 test("process-global notification retries bind disabled and enabled settings to each project run", async () => {
@@ -335,7 +354,7 @@ test("shutdown waits for an admitted one-shot, terminal notification, then destr
   const project = join(root, "project");
   const agents = join(root, "agents");
   await mkdir(agents, { recursive: true });
-  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: [read]\nstandards: []\n---\nCode only.\n");
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\ntools: [read]\nstandards: []\n---\nCode only.\n");
   const manager = fakeManager();
   let finishRun!: () => void;
   const run = new Promise<void>((resolve) => { finishRun = resolve; });
@@ -507,7 +526,7 @@ test("advancing actions use official OpenSpec checks in the active cwd", async (
     utility: { model: "provider/model", thinking: "off" },
   } });
   await writeFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), slots);
-  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\nrecommendedSlots: [craft]\ntools: [read]\nstandards: []\n---\nCode only.\n");
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\ntools: [read]\nstandards: []\n---\nCode only.\n");
   const manager = fakeManager();
   manager.create.mockResolvedValue({ workerId: "worker-1" });
   const calls: Array<{ args: readonly string[]; cwd: string }> = [];

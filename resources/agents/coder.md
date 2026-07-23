@@ -1,7 +1,6 @@
 ---
 name: coder
 role: Implement a narrowly specified change
-recommendedSlots: [craft, utility]
 tools: [read, bash, edit, write]
 standards: [correctness, maintainability]
 ---

@@ -3,7 +3,7 @@ import { Type, type TProperties } from "typebox";
 const Base = { cwd: Type.String({ minLength: 1 }) };
 const Change = { ...Base, changeId: Type.String({ minLength: 1 }) };
 const HandoffMode = Type.Union([Type.Literal("managed"), Type.Literal("inline")]);
-const ReviewCampaign = { reviewCampaignId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })) };
+const ReviewCampaign = { reviewCampaignId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), reviewFindingRootCauseId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })) };
 const ImplementationCampaign = {
   implementationCampaignId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
   taskScope: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
@@ -14,13 +14,22 @@ const Task = Type.Object({
   modelSlot: Type.String({ minLength: 1 }), task: Type.String({ minLength: 1 }),
 }, { additionalProperties: false });
 const Evidence = Type.Object({
-  command: Type.String({ minLength: 1, maxLength: 500 }), exitCode: Type.Number(),
-  durationMs: Type.Optional(Type.Number({ minimum: 0 })),
-  summary: Type.String({ minLength: 1, maxLength: 500 }),
+  id: Type.String({ minLength: 1, maxLength: 128 }), kind: Type.Union([Type.Literal("e2e"), Type.Literal("targeted")]), command: Type.String({ minLength: 1, maxLength: 500 }), exitCode: Type.Integer(),
+  durationMs: Type.Optional(Type.Number({ minimum: 0 })), summary: Type.String({ minLength: 1, maxLength: 500 }),
+  acceptanceRefs: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 20 }),
 }, { additionalProperties: false });
-const Waiver = Type.Object({
-  reason: Type.String({ minLength: 1, maxLength: 500 }),
-  alternativeEvidence: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { minItems: 1, maxItems: 20 }),
+const AlternativeEvidence = Type.Object({
+  id: Type.String({ minLength: 1, maxLength: 128 }), summary: Type.String({ minLength: 1, maxLength: 500 }),
+  acceptanceRefs: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 20 }),
+}, { additionalProperties: false });
+const AcceptanceMapping = Type.Object({
+  ref: Type.String({ minLength: 1, maxLength: 256 }), evidenceIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 20 }),
+}, { additionalProperties: false });
+const Verification = Type.Object({
+  observedAt: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$", maxLength: 24 }),
+  commands: Type.Optional(Type.Array(Evidence, { minItems: 1, maxItems: 8 })), acceptance: Type.Array(AcceptanceMapping, { minItems: 1, maxItems: 100 }),
+  e2eWaiver: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, maxLength: 500 }), alternativeEvidence: Type.Array(AlternativeEvidence, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false })),
+  scopeSnapshot: Type.Optional(Type.Never()),
 }, { additionalProperties: false });
 const strict = (properties: TProperties) => Type.Object(properties, { additionalProperties: false });
 
@@ -38,9 +47,11 @@ export const horsepowerActionSchemas = {
   destroy: strict({ action: Type.Literal("destroy"), ...Base, workerId: Type.String({ minLength: 1 }), force: Type.Optional(Type.Boolean()) }),
   doctor: strict({ action: Type.Literal("doctor"), ...Base }),
   begin_change: strict({ action: Type.Literal("begin_change"), ...Change }),
-  report_terminal: strict({ action: Type.Literal("report_terminal"), ...Change, runId: Type.String({ minLength: 1 }), status: Type.Union([Type.Literal("completed"), Type.Literal("blocked_needs_human"), Type.Literal("failed"), Type.Literal("canceled")]), summary: Type.String({ minLength: 1, maxLength: 500 }), e2e: Type.Optional(Type.Array(Evidence, { minItems: 1, maxItems: 8 })), e2eWaiver: Type.Optional(Waiver), evidenceRefs: Type.Optional(Type.Array(Type.String({ maxLength: 2_048 }), { maxItems: 20 })) }),
-  begin_review_campaign: strict({ action: Type.Literal("begin_review_campaign"), ...Change, acceptanceScope: Type.String({ minLength: 1, maxLength: 4_096 }), budget: Type.Integer({ minimum: 1 }) }),
-  record_review_finding: strict({ action: Type.Literal("record_review_finding"), ...Change, campaignId: Type.String({ minLength: 1, maxLength: 128 }), rootCauseId: Type.String({ minLength: 1, maxLength: 128 }), summary: Type.String({ minLength: 1, maxLength: 500 }), scope: Type.Union([Type.Literal("in_scope"), Type.Literal("out_of_scope")]), evidenceRef: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })) }),
+  report_terminal: strict({ action: Type.Literal("report_terminal"), ...Change, runId: Type.String({ minLength: 1 }), status: Type.Union([Type.Literal("completed"), Type.Literal("blocked_needs_human"), Type.Literal("failed"), Type.Literal("canceled")]), summary: Type.String({ minLength: 1, maxLength: 500 }), verification: Type.Optional(Verification), evidenceRefs: Type.Optional(Type.Array(Type.String({ maxLength: 2_048 }), { maxItems: 20 })) }),
+  begin_review_campaign: strict({ action: Type.Literal("begin_review_campaign"), ...Change, implementationCampaignId: Type.String({ minLength: 1, maxLength: 128 }), taskScope: Type.String({ minLength: 1, maxLength: 256 }), acceptanceScope: Type.String({ minLength: 1, maxLength: 4_096 }), budget: Type.Integer({ minimum: 1 }) }),
+  record_review_finding: strict({ action: Type.Literal("record_review_finding"), ...Change, campaignId: Type.String({ minLength: 1, maxLength: 128 }), rootCauseId: Type.String({ minLength: 1, maxLength: 128 }), summary: Type.String({ minLength: 1, maxLength: 500 }), scope: Type.Union([Type.Literal("in_scope"), Type.Literal("out_of_scope")]), evidenceRef: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })), materiallyConflictsDisposition: Type.Optional(Type.Boolean()) }),
+  disposition_review_finding: strict({ action: Type.Literal("disposition_review_finding"), ...Change, campaignId: Type.String({ minLength: 1, maxLength: 128 }), rootCauseId: Type.String({ minLength: 1, maxLength: 128 }), disposition: Type.Union([Type.Literal("accepted"), Type.Literal("rejected"), Type.Literal("needs_clarification"), Type.Literal("blocked_needs_human")]), rationale: Type.String({ minLength: 1, maxLength: 1_000 }), evidenceRef: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })) }),
+  resolve_review_finding: strict({ action: Type.Literal("resolve_review_finding"), ...Change, campaignId: Type.String({ minLength: 1, maxLength: 128 }), rootCauseId: Type.String({ minLength: 1, maxLength: 128 }), verification: Verification }),
   extend_review_campaign: strict({ action: Type.Literal("extend_review_campaign"), ...Change, campaignId: Type.String({ minLength: 1, maxLength: 128 }), additionalBudget: Type.Integer({ minimum: 1 }), humanAuthorized: Type.Literal(true), reason: Type.String({ minLength: 1, maxLength: 500 }) }),
   end_review_campaign: strict({ action: Type.Literal("end_review_campaign"), ...Change, campaignId: Type.String({ minLength: 1, maxLength: 128 }), outcome: Type.Union([Type.Literal("accepted"), Type.Literal("scope_changed"), Type.Literal("blocked_needs_human"), Type.Literal("canceled")]), summary: Type.String({ minLength: 1, maxLength: 500 }) }),
   review_campaign_status: strict({ action: Type.Literal("review_campaign_status"), ...Base, campaignId: Type.String({ minLength: 1, maxLength: 128 }) }),

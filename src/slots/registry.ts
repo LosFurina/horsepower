@@ -99,7 +99,8 @@ function traceFallback(
   }
 
   if (!binding || !("model" in binding)) {
-    throw new Error(`Model slot does not resolve to a binding: ${requestedSlot}`);
+    const available = Object.keys(effective).sort().slice(0, 32).join(", ");
+    throw new Error(`Unknown model slot: ${requestedSlot}. Available slots: ${available}. Pass an existing modelSlot explicitly; do not derive it from agent or workKind.`);
   }
   return { binding, fallbackPath, resolvedSlot };
 }

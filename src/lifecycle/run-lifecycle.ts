@@ -1,5 +1,5 @@
-import type { CompletionEvidence, VerificationDecision } from "./verification-gate.js";
-import { verifyCompletion } from "./verification-gate.js";
+import type { CompletionEvidence, VerificationDecision, AcceptanceSnapshot, VerificationManifest } from "./verification-gate.js";
+import { verifyCompletionManifest } from "./verification-gate.js";
 import type { OutputLocale } from "../localization/index.js";
 import type {
   TerminalScope,
@@ -40,12 +40,15 @@ export interface RunLifecycleOptions {
   stopNotifications?: () => void;
   now?: () => Date;
   makeId?: (prefix: string) => string;
+  acceptanceSnapshot?: (input: { runId: string; changeId: string; projectId: string }) => AcceptanceSnapshot | Promise<AcceptanceSnapshot>;
 }
 
 export interface ChangeTerminalReport {
   runId: string;
   status: TerminalStatus;
   summary: string;
+  verification?: VerificationManifest;
+  /** @deprecated legacy fields are rejected for completed reports. */
   evidence?: CompletionEvidence;
   evidenceRefs?: readonly string[];
 }
@@ -124,15 +127,39 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
     if (scope === "dispatch" && !dispatchStatuses.has(report.status)) {
       throw new Error("Dispatch terminal status must be completed, failed, or canceled");
     }
-    const verification = report.status === "completed" && scope === "change"
-      ? verifyCompletion((report as ChangeTerminalReport).evidence ?? {})
-      : undefined;
-    const stoppedAt = now().toISOString();
-    run.status = report.status;
-    run.summary = report.summary;
-    run.stoppedAt = stoppedAt;
-    if (verification) run.verification = verification;
-
+    let verification: VerificationDecision | undefined;
+    if (report.status === "completed" && scope === "change") {
+      const changeReport = report as ChangeTerminalReport;
+      const legacy = changeReport.verification === undefined ? changeReport.evidence : undefined;
+      if (legacy && typeof legacy === "object" && "workerReport" in (legacy as object)) throw new Error("VERIFICATION_WORKER_REPORT_ONLY: Captain must independently verify worker claims");
+      if (legacy && typeof legacy === "object" && ("e2e" in (legacy as object) || "e2eWaiver" in (legacy as object))) throw new Error("VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED: submit a claim-matched verification manifest");
+      const manifest = changeReport.verification ?? (legacy as VerificationManifest | undefined);
+      if (!manifest || typeof manifest.observedAt !== "string" || !Array.isArray(manifest.acceptance)) {
+        throw new Error("VERIFICATION_MANIFEST_REQUIRED: report fresh claim-matched verification manifest");
+      }
+      const identity = runIdentities.get(run.runId)!;
+      const currentAcceptanceSnapshot = options.acceptanceSnapshot
+        ? await options.acceptanceSnapshot({ runId: run.runId, changeId: run.changeId, projectId: identity.projectId })
+        : (() => { throw new Error("VERIFICATION_ACCEPTANCE_SNAPSHOT_REQUIRED: current official acceptance snapshot is unavailable"); })();
+      if (run.status !== "running") throw new Error(`Run is already terminal: ${run.runId}`);
+      const receiptAt = now().toISOString();
+      verification = verifyCompletionManifest(manifest, {
+        runStartedAt: run.startedAt,
+        now: receiptAt,
+        currentAcceptanceSnapshot,
+      });
+      run.status = report.status;
+      run.summary = report.summary;
+      run.stoppedAt = receiptAt;
+      run.verification = verification;
+    } else {
+      if (run.status !== "running") throw new Error(`Run is already terminal: ${run.runId}`);
+      const stoppedAt = now().toISOString();
+      run.status = report.status;
+      run.summary = report.summary;
+      run.stoppedAt = stoppedAt;
+    }
+    const stoppedAt = run.stoppedAt!;
     const notification = notificationBindings.get(run.runId) ?? {
       enabled: notifications[scope],
       ...(options.notify ? { notify: options.notify } : {}),

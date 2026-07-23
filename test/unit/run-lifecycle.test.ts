@@ -12,7 +12,14 @@ function setup(options: { change?: boolean; dispatch?: boolean } = {}) {
           dispatch: options.dispatch ?? false,
         },
       }),
-      now: () => new Date("2026-07-20T00:00:00.000Z"),
+      now: (() => {
+        let first = true;
+        return () => {
+          if (first) { first = false; return new Date("2026-07-21T11:40:00.000Z"); }
+          return new Date("2026-07-21T12:00:00.000Z");
+        };
+      })(),
+      acceptanceSnapshot: async () => ({ digest: "sha256:current", refs: ["task:1.1"] }),
       makeId: (prefix) => `${prefix}-1`,
       notify: async (event): Promise<WebhookDeliveryResult> => {
         notifications.push(event);
@@ -32,9 +39,75 @@ test("requires explicit Captain reporting and blocks unit-only completion", asyn
     status: "completed",
     summary: "Unit tests passed",
     evidence: { unit: [{ command: "npm test", exitCode: 0, summary: "passed" }] },
-  })).rejects.toThrow("Completion requires Captain-selected successful E2E evidence");
+  })).rejects.toThrow("VERIFICATION_MANIFEST_REQUIRED: report fresh claim-matched verification manifest");
   expect(lifecycle.status(run.runId).status).toBe("running");
   expect(notifications).toEqual([]);
+});
+
+test("fails closed when current official acceptance is unavailable", async () => {
+  const { createRunLifecycle } = await import("../../src/lifecycle/run-lifecycle.js");
+  const lifecycle = createRunLifecycle({
+    now: () => new Date("2026-07-21T12:00:00.000Z"),
+    makeId: (prefix) => `${prefix}-snapshot-missing`,
+  });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
+
+  await expect(lifecycle.reportChangeTerminal({
+    runId: run.runId, status: "completed", summary: "completed", verification: {
+      observedAt: run.startedAt,
+      commands: [{ id: "evidence-1", kind: "e2e" as const, command: "npm run e2e", exitCode: 0, summary: "passed", acceptanceRefs: ["task:1.1"] }],
+      acceptance: [{ ref: "task:1.1", evidenceIds: ["evidence-1"] }],
+    },
+  })).rejects.toThrow("VERIFICATION_ACCEPTANCE_SNAPSHOT_REQUIRED");
+  expect(lifecycle.status(run.runId).status).toBe("running");
+});
+
+test.each(["failed", "canceled", "blocked_needs_human"] as const)("preserves non-complete terminal compatibility for %s without verification", async (status) => {
+  const { lifecycle } = await setup();
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
+
+  await expect(lifecycle.reportChangeTerminal({ runId: run.runId, status, summary: status })).resolves.toMatchObject({ run: { status } });
+  expect(lifecycle.status(run.runId).verification).toBeUndefined();
+});
+
+const validManifest = {
+  observedAt: "2026-07-21T11:59:30.000Z",
+  commands: [{ id: "evidence-1", kind: "e2e" as const, command: "npm run e2e", exitCode: 0, summary: "passed", acceptanceRefs: ["task:1.1"] }],
+  acceptance: [{ ref: "task:1.1", evidenceIds: ["evidence-1"] }],
+};
+
+const rejectedManifestCases = [
+  ["stale", { observedAt: "2026-07-21T11:49:59.000Z" }, "VERIFICATION_EVIDENCE_STALE: provide verification observed within the freshness window"],
+  ["future-skewed", { observedAt: "2026-07-21T12:00:01.000Z" }, "VERIFICATION_EVIDENCE_FUTURE_SKEW: observedAt cannot be in the future"],
+  ["failed", { commands: [{ ...validManifest.commands[0], exitCode: 1, summary: "failed" }] }, "VERIFICATION_COMMAND_FAILED: every verification command must succeed"],
+  ["missing", { acceptance: [{ ref: "task:1.1", evidenceIds: ["missing"] }] }, "VERIFICATION_EVIDENCE_REFERENCE_MISSING: acceptance references must resolve to command evidence"],
+  ["partial", { acceptance: [] }, "VERIFICATION_ACCEPTANCE_PARTIAL: every current acceptance item must be covered"],
+  ["scope-drifted", { acceptance: [{ ref: "task:other", evidenceIds: ["evidence-1"] }] }, "VERIFICATION_SCOPE_DRIFT: evidence must match the current acceptance scope"],
+] as const;
+
+test.each(rejectedManifestCases)("rejects %s manifest evidence with its actionable diagnostic", async (_name, changes, diagnostic) => {
+  const { lifecycle } = await setup();
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
+  const manifest = { ...validManifest, ...changes };
+
+  await expect(lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "completed", evidence: manifest as never })).rejects.toThrow(diagnostic);
+  expect(lifecycle.status(run.runId).status).toBe("running");
+});
+
+test("rejects legacy unmapped completion with a migration diagnostic", async () => {
+  const { lifecycle } = await setup();
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
+
+  await expect(lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "legacy", evidence: { e2e: [{ command: "npm run e2e", exitCode: 0, summary: "passed" }] } })).rejects.toThrow("VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED: submit a claim-matched verification manifest");
+  expect(lifecycle.status(run.runId).status).toBe("running");
+});
+
+test("rejects worker-report-only completion with an independent-verification diagnostic", async () => {
+  const { lifecycle } = await setup();
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
+
+  await expect(lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "worker", evidence: { workerReport: { status: "success" } } as never })).rejects.toThrow("VERIFICATION_WORKER_REPORT_ONLY: Captain must independently verify worker claims");
+  expect(lifecycle.status(run.runId).status).toBe("running");
 });
 
 test("reports a completed change after successful E2E and notifies once", async () => {
@@ -45,7 +118,7 @@ test("reports a completed change after successful E2E and notifies once", async 
     runId: run.runId,
     status: "completed",
     summary: "Implementation and E2E complete",
-    evidence: { e2e: [{ command: "npm run e2e", exitCode: 0, summary: "passed" }] },
+    verification: validManifest,
   });
 
   expect(result.run.status).toBe("completed");
@@ -58,6 +131,101 @@ test("reports a completed change after successful E2E and notifies once", async 
     status: "failed",
     summary: "late mutation",
   })).rejects.toThrow("Run is already terminal");
+});
+
+test("first terminal settlement wins when cancellation races completion", async () => {
+  const { lifecycle } = await setup();
+  const run = lifecycle.beginDispatch({ changeId: "horsepower-alpha1", projectId: "/project" });
+
+  const outcomes = await Promise.allSettled([
+    lifecycle.reportDispatchTerminal({ runId: run.runId, status: "canceled", summary: "Esc" }),
+    lifecycle.reportDispatchTerminal({ runId: run.runId, status: "completed", summary: "late completion" }),
+  ]);
+
+  expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+  expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+  expect(lifecycle.status(run.runId).status).toBe("canceled");
+});
+
+test("freshness is evaluated after current acceptance snapshot validation", async () => {
+  let current = "2026-07-21T12:00:00.000Z";
+  let first = true;
+  const { createRunLifecycle } = await import("../../src/lifecycle/run-lifecycle.js");
+  const lifecycle = createRunLifecycle({
+    now: () => {
+      if (first) { first = false; return new Date("2026-07-21T11:59:00.000Z"); }
+      return new Date(current);
+    },
+    makeId: (prefix) => `${prefix}-receipt`,
+    acceptanceSnapshot: async () => {
+      current = "2026-07-21T12:11:01.000Z";
+      return { digest: "sha256:current", refs: ["task:1.1"] };
+    },
+  });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
+
+  await expect(lifecycle.reportChangeTerminal({ runId: run.runId, status: "completed", summary: "too old at receipt", verification: {
+    ...validManifest, observedAt: "2026-07-21T12:00:00.000Z",
+  } })).rejects.toThrow("VERIFICATION_EVIDENCE_STALE");
+  expect(lifecycle.status(run.runId).status).toBe("running");
+});
+
+test.each(["canceled", "failed", "completed"] as const)("deferred completion validation cannot overwrite the first committed %s result", async (winningStatus) => {
+  let releaseSnapshot!: (snapshot: { digest: string; refs: string[] }) => void;
+  let snapshotRequested!: () => void;
+  let snapshotCalls = 0;
+  const snapshot = new Promise<{ digest: string; refs: string[] }>((resolve) => { releaseSnapshot = resolve; });
+  const requested = new Promise<void>((resolve) => { snapshotRequested = resolve; });
+  const notifications: TerminalWebhookEvent[] = [];
+  const { createRunLifecycle } = await import("../../src/lifecycle/run-lifecycle.js");
+  const lifecycle = createRunLifecycle({
+    now: (() => {
+      let first = true;
+      return () => {
+        if (first) { first = false; return new Date("2026-07-21T11:40:00.000Z"); }
+        return new Date("2026-07-21T12:00:00.000Z");
+      };
+    })(),
+    makeId: (prefix) => `${prefix}-atomic`,
+    acceptanceSnapshot: () => {
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) {
+        snapshotRequested();
+        return snapshot;
+      }
+      return { digest: "sha256:current", refs: ["task:1.1"] };
+    },
+    notify: async (event) => {
+      notifications.push(event);
+      return { delivered: true, attempts: 1 };
+    },
+  });
+  const run = lifecycle.beginChange({ changeId: "horsepower-alpha1", projectId: "/project" });
+
+  const completion = lifecycle.reportChangeTerminal({
+    runId: run.runId,
+    status: "completed",
+    summary: "late validated completion",
+    verification: validManifest,
+  });
+  const completionRejected = expect(completion).rejects.toThrow(`Run is already terminal: ${run.runId}`);
+  await requested;
+
+  await expect(lifecycle.reportChangeTerminal({
+    runId: run.runId,
+    status: winningStatus,
+    summary: "first committed result",
+    ...(winningStatus === "completed" ? { verification: validManifest } : {}),
+  })).resolves.toMatchObject({ run: { status: winningStatus, summary: "first committed result" } });
+  await expect(lifecycle.waitForDelivery(run.runId)).resolves.toEqual({ delivered: true, attempts: 1 });
+  const committed = lifecycle.status(run.runId);
+
+  releaseSnapshot({ digest: "sha256:current", refs: ["task:1.1"] });
+  await completionRejected;
+
+  expect(lifecycle.status(run.runId)).toEqual(committed);
+  expect(notifications).toHaveLength(1);
+  expect(notifications[0]).toMatchObject({ status: winningStatus, summary: "first committed result" });
 });
 
 test("redacts and bounds webhook summary evidence without changing terminal status", async () => {

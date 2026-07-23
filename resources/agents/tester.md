@@ -1,7 +1,6 @@
 ---
 name: tester
 role: Design and execute focused verification
-recommendedSlots: [craft, utility]
 tools: [read, bash, edit, write]
 standards: [testability, reliability]
 ---

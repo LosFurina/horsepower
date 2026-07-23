@@ -1,7 +1,8 @@
 import { lstat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isSupportedOpenSpecVersion, unsupportedOpenSpecMessage } from "../compatibility.js";
-import { parseOpenSpecTaskInventory } from "./task-inventory.js";
+import { parseOpenSpecTaskInventory, type OpenSpecTaskInventory } from "./task-inventory.js";
+import { createHash } from "node:crypto";
 
 export type SafeAction = "status" | "list" | "read" | "abort" | "destroy" | "doctor";
 export type AdvancingAction = "single" | "parallel" | "chain" | "create" | "send" | "steer" | "begin_change" | "report_terminal";
@@ -93,7 +94,54 @@ export function createOpenSpecBoundary(options: OpenSpecBoundaryOptions) {
     return { ...installation, status: parsedStatus };
   }
 
+  async function loadTaskInventory(input: { cwd: string; changeId: string }): Promise<OpenSpecTaskInventory> {
+    const { projectRoot, status } = await applyContext(input);
+    const artifactPaths = status.artifactPaths as Record<string, unknown> | undefined;
+    const tasks = artifactPaths?.tasks as Record<string, unknown> | undefined;
+    const rawPath = tasks?.resolvedOutputPath;
+    if (typeof rawPath !== "string" || !rawPath || rawPath.includes("*")) throw new Error(`OpenSpec status has no resolved tasks artifact for change: ${input.changeId}`);
+    const tasksPath = resolve(rawPath), root = resolve(projectRoot), rel = relative(root, tasksPath);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("OpenSpec tasks artifact escapes project root");
+    const inspect = options.inspectPath ?? lstat;
+    if (!options.inspectPath) {
+      let ancestor = root;
+      for (const part of rel.split(sep).slice(0, -1)) {
+        ancestor = join(ancestor, part);
+        const ancestorInfo = await inspect(ancestor);
+        if (ancestorInfo.isSymbolicLink() || ancestorInfo.isDirectory?.() === false) throw new Error("OpenSpec tasks artifact path contains a non-directory or symbolic-link ancestor");
+      }
+    }
+    const info = await inspect(tasksPath);
+    if (info.isSymbolicLink() || !info.isFile() || (info.nlink !== undefined && info.nlink !== 1)) throw new Error("OpenSpec tasks artifact must be a regular non-symbolic-link file with one link");
+    if (info.size !== undefined && info.size > 1024 * 1024) throw new Error("OpenSpec tasks artifact exceeds 1 MiB");
+    return parseOpenSpecTaskInventory(await options.readText(tasksPath), { changeId: input.changeId, projectRoot: root, tasksPath });
+  }
+
   return {
+    async snapshotAcceptance(input: { cwd: string; changeId: string; selectedTaskIds: readonly string[]; selectedTasks?: readonly { id: string; description: string; sectionId: string; status?: "pending" | "complete" }[]; requireComplete?: boolean }): Promise<{ digest: string; refs: readonly string[] }> {
+      const inventory = await loadTaskInventory(input);
+      const selected = [...input.selectedTaskIds];
+      const official = inventory.sections.flatMap((section) => section.tasks.map((task) => task.id));
+      if (selected.length === 0 || new Set(selected).size !== selected.length) throw new Error("OpenSpec acceptance snapshot requires exact selected task IDs");
+      if (selected.some((id) => !official.includes(id))) throw new Error("OpenSpec acceptance snapshot selected task is not in the official inventory");
+      const order = official.filter((id) => selected.includes(id));
+      if (order.join("\0") !== selected.join("\0")) throw new Error("OpenSpec acceptance snapshot task ordering drifted");
+      if (input.selectedTasks) {
+        if (input.selectedTasks.length !== selected.length) throw new Error("VERIFICATION_SCOPE_DRIFT: official selected task scope changed");
+        for (let index = 0; index < selected.length; index += 1) {
+          const expected = input.selectedTasks[index]!;
+          const current = inventory.sections.flatMap((section) => section.tasks).find((task) => task.id === selected[index]);
+          if (!current || current.description !== expected.description || current.sectionId !== expected.sectionId) throw new Error("VERIFICATION_SCOPE_DRIFT: official selected task identity changed");
+        }
+      }
+      if (input.requireComplete) {
+        const unchecked = inventory.sections.flatMap((section) => section.tasks).filter((task) => selected.includes(task.id) && task.status !== "complete").map((task) => task.id);
+        if (unchecked.length) throw new Error(`VERIFICATION_ACCEPTANCE_UNCHECKED: complete current OpenSpec tasks before reporting: ${unchecked.join(",")}`);
+      }
+      const refs = selected.map((id) => `task:${id}`);
+      const digest = createHash("sha256").update(JSON.stringify({ changeId: input.changeId, digest: inventory.digest, refs })).digest("hex");
+      return { digest, refs };
+    },
     async authorize(input: AuthorizationInput) {
       if (safeActions.has(input.action as SafeAction)) {
         return { allowed: true as const, action: input.action, openspecRequired: false as const };
@@ -109,31 +157,7 @@ export function createOpenSpecBoundary(options: OpenSpecBoundaryOptions) {
       };
     },
     async loadTaskInventory(input: { cwd: string; changeId: string }) {
-      const { projectRoot, status } = await applyContext(input);
-      const artifactPaths = status.artifactPaths as Record<string, unknown> | undefined;
-      const tasks = artifactPaths?.tasks as Record<string, unknown> | undefined;
-      const rawPath = tasks?.resolvedOutputPath;
-      if (typeof rawPath !== "string" || !rawPath || rawPath.includes("*")) {
-        throw new Error(`OpenSpec status has no resolved tasks artifact for change: ${input.changeId}`);
-      }
-      const tasksPath = resolve(rawPath);
-      const root = resolve(projectRoot);
-      const rel = relative(root, tasksPath);
-      if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("OpenSpec tasks artifact escapes project root");
-      const inspect = options.inspectPath ?? lstat;
-      if (!options.inspectPath) {
-        let ancestor = root;
-        for (const part of rel.split(sep).slice(0, -1)) {
-          ancestor = join(ancestor, part);
-          const ancestorInfo = await inspect(ancestor);
-          if (ancestorInfo.isSymbolicLink() || ancestorInfo.isDirectory?.() === false) throw new Error("OpenSpec tasks artifact path contains a non-directory or symbolic-link ancestor");
-        }
-      }
-      const info = await inspect(tasksPath);
-      if (info.isSymbolicLink() || !info.isFile() || (info.nlink !== undefined && info.nlink !== 1)) throw new Error("OpenSpec tasks artifact must be a regular non-symbolic-link file with one link");
-      if (info.size !== undefined && info.size > 1024 * 1024) throw new Error("OpenSpec tasks artifact exceeds 1 MiB");
-      const source = await options.readText(tasksPath);
-      return parseOpenSpecTaskInventory(source, { changeId: input.changeId, projectRoot: root, tasksPath });
+      return loadTaskInventory(input);
     },
   };
 }

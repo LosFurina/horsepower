@@ -43,7 +43,7 @@ class FakeWorker extends EventEmitter implements WorkerConnection {
   }
 }
 
-function setup(options: { maxWorkers?: number } = {}) {
+function setup(options: { maxWorkers?: number; holdPrompts?: boolean } = {}) {
   const workers: FakeWorker[] = [];
   const launches: WorkerLaunchInput[] = [];
   return {
@@ -55,6 +55,7 @@ function setup(options: { maxWorkers?: number } = {}) {
         startWorker: async (input) => {
           launches.push(input);
           const worker = new FakeWorker();
+          worker.holdPrompts = options.holdPrompts === true;
           workers.push(worker);
           return worker;
         },
@@ -112,6 +113,19 @@ test("preserves structured capability rejection from persistent execution events
   expect(manager.messageStatus(created.workerId, sent.messageId)).toBe("failed");
 });
 
+test("acknowledges an unresolved initial message while status and read remain available", async () => {
+  const { managerPromise } = setup({ holdPrompts: true });
+  const manager = await managerPromise;
+  // The fixture is unresolved before manager.create can issue prompt.
+  const created = await manager.create({ ...createInput, initialMessage: "start now" });
+  expect(created.workerId).toBeTruthy();
+  expect(created.initialMessageId).toMatch(/^msg-/u);
+  expect(created.activeMessageId).toBe(created.initialMessageId);
+  expect(manager.status(created.workerId).status).toBe("running");
+  expect(manager.read(created.workerId).events.length).toBeGreaterThan(0);
+  expect(manager.list()).toHaveLength(1);
+});
+
 test("supports an explicit initial message during creation", async () => {
   const { managerPromise, workers } = setup();
   const manager = await managerPromise;
@@ -122,6 +136,27 @@ test("supports an explicit initial message during creation", async () => {
     type === "prompt" && payload.message === "start now"
   )).toBe(true);
   expect(created.status).toBe("idle");
+  expect(created.initialMessageId).toMatch(/^msg-/u);
+  expect(created.activeMessageId).toBeUndefined();
+});
+
+test("reserves a worker name while asynchronous creation is still in flight", async () => {
+  const { PersistentWorkerManager } = await import("../../src/runtime/persistent-manager.js");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const manager = new PersistentWorkerManager({
+    startWorker: async () => {
+      await gate;
+      return new FakeWorker();
+    },
+  });
+
+  const first = manager.create(createInput);
+  await expect(manager.create(createInput)).rejects.toThrow("Persistent worker name already exists: reviewer-1");
+  release();
+  const created = await first;
+  expect(manager.list()).toEqual([expect.objectContaining({ workerId: created.workerId, name: "reviewer-1" })]);
+  await manager.destroyAll(true);
 });
 
 test("enforces the hard eight-worker limit under concurrent creation", async () => {
@@ -240,6 +275,35 @@ test("correlates follow-up and steer completion to queued message IDs", async ()
   await expect(manager.waitForMessage(workerId, followUp.messageId)).resolves.toMatchObject({ text: "second-result" });
   await expect(manager.waitForMessage(workerId, thirdActive.messageId)).resolves.toMatchObject({ status: "completed" });
   await expect(manager.waitForMessage(workerId, steer.messageId)).resolves.toMatchObject({ text: "third-result" });
+});
+
+test("projects frozen per-message telemetry and resets usage, summary, and progress budget on reuse", async () => {
+  const { PersistentWorkerManager } = await import("../../src/runtime/persistent-manager.js");
+  const worker = new FakeWorker(); worker.holdPrompts = true;
+  let now = 100;
+  const manager = new PersistentWorkerManager({ now: () => now, progressEventLimit: 1, progressByteLimit: 4096, startWorker: async () => worker });
+  const { workerId } = await manager.create(createInput);
+
+  const first = await manager.send({ workerId, message: "first", wait: false });
+  now = 150;
+  const privatePath = ["", "Users", "person", "private", "report.md"].join("/");
+  worker.emit("event", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `first ${privatePath}` }], usage: { input: 4, output: 2, cached: 99 } } });
+  worker.emit("event", { type: "agent_end", willRetry: false });
+  const firstResult = await manager.waitForMessage(workerId, first.messageId);
+  now = 900;
+  expect(firstResult.telemetry).toEqual({ elapsedMs: 50, usage: { input: 4, output: 2 }, latestAssistantSummary: "first [private-path]" });
+  expect(manager.status(workerId).telemetry).toEqual(firstResult.telemetry);
+
+  const second = await manager.send({ workerId, message: "second", wait: false });
+  expect(manager.status(workerId).telemetry).toEqual({ elapsedMs: 0 });
+  now = 925;
+  worker.emit("event", { type: "message_end", message: { role: "assistant", content: [], usage: { input: 1 } } });
+  worker.emit("event", { type: "agent_end", willRetry: false });
+  await expect(manager.waitForMessage(workerId, second.messageId)).resolves.toMatchObject({ telemetry: { elapsedMs: 25, usage: { input: 1 } } });
+  const compact = manager.read(workerId).events;
+  expect(compact.filter((event) => event.type === "progress")).toHaveLength(2);
+  expect(JSON.stringify(compact)).not.toContain("cached");
+  expect(JSON.stringify(compact)).not.toContain(privatePath);
 });
 
 test("wait timeout leaves the worker turn running", async () => {

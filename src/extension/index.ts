@@ -22,6 +22,9 @@ interface CampaignInventory {
 
 interface ExtensionRuntime {
   execute(input: unknown, context: HorsepowerRuntimeContext): Promise<unknown>;
+  clearCampaignContinuation?(): void;
+  currentCampaignContinuation?(projectId: string): { campaignId: string; projectId: string; changeId: string; selectedTaskIds: string[]; mode: "multi_agent" | "main_agent"; generation: number } | undefined;
+  prepareCampaignContinuation?(input: { campaignId: string; projectId: string; generation?: number }): Promise<{ campaignId: string; projectId: string; changeId: string; selectedTaskIds: string[]; mode: "multi_agent" | "main_agent"; generation: number } | undefined>;
   loadImplementationTaskInventory?(input: { changeId: string; projectId: string }): Promise<CampaignInventory>;
   beginImplementationCampaign?(input: {
     changeId: string; projectId: string; selectedTaskIds: string[];
@@ -101,12 +104,17 @@ function structuredFailure(action: string, cause: unknown): StructuredFailure {
   const failureMessage = cause instanceof Error ? cause.message : String(cause);
   const typed = cause !== null && typeof cause === "object" && "horsepowerFailure" in cause
     ? (cause as { horsepowerFailure?: unknown }).horsepowerFailure : undefined;
+  const stableCode = /^([A-Z][A-Z0-9_]+):/u.exec(failureMessage)?.[1];
   const classified = typed !== null && typeof typed === "object"
     && typeof (typed as { code?: unknown }).code === "string"
     && typeof (typed as { boundary?: unknown }).boundary === "string"
     && typeof (typed as { remediation?: unknown }).remediation === "string"
     ? typed as { code: string; boundary: string; remediation: string }
-    : { code: "DISPATCH_FAILED", boundary: "dispatch", remediation: "Run horsepower doctor --json and retry after resolving the reported failure." };
+    : stableCode?.startsWith("VERIFICATION_")
+      ? { code: stableCode, boundary: "verification", remediation: "Submit fresh Captain-observed claim-matched evidence using the current verification manifest." }
+      : stableCode?.startsWith("REVIEW_")
+        ? { code: stableCode, boundary: "review_campaign", remediation: "Inspect the current campaign and finding states, then make an explicit Captain decision." }
+        : { code: "DISPATCH_FAILED", boundary: "dispatch", remediation: "Run horsepower doctor --json and retry after resolving the reported failure." };
   return { status: "failed", action, failure: { ...classified, message: failureMessage } };
 }
 
@@ -130,17 +138,25 @@ function workerTitle(identity: WorkerIdentity): string {
 
 function progressResult(event: OneShotProgress & { identity: WorkerIdentity }) {
   let body: string;
+  const telemetry = "telemetry" in event ? event.telemetry : undefined;
+  const telemetryLines = telemetry ? [
+    `elapsed: ${Math.max(0, telemetry.elapsedMs)}ms`,
+    ...(telemetry.usage?.input === undefined ? [] : [`input tokens: ${telemetry.usage.input}`]),
+    ...(telemetry.usage?.output === undefined ? [] : [`output tokens: ${telemetry.usage.output}`]),
+    ...(telemetry.latestAssistantSummary === undefined ? [] : [`latest: ${telemetry.latestAssistantSummary}`]),
+  ] : [];
   if (event.type === "tool_start" || event.type === "tool_update" || event.type === "tool_end") {
     const status = event.type === "tool_end" ? (event.isError ? "failed" : "completed") : event.type === "tool_start" ? "started" : "running";
     body = [
       `operation: ${event.operation}`,
       ...(event.target ? [`target: ${event.target}`] : []),
       `status: ${status}`,
+      ...telemetryLines,
     ].join("\n");
   } else if (event.type === "assistant") {
-    body = `operation: assistant\nsummary: ${event.summary}\nstatus: completed`;
+    body = [`operation: assistant`, `summary: ${event.summary}`, `status: completed`, ...telemetryLines].join("\n");
   } else {
-    body = [`operation: ${event.type}`, ...("summary" in event ? [`summary: ${event.summary}`] : []), `status: ${event.type}`].join("\n");
+    body = [`operation: ${event.type}`, ...("summary" in event ? [`summary: ${event.summary}`] : []), `status: ${event.type}`, ...telemetryLines].join("\n");
   }
   return {
     content: [{ type: "text" as const, text: boundedContent(`${workerTitle(event.identity)}\n${body}`) }],
@@ -164,8 +180,46 @@ export function registerHorsepowerExtension(
   let cleanup: Promise<void> | undefined;
   const runtime = (ctx: ExtensionContext) => (lease ??= dependencies.acquireRuntime(ctx)).value;
 
+  let compactionSerial = 0;
+  let compactGeneration: { serial: number; reason: "threshold" | "overflow"; campaignId: string; projectId: string; handled: boolean } | undefined;
   pi.on("session_start", (_event, ctx) => {
     lease ??= dependencies.acquireRuntime(ctx);
+    compactGeneration = undefined;
+  });
+  pi.on("session_before_compact", (event) => {
+    const e = event as { reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean };
+    // A manual compaction, or a later compaction attempt, invalidates an older
+    // candidate. The successful event below is the only event that arms it.
+    if (e.reason === "manual") compactGeneration = undefined;
+  });
+  pi.on("session_compact", (event, ctx) => {
+    const e = event as { reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; compactionEntry?: unknown };
+    if (e.reason !== "threshold" && e.reason !== "overflow") return;
+    if (e.willRetry === true || e.compactionEntry === undefined) return;
+    // Compaction hooks can be the first event that needs the runtime (the
+    // session may not have emitted session_start in embedded/test hosts).
+    const active = (lease ??= dependencies.acquireRuntime(ctx)).value;
+    if (!active.prepareCampaignContinuation) return;
+    // Defer until agent_settled: Pi may still enqueue native or user work.
+    const projectId = ctx.cwd;
+    const candidate = active.currentCampaignContinuation?.(projectId);
+    if (!candidate) return;
+    compactGeneration = { serial: ++compactionSerial, reason: e.reason, campaignId: candidate.campaignId, projectId, handled: false };
+  });
+  pi.on("agent_settled", (_event, ctx) => {
+    const pending = compactGeneration;
+    if (!pending || pending.handled || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+    const active = lease?.value;
+    const prepare = active?.prepareCampaignContinuation;
+    if (!prepare) return;
+    pending.handled = true;
+    void (async () => {
+      // The runtime owns authorization and returns a bounded identity only.
+      const result = await prepare({ campaignId: pending.campaignId, projectId: pending.projectId, generation: pending.serial });
+      if (!result) return;
+      const details = { campaignId: result.campaignId, changeId: result.changeId, selectedTaskIds: [...result.selectedTaskIds], mode: result.mode, generation: result.generation };
+      pi.sendMessage({ customType: "horsepower-campaign-continuation", content: `Continue campaign ${details.campaignId} for change ${details.changeId}, tasks ${details.selectedTaskIds.join(",")}, mode ${details.mode}. Re-read official OpenSpec and current repository state.`, display: false, details }, { deliverAs: "followUp", triggerTurn: true });
+    })().catch(() => { /* fail closed without side effects */ });
   });
 
   pi.registerTool({
@@ -190,8 +244,13 @@ export function registerHorsepowerExtension(
       try { outputLocale = await dependencies.resolveOutputLocale(ctx.cwd); }
       catch { /* terminal delivery falls back to English */ }
       const status = data !== null && typeof data === "object" && "status" in data ? String((data as { status: unknown }).status) : "completed";
-      const id = status === "failed" ? "dispatch.failed" : status === "canceled" ? "dispatch.canceled" : "dispatch.completed";
-      return textResult({ data, outputLocale, summary: message(outputLocale, id, { action }) });
+      const failureCode = data !== null && typeof data === "object" && "failure" in data && (data as { failure?: unknown }).failure !== null && typeof (data as { failure?: unknown }).failure === "object"
+        ? String(((data as { failure: { code?: unknown } }).failure.code) ?? "") : "";
+      const id = failureCode === "VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED" ? "error.verificationMigration"
+        : failureCode.startsWith("VERIFICATION_") ? "error.verification"
+          : failureCode.startsWith("REVIEW_") ? "error.reviewCampaign"
+            : status === "failed" ? "dispatch.failed" : status === "canceled" ? "dispatch.canceled" : "dispatch.completed";
+      return textResult({ data, outputLocale, summary: message(outputLocale, id, { action, code: failureCode }) });
     },
   });
 
@@ -319,6 +378,9 @@ export function registerHorsepowerExtension(
   });
 
   pi.on("session_shutdown", async (event) => {
+    if ((event.reason === "new" || event.reason === "resume" || event.reason === "fork") && lease) {
+      lease.value.clearCampaignContinuation?.();
+    }
     if ((event.reason === "reload" || event.reason === "quit") && lease) {
       cleanup ??= lease.cleanup();
       await cleanup;

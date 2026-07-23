@@ -75,6 +75,19 @@ test("bounds attachments and total run size, and records truthful terminal absen
   await expect(store.addAttachment({ projectPath: project, runId: "total", name: "second.bin", content: Buffer.alloc(10 * 1024 * 1024), mediaType: "application/octet-stream", producer })).rejects.toThrow("20 MiB");
 });
 
+test("canceled managed handoff without a report records truthful absence and rejects later completion", async () => {
+  const { store, project } = await fixture();
+  await store.create({ projectPath: project, runId: "esc-canceled", brief: "slow work", producer });
+
+  await expect(store.recordTerminal({ projectPath: project, runId: "esc-canceled", status: "canceled" }))
+    .resolves.toEqual({ status: "canceled", reportPresent: false });
+  expect(await store.inspect({ projectPath: project, runId: "esc-canceled" })).toMatchObject({
+    terminal: { status: "canceled", reportPresent: false }, report: null,
+  });
+  await expect(store.recordTerminal({ projectPath: project, runId: "esc-canceled", status: "failed" }))
+    .rejects.toThrow("already terminal as canceled");
+});
+
 test("invalid worker report cannot prevent failed terminal truth", async () => {
   const { store, project } = await fixture();
   const created = await store.create({ projectPath: project, runId: "invalid-report-terminal", brief: "brief", producer });

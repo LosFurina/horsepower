@@ -36,6 +36,16 @@ test("resolves built-in speed and context fallbacks with complete metadata", asy
   });
 });
 
+test("rejects invented lifecycle slots with bounded available-slot guidance", async () => {
+  const { createSlotRegistry } = await import("../../src/slots/registry.js");
+  const registry = createSlotRegistry({ global: { slots: requiredSlots } });
+
+  expect(() => registry.resolve("test")).toThrow(
+    "Unknown model slot: test. Available slots: context, craft, judgment, speed, utility. Pass an existing modelSlot explicitly; do not derive it from agent or workKind.",
+  );
+  expect(registry.resolve("craft")).toMatchObject({ requestedSlot: "craft", resolvedSlot: "craft" });
+});
+
 test("computes the same revision for semantically identical key ordering", async () => {
   const { createSlotRegistry } = await import("../../src/slots/registry.js");
   const first = createSlotRegistry({ global: { slots: requiredSlots } });

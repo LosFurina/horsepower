@@ -15,7 +15,7 @@ for await (const line of lines) {
     history.push(request.message);
     send({ id: request.id, type: "response", command: "prompt", success: true });
     const text = history.length === 1 ? `remembered:${history[0]}` : `prior:${history[0]};current:${history[1]}`;
-    send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });
+    send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop", usage: { input: history.length, output: history.length * 2 } } });
     send({ type: "agent_end", messages: [] });
     continue;
   }

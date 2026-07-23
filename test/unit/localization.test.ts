@@ -35,3 +35,10 @@ test("localized result preserves stable machine fields and English internal evid
     ...raw, outputLocale: "zh-CN", summary: "review 已完成。",
   });
 });
+
+test("verification and review diagnostics localize Captain conclusions while preserving stable codes", () => {
+  expect(message("en", "error.verificationMigration", { code: "VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED" })).toContain("verification manifest");
+  expect(message("zh-CN", "error.verificationMigration", { code: "VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED" })).toMatch(/旧完成证据.*VERIFICATION_LEGACY_E2E_MIGRATION_REQUIRED/u);
+  expect(message("zh-CN", "error.verification", { code: "VERIFICATION_EVIDENCE_STALE" })).toMatch(/验证被拒绝.*VERIFICATION_EVIDENCE_STALE/u);
+  expect(message("zh-CN", "error.reviewCampaign", { code: "REVIEW_CAMPAIGN_ACCEPTANCE_BLOCKED" })).toMatch(/操作被拒绝.*REVIEW_CAMPAIGN_ACCEPTANCE_BLOCKED/u);
+});

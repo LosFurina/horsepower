@@ -1,45 +1,61 @@
 import { expect, test } from "vitest";
+import { verifyCompletion, verifyCompletionManifest } from "../../src/lifecycle/verification-gate.js";
 
-test("permits completion with Captain-selected successful E2E evidence", async () => {
-  const module = await import("../../src/lifecycle/verification-gate.js").catch(() => undefined);
+const context = {
+  runStartedAt: "2026-07-21T11:59:00.000Z",
+  now: "2026-07-21T12:01:00.000Z",
+  currentAcceptanceSnapshot: { digest: "scope-digest", refs: ["task:1.1"] },
+};
 
-  expect(module?.verifyCompletion({
-    e2e: [{ command: "npm run e2e", exitCode: 0, durationMs: 1200, summary: "3 scenarios passed" }],
-  })).toEqual({
+const commandManifest = {
+  observedAt: "2026-07-21T12:00:00.000Z",
+  commands: [{ id: "e2e-1", kind: "e2e" as const, command: "npm run e2e", exitCode: 0, durationMs: 1_200, summary: "3 scenarios passed", acceptanceRefs: ["task:1.1"] }],
+  acceptance: [{ ref: "task:1.1", evidenceIds: ["e2e-1"] }],
+};
+
+test("permits completion with fresh Captain-selected claim-matched E2E evidence", () => {
+  expect(verifyCompletionManifest(commandManifest, context)).toEqual({
     kind: "e2e",
-    evidence: [{ command: "npm run e2e", exitCode: 0, durationMs: 1200, summary: "3 scenarios passed" }],
+    scopeDigest: "scope-digest",
+    observedAt: commandManifest.observedAt,
+    evidence: commandManifest.commands,
   });
 });
 
-test("rejects unit-only completion without E2E or an explicit waiver", async () => {
-  const { verifyCompletion } = await import("../../src/lifecycle/verification-gate.js");
-
-  expect(() => verifyCompletion({
-    unit: [{ command: "npm test", exitCode: 0, summary: "84 tests passed" }],
-  })).toThrow("Completion requires Captain-selected successful E2E evidence or an explicit e2eWaiver");
+test("legacy bare E2E and waiver payloads fail closed", () => {
+  expect(() => verifyCompletion({ e2e: [{ command: "npm run e2e", exitCode: 0, summary: "passed" }] }))
+    .toThrow(/Legacy completion evidence is unsupported/);
+  expect(() => verifyCompletion({ e2eWaiver: { reason: "docs", alternativeEvidence: ["validation"] } }))
+    .toThrow(/Legacy completion evidence is unsupported/);
 });
 
-test("rejects empty or unbounded E2E command evidence", async () => {
-  const { verifyCompletion } = await import("../../src/lifecycle/verification-gate.js");
-
-  expect(() => verifyCompletion({ e2e: [{ command: "", exitCode: 0, summary: "" }] }))
-    .toThrow("E2E command evidence requires command and summary");
-  expect(() => verifyCompletion({
-    e2e: Array.from({ length: 9 }, (_, index) => ({ command: `e2e-${index}`, exitCode: 0, summary: "passed" })),
-  })).toThrow("At most 8 E2E commands may be declared");
+test("rejects empty or unbounded manifest command evidence", () => {
+  expect(() => verifyCompletionManifest({ ...commandManifest, commands: [{ ...commandManifest.commands[0]!, command: "", summary: "" }] }, context))
+    .toThrow(/Evidence summary is required|Evidence command is required/);
+  expect(() => verifyCompletionManifest({
+    ...commandManifest,
+    commands: Array.from({ length: 9 }, (_, index) => ({ ...commandManifest.commands[0]!, id: `e2e-${index}` })),
+  }, context)).toThrow(/at most 8 evidence items/i);
 });
 
-test("permits a reasoned E2E waiver with alternative evidence", async () => {
-  const { verifyCompletion } = await import("../../src/lifecycle/verification-gate.js");
-
-  expect(verifyCompletion({
+test("permits a reasoned mapped E2E waiver with alternative evidence", () => {
+  const manifest = {
+    observedAt: "2026-07-21T12:00:00.000Z",
+    commands: [],
     e2eWaiver: {
       reason: "Documentation-only change with no runtime behavior",
-      alternativeEvidence: ["strict OpenSpec validation passed", "link checker passed"],
+      alternativeEvidence: [{ id: "alternative-1", summary: "strict OpenSpec validation passed", acceptanceRefs: ["task:1.1"] }],
     },
-  })).toEqual({
+    acceptance: [{ ref: "task:1.1", evidenceIds: ["alternative-1"] }],
+  };
+  expect(verifyCompletionManifest(manifest, context)).toMatchObject({
     kind: "waiver",
     reason: "Documentation-only change with no runtime behavior",
-    alternativeEvidence: ["strict OpenSpec validation passed", "link checker passed"],
+    scopeDigest: "scope-digest",
   });
+});
+
+test("targeted or unit-only command evidence cannot replace required E2E completion evidence", () => {
+  expect(() => verifyCompletionManifest({ ...commandManifest, commands: [{ ...commandManifest.commands[0]!, kind: "targeted", command: "npm test" }] }, context))
+    .toThrow("VERIFICATION_E2E_REQUIRED");
 });

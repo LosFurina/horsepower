@@ -25,15 +25,28 @@ export interface ImplementationCampaign {
   status: "active" | "ended";
   outcome?: "switched" | "ended";
   reviewerAuthorizations: ReviewerAuthorization[];
-  dispatches: Array<{ taskIds: string[]; workKind: WorkKind }>;
+  dispatches: Array<{ taskIds: string[]; workKind: WorkKind; reviewCampaignId?: string; reviewFindingRootCauseId?: string }>;
   captainDirect: Array<{ taskIds: string[]; reason: string }>;
 }
 
 export interface ImplementationCampaignManagerOptions { makeId?: () => string }
 
+export interface ContinuationLease {
+  campaignId: string;
+  projectId: string;
+  changeId: string;
+  selectedTaskIds: string[];
+  inventoryDigest: string;
+  mode: ImplementationMode;
+  generation: number;
+  disposition: "active" | "paused" | "blocked" | "terminal" | "superseded";
+  queuedGeneration?: number;
+}
+
 const taskIdPattern = /^\d+(?:\.\d+)+$/u;
 const digestPattern = /^[a-f0-9]{64}$/u;
-const MAX_SELECTED_TASKS = 1_000;
+// Must remain representable by the claim-matched verification manifest.
+const MAX_SELECTED_TASKS = 100;
 
 function text(value: string, label: string): string {
   if (!value.trim()) throw new Error(`${label} is required`);
@@ -70,6 +83,7 @@ function requestedTaskIds(value: string): string[] {
 
 export function createImplementationCampaignManager(options: ImplementationCampaignManagerOptions = {}) {
   const campaigns = new Map<string, ImplementationCampaign>();
+  let continuation: ContinuationLease | undefined;
   const makeId = options.makeId ?? (() => randomUUID());
   function required(id: string): ImplementationCampaign {
     const campaign = campaigns.get(id);
@@ -114,6 +128,7 @@ export function createImplementationCampaignManager(options: ImplementationCampa
         if (campaign.projectId === input.projectId && campaign.status === "active") {
           campaign.status = "ended";
           campaign.outcome = "switched";
+          if (continuation?.campaignId === campaign.campaignId) continuation = { ...continuation, disposition: "superseded" };
         }
       }
       const campaign: ImplementationCampaign = {
@@ -123,6 +138,11 @@ export function createImplementationCampaignManager(options: ImplementationCampa
         reviewerAuthorizations: [], dispatches: [], captainDirect: [],
       };
       campaigns.set(campaign.campaignId, campaign);
+      continuation = {
+        campaignId: campaign.campaignId, projectId: campaign.projectId, changeId: campaign.changeId,
+        selectedTaskIds: [...campaign.selectedTaskIds], inventoryDigest: campaign.inventoryDigest,
+        mode: campaign.mode, generation: 0, disposition: "active",
+      };
       return copy(campaign);
     },
     authorizeReviewer(input: { campaignId: string; projectId?: string; reviewCampaignId: string; acceptanceScope: string; budget: number }): ImplementationCampaign {
@@ -135,9 +155,32 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       campaign.reviewerAuthorizations.push({ reviewCampaignId, acceptanceScope: text(input.acceptanceScope, "Reviewer acceptance scope"), budget, consumed: 0, remaining: budget });
       return copy(campaign);
     },
-    authorizeDispatch(input: { campaignId: string; changeId: string; projectId: string; taskScope: string; workKind: WorkKind; reviewCampaignId?: string }): ImplementationCampaign & { reviewerAuthorization?: ReviewerAuthorization } {
+    validateDispatch(input: { campaignId: string; changeId: string; projectId: string; taskScope: string; workKind: WorkKind; reviewCampaignId?: string; reviewFindingRootCauseId?: string }): ImplementationCampaign {
+      const { campaign } = active(input.campaignId, input.changeId, input.projectId, input.taskScope);
+      if (campaign.mode !== "main_agent" && input.workKind === "fix") {
+        if (!input.reviewCampaignId) throw new Error("Corrective dispatch requires a review campaign");
+        text(input.reviewFindingRootCauseId ?? "", "Corrective dispatch review finding root cause ID");
+      } else if (input.reviewFindingRootCauseId !== undefined) {
+        throw new Error("Only corrective dispatch may name a review finding root cause ID");
+      }
+      if (campaign.mode === "main_agent") {
+        if (input.workKind !== "review") throw new Error(`Main-Agent campaign prohibits worker dispatch: ${input.workKind}`);
+        if (!input.reviewCampaignId) throw new Error("Reviewer is not user-authorized for this main-Agent campaign");
+        const authorization = campaign.reviewerAuthorizations.find((item) => item.reviewCampaignId === input.reviewCampaignId);
+        if (!authorization) throw new Error("Reviewer is not user-authorized for this main-Agent campaign");
+        if (authorization.remaining <= 0) throw new Error(`Reviewer authorization exhausted: ${input.reviewCampaignId}`);
+      }
+      return copy(campaign);
+    },
+    authorizeDispatch(input: { campaignId: string; changeId: string; projectId: string; taskScope: string; workKind: WorkKind; reviewCampaignId?: string; reviewFindingRootCauseId?: string }): ImplementationCampaign & { reviewerAuthorization?: ReviewerAuthorization } {
       const { campaign, taskIds } = active(input.campaignId, input.changeId, input.projectId, input.taskScope);
       let reviewerAuthorization: ReviewerAuthorization | undefined;
+      if (campaign.mode !== "main_agent" && input.workKind === "fix") {
+        if (!input.reviewCampaignId) throw new Error("Corrective dispatch requires a review campaign");
+        text(input.reviewFindingRootCauseId ?? "", "Corrective dispatch review finding root cause ID");
+      } else if (input.reviewFindingRootCauseId !== undefined) {
+        throw new Error("Only corrective dispatch may name a review finding root cause ID");
+      }
       if (campaign.mode === "main_agent") {
         if (input.workKind !== "review") throw new Error(`Main-Agent campaign prohibits worker dispatch: ${input.workKind}`);
         if (!input.reviewCampaignId) throw new Error("Reviewer is not user-authorized for this main-Agent campaign");
@@ -147,7 +190,7 @@ export function createImplementationCampaignManager(options: ImplementationCampa
         reviewerAuthorization.consumed += 1;
         reviewerAuthorization.remaining -= 1;
       }
-      campaign.dispatches.push({ taskIds, workKind: input.workKind });
+      campaign.dispatches.push({ taskIds, workKind: input.workKind, ...(input.reviewCampaignId ? { reviewCampaignId: input.reviewCampaignId } : {}), ...(input.reviewFindingRootCauseId ? { reviewFindingRootCauseId: input.reviewFindingRootCauseId } : {}) });
       return { ...copy(campaign), ...(reviewerAuthorization ? { reviewerAuthorization: structuredClone(reviewerAuthorization) } : {}) };
     },
     recordCaptainDirect(input: { campaignId: string; changeId: string; projectId: string; taskScope: string; reason: string }): ImplementationCampaign {
@@ -161,9 +204,37 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       if (campaign.status !== "active") throw new Error(`Implementation campaign ${input.campaignId} is not active`);
       campaign.status = "ended";
       campaign.outcome = "ended";
+      if (continuation?.campaignId === campaign.campaignId) continuation = { ...continuation, disposition: "superseded" };
       return copy(campaign);
     },
     status(campaignId: string, projectId: string): ImplementationCampaign { return copy(owned(campaignId, projectId)); },
+    activeCampaign(projectId: string, changeId: string): ImplementationCampaign {
+      const matches = [...campaigns.values()].filter((campaign) => campaign.projectId === projectId && campaign.changeId === changeId && campaign.status === "active");
+      if (matches.length !== 1) throw new Error("No unique active implementation campaign for acceptance snapshot");
+      return copy(matches[0]!);
+    },
+    currentContinuation(projectId: string): ContinuationLease | undefined {
+      if (!continuation || continuation.projectId !== projectId) return undefined;
+      return structuredClone(continuation);
+    },
+    continuation(campaignId: string, projectId: string): ContinuationLease | undefined {
+      if (!continuation || continuation.campaignId !== campaignId || continuation.projectId !== projectId) return undefined;
+      return structuredClone(continuation);
+    },
+    beginContinuationGeneration(campaignId: string, projectId: string, compactionGeneration?: number): ContinuationLease | undefined {
+      if (!continuation || continuation.campaignId !== campaignId || continuation.projectId !== projectId || continuation.disposition !== "active") return undefined;
+      // The caller supplies one process-local generation for each successful compaction.
+      // Repeated lifecycle hooks for that generation must be idempotent, while a later
+      // compaction is allowed to create its own bounded continuation.
+      const generation = compactionGeneration ?? continuation.generation + 1;
+      if (!Number.isSafeInteger(generation) || generation < 1 || continuation.queuedGeneration === generation) return undefined;
+      continuation = { ...continuation, generation, queuedGeneration: generation };
+      return structuredClone(continuation);
+    },
+    clearContinuation(): void { continuation = undefined; },
+    setContinuationDisposition(campaignId: string, disposition: ContinuationLease["disposition"]): void {
+      if (continuation?.campaignId === campaignId) continuation = { ...continuation, disposition };
+    },
   };
 }
 

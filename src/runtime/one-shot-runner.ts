@@ -6,6 +6,7 @@ import { StringDecoder } from "node:string_decoder";
 import { capabilityRejectionError, type CapabilityRejectionError } from "./capability-rejection.js";
 import { safePiTools } from "./pi-launch.js";
 import type { OneShotInvocation, OneShotProgress, OneShotResult, OneShotUsage } from "./one-shot.js";
+import { addProgressUsage, normalizeAssistantSummary, telemetrySnapshot, type ProgressUsage } from "./progress-telemetry.js";
 
 const noDelegationInstruction = [
   "Horsepower worker restriction:",
@@ -23,6 +24,7 @@ export interface PiJsonRunnerOptions {
   gracefulShutdownMs?: number;
   progressEventLimit?: number;
   progressByteLimit?: number;
+  now?: () => number;
   spawnProcess?: (
     command: string,
     args: readonly string[],
@@ -119,7 +121,7 @@ function progressEvent(event: Record<string, unknown>, cwd: string, knownTools: 
   if (event.type === "message_update") {
     const update = event.assistantMessageEvent as Record<string, unknown> | undefined;
     if (update?.type === "text_end" && typeof update.content === "string") {
-      const summary = boundedSummary(update.content);
+      const summary = normalizeAssistantSummary(update.content);
       return summary ? { type: "assistant", summary } : undefined;
     }
   }
@@ -149,6 +151,8 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
   const spawnProcess = options.spawnProcess ?? spawn;
   return async (invocation: OneShotInvocation): Promise<OneShotResult> => {
     validateInvocation(invocation);
+    const now = options.now ?? Date.now;
+    const startedAt = now();
     const directory = await mkdtemp(join(options.temporaryRoot ?? tmpdir(), "horsepower-one-shot-"));
     await chmod(directory, 0o700);
     const promptPath = join(directory, "prompt.md");
@@ -184,6 +188,8 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
       let stderr = Buffer.alloc(0);
       let finalText = "";
       let usage: OneShotUsage = {};
+      let telemetryUsage: ProgressUsage = {};
+      let latestAssistantSummary: string | undefined;
       let assistantError: string | undefined;
       let capabilityRejection: CapabilityRejectionError | undefined;
       let parseError: Error | undefined;
@@ -199,10 +205,12 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
       const emitProgress = (event: OneShotProgress) => {
         if (event.type === "tool_update" && emittedToolUpdates.has(event.toolCallId)) return;
         if (event.type === "tool_update") emittedToolUpdates.add(event.toolCallId);
-        const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+        const telemetry = telemetrySnapshot(startedAt, now, telemetryUsage, latestAssistantSummary);
+        const projected = { ...event, telemetry } as OneShotProgress;
+        const eventBytes = Buffer.byteLength(JSON.stringify(projected), "utf8");
         if (progressEvents >= (options.progressEventLimit ?? 200) || progressBytes + eventBytes > (options.progressByteLimit ?? 64 * 1024)) return;
         progressEvents += 1; progressBytes += eventBytes;
-        safeProgress(invocation, event);
+        safeProgress(invocation, projected);
       };
 
       child.stdout.on("data", (chunk: Buffer | string) => {
@@ -227,6 +235,7 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
               const event = JSON.parse(line) as Record<string, unknown>;
               capabilityRejection ??= event.type === "error" ? capabilityRejectionError(event.error) : undefined;
               const progress = progressEvent(event, invocation.cwd, knownTools);
+              if (progress?.type === "assistant") latestAssistantSummary = progress.summary;
               if (progress) emitProgress(progress);
               const result = assistantResult(event);
               if (result) {
@@ -237,6 +246,8 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
                 }
                 finalText = result.text;
                 usage = addUsage(usage, result.usage);
+                telemetryUsage = addProgressUsage(telemetryUsage, result.usage);
+                if (result.text) latestAssistantSummary = normalizeAssistantSummary(result.text);
                 capabilityRejection ??= result.error ? capabilityRejectionError(result.error) : undefined;
                 assistantError = result.error ?? assistantError;
               }
@@ -283,6 +294,7 @@ export function createPiJsonRunner(options: PiJsonRunnerOptions = {}) {
         name: invocation.name,
         text: finalText,
         ...(Object.keys(usage).length === 0 ? {} : { usage }),
+        telemetry: telemetrySnapshot(startedAt, now, telemetryUsage, latestAssistantSummary),
       };
     } finally {
       await rm(directory, { recursive: true, force: true });

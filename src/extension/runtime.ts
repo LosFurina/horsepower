@@ -6,7 +6,7 @@ import { resolveHorsepowerPaths } from "../config/paths.js";
 import { createHandoffStore } from "../handoffs/store.js";
 import { createRunLifecycle } from "../lifecycle/run-lifecycle.js";
 import { createReviewCampaignManager } from "../lifecycle/review-campaign.js";
-import { createImplementationCampaignManager, type ImplementationMode, type WorkKind } from "../lifecycle/implementation-campaign.js";
+import { createImplementationCampaignManager, type ContinuationLease, type ImplementationMode, type WorkKind } from "../lifecycle/implementation-campaign.js";
 import { resolveOutputLocale } from "../localization/index.js";
 import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary } from "../openspec/boundary.js";
@@ -48,6 +48,7 @@ export interface CreateHorsepowerRuntimeOptions {
   oneShot?: ReturnType<typeof createOneShotExecutor>;
   capabilityProbe?: ModelCapabilityProbe;
   loadTaskInventory?: (input: { cwd: string; changeId: string }) => Promise<OpenSpecTaskInventory>;
+  acceptanceSnapshot?: (input: { runId: string; changeId: string; projectId: string }) => { digest: string; refs: readonly string[] } | Promise<{ digest: string; refs: readonly string[] }>;
 }
 
 interface ToolFailureMetadata { code: string; boundary: string; remediation: string }
@@ -99,6 +100,15 @@ export class HorsepowerRuntime {
       stopNotifications: () => {
         for (const active of this.#notifiers) active.abandon();
       },
+      acceptanceSnapshot: async ({ runId, changeId, projectId }) => {
+        const campaign = this.#implementations.activeCampaign(projectId, changeId);
+        const snapshot = options.acceptanceSnapshot
+          ? await options.acceptanceSnapshot({ runId, changeId, projectId })
+          : await this.#boundary.snapshotAcceptance({ cwd: projectId, changeId, selectedTaskIds: campaign.selectedTaskIds, selectedTasks: campaign.selectedTasks, requireComplete: true });
+        const expected = campaign.selectedTaskIds.map((id) => `task:${id}`);
+        if (snapshot.refs.join("\0") !== expected.join("\0")) throw new Error("VERIFICATION_SCOPE_DRIFT: acceptance snapshot does not match the active implementation campaign");
+        return snapshot;
+      },
     });
     const readText = options.readText ?? ((path: string) => readFile(path, "utf8"));
     this.#boundary = createOpenSpecBoundary({ run: options.runOpenSpec ?? createOpenSpecCliRunner(), readText });
@@ -147,6 +157,36 @@ export class HorsepowerRuntime {
     return this.#implementations.begin({ ...input, selectedTasks, projectId });
   }
 
+  clearCampaignContinuation(): void {
+    this.#implementations.clearContinuation();
+  }
+
+  currentCampaignContinuation(projectId: string): ContinuationLease | undefined {
+    const normalized = resolve(projectId);
+    return this.#implementations.currentContinuation(normalized);
+  }
+
+  async prepareCampaignContinuation(input: { campaignId: string; projectId: string; generation?: number }): Promise<ContinuationLease | undefined> {
+    const projectId = await realpath(resolve(input.projectId)).catch(() => resolve(input.projectId));
+    const lease = this.#implementations.continuation(input.campaignId, projectId);
+    if (!lease || lease.disposition !== "active") return undefined;
+    try {
+      await this.#boundary.authorize({ action: "begin_change", cwd: projectId, changeId: lease.changeId });
+      const inventory = await this.#loadTaskInventory(projectId, lease.changeId);
+      const inventoryProjectId = await realpath(resolve(inventory.projectRoot)).catch(() => resolve(inventory.projectRoot));
+      if (inventoryProjectId !== lease.projectId || inventory.changeId !== lease.changeId || inventory.digest !== lease.inventoryDigest) return undefined;
+      const ordered = inventory.sections.flatMap((section) => section.tasks.map((task) => ({ ...task, sectionTitle: section.title })));
+      const selectedOrder = ordered.filter((task) => lease.selectedTaskIds.includes(task.id)).map((task) => task.id);
+      if (selectedOrder.join("\0") !== lease.selectedTaskIds.join("\0")) return undefined;
+      const campaign = this.#implementations.status(lease.campaignId, lease.projectId);
+      for (const selected of campaign.selectedTasks) {
+        const current = ordered.find((task) => task.id === selected.id);
+        if (!current || current.status !== "pending" || current.description !== selected.description || current.sectionId !== selected.sectionId || current.sectionTitle !== selected.sectionTitle) return undefined;
+      }
+      return this.#implementations.beginContinuationGeneration(lease.campaignId, lease.projectId, input.generation);
+    } catch { return undefined; }
+  }
+
   async #loadTaskInventory(cwd: string, changeId: string): Promise<OpenSpecTaskInventory> {
     return this.#options.loadTaskInventory
       ? this.#options.loadTaskInventory({ cwd, changeId })
@@ -179,7 +219,7 @@ export class HorsepowerRuntime {
     const paths = resolveHorsepowerPaths({ homeDir: this.#options.homeDir, projectDir: cwd });
     const readText = this.#options.readText ?? ((path: string) => readFile(path, "utf8"));
     const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor", "review_campaign_status"]);
-    const lifecycleOnly = new Set(["begin_change", "report_terminal", "begin_review_campaign", "record_review_finding", "extend_review_campaign", "end_review_campaign"]);
+    const lifecycleOnly = new Set(["begin_change", "report_terminal", "begin_review_campaign", "record_review_finding", "disposition_review_finding", "resolve_review_finding", "extend_review_campaign", "end_review_campaign"]);
     const workProducing = new Set(["single", "parallel", "chain", "create", "send", "steer"]);
     if (workProducing.has(String(raw.action)) && context.signal?.aborted) {
       return { status: "canceled", action: String(raw.action), failure: {
@@ -214,7 +254,7 @@ export class HorsepowerRuntime {
         const campaign = this.#implementations.status(campaignId, projectId);
         const inventory = await this.#loadTaskInventory(cwd, String(raw.changeId));
         const inventoryProjectId = await realpath(resolve(inventory.projectRoot)).catch(() => resolve(inventory.projectRoot));
-        if (inventory.changeId !== campaign.changeId || inventoryProjectId !== campaign.projectId) {
+        if (inventory.changeId !== campaign.changeId || inventoryProjectId !== campaign.projectId || inventory.digest !== campaign.inventoryDigest) {
           throw new Error("OpenSpec task inventory ownership drifted; create a new implementation campaign");
         }
         const current = new Map(inventory.sections.flatMap((section) => section.tasks.map((task) => [task.id, { ...task, sectionTitle: section.title }] as const)));
@@ -226,12 +266,33 @@ export class HorsepowerRuntime {
             throw new Error(`Selected OpenSpec task drifted: ${selected.id}; create a new implementation campaign`);
           }
         }
-        this.#implementations.authorizeDispatch({
+        if (typeof raw.reviewCampaignId === "string") {
+          if (workKind !== "review" && workKind !== "fix") throw new Error("Review campaign dispatch must be review or fix work");
+          const review = this.#reviews.validateDispatchAuthority({
+            campaignId: raw.reviewCampaignId, changeId: String(raw.changeId), projectId, implementationCampaignId: campaignId, taskScope, kind: workKind,
+            ...(workKind === "fix" && typeof raw.reviewFindingRootCauseId === "string" ? { rootCauseId: raw.reviewFindingRootCauseId } : {}),
+          });
+          if (campaign.mode === "main_agent") {
+            const authorization = campaign.reviewerAuthorizations.find((item) => item.reviewCampaignId === raw.reviewCampaignId);
+            if (!authorization || authorization.acceptanceScope !== review.acceptanceScope) throw new Error(`REVIEW_ACCEPTANCE_SCOPE_MISMATCH: ${raw.reviewCampaignId}`);
+          }
+        } else if (workKind === "review" || workKind === "fix") {
+          throw new Error(`${workKind} work requires a review campaign`);
+        }
+        this.#implementations.validateDispatch({
           campaignId, changeId: String(raw.changeId), projectId, taskScope, workKind,
           ...(typeof raw.reviewCampaignId === "string" ? { reviewCampaignId: raw.reviewCampaignId } : {}),
+          ...(typeof raw.reviewFindingRootCauseId === "string" ? { reviewFindingRootCauseId: raw.reviewFindingRootCauseId } : {}),
         });
+        if (typeof raw.reviewCampaignId !== "string") this.#implementations.authorizeDispatch({ campaignId, changeId: String(raw.changeId), projectId, taskScope, workKind });
       } catch (cause) {
-        throw toolFailure({ code: "CAMPAIGN_AUTHORIZATION_FAILED", boundary: "campaign", remediation: "Select a valid implementation campaign and retry with an authorized change and task scope." }, cause);
+        const stableCode = cause instanceof Error ? /^([A-Z][A-Z0-9_]+):/u.exec(cause.message)?.[1] : undefined;
+        throw toolFailure({
+          code: stableCode?.startsWith("REVIEW_") ? stableCode : "CAMPAIGN_AUTHORIZATION_FAILED", boundary: "campaign",
+          remediation: stableCode?.startsWith("REVIEW_")
+            ? "Inspect and explicitly adjudicate the correlated review finding before retrying corrective dispatch."
+            : "Select a valid implementation campaign and retry with an authorized change and task scope.",
+        }, cause);
       }
     }
     let slots: ReturnType<typeof createSlotRegistry> | undefined;
@@ -346,9 +407,24 @@ export class HorsepowerRuntime {
       prepareHandoffMessage: (input) => handoffs.prepareMessage(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),
       validateHandoffReport: (input) => handoffs.validateReport(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),
       recordHandoffTerminal: (input) => handoffs.recordTerminal(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),
-      beginReviewCampaign: (input) => this.#reviews.begin(input),
-      consumeReviewCampaign: (input) => this.#reviews.consume(input),
+      beginReviewCampaign: (input) => {
+        const implementation = this.#implementations.status(input.implementationCampaignId, input.projectId);
+        if (implementation.status !== "active" || implementation.changeId !== input.changeId) throw new Error("Review campaign does not match an active implementation campaign");
+        const requested = input.taskScope.split(",").map((id) => id.trim());
+        if (!requested.length || requested.some((id) => !/^\d+(?:\.\d+)+$/u.test(id)) || new Set(requested).size !== requested.length) throw new Error("Review campaign requires unique exact OpenSpec task IDs");
+        const canonical = implementation.selectedTaskIds.filter((id) => requested.includes(id));
+        if (canonical.join("\0") !== requested.join("\0")) throw new Error("Review campaign task scope is outside or reordered from the implementation campaign");
+        return this.#reviews.begin({ ...input, taskScope: canonical.join(",") });
+      },
+      consumeReviewCampaign: (input) => {
+        const review = this.#reviews.consume(input);
+        const implementationCampaignId = review.implementationCampaignId!;
+        this.#implementations.authorizeDispatch({ campaignId: implementationCampaignId, changeId: input.changeId, projectId: input.projectId, taskScope: review.taskScope!, workKind: input.kind ?? "review", reviewCampaignId: input.campaignId, ...(input.rootCauseId ? { reviewFindingRootCauseId: input.rootCauseId } : {}) });
+        return review;
+      },
       recordReviewFinding: (input) => this.#reviews.recordFinding(input),
+      dispositionReviewFinding: (input) => this.#reviews.dispositionFinding(input),
+      resolveReviewFinding: (input) => this.#reviews.resolveFinding(input),
       extendReviewCampaign: (input) => this.#reviews.extend(input),
       endReviewCampaign: (input) => this.#reviews.end(input),
       reviewCampaignStatus: (campaignId, campaignProjectId) => this.#reviews.status(campaignId, campaignProjectId),

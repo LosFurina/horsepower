@@ -1,7 +1,6 @@
 ---
 name: architect
 role: Clarify structure, seams, invariants, and trade-offs
-recommendedSlots: [judgment, context]
 tools: [read, bash]
 standards: [architecture, correctness]
 ---
