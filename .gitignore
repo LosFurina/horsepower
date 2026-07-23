@@ -5,3 +5,4 @@ dist/
 .DS_Store
 
 .worktrees/
+test/fixtures/.pi-auto-compaction-runtime.bundle.mjs

@@ -59,10 +59,15 @@ const digestPattern = /^[a-f0-9]{64}$/u;
 const planRefPattern = /^(?:TC|G|NA)-[1-9]\d*$/u;
 // Must remain representable by the claim-matched verification manifest.
 const MAX_SELECTED_TASKS = 100;
+const MAX_ID_BYTES = 128;
+const MAX_PROJECT_ID_BYTES = 4_096;
+const MAX_CONTINUATION_IDENTITY_BYTES = 32 * 1_024;
 
-function text(value: string, label: string): string {
-  if (!value.trim()) throw new Error(`${label} is required`);
-  return value.trim();
+function text(value: string, label: string, maxBytes?: number): string {
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`${label} is required`);
+  if (maxBytes !== undefined && Buffer.byteLength(normalized, "utf8") > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  return normalized;
 }
 function positive(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer`);
@@ -104,7 +109,7 @@ function exactTaskIds(values: readonly string[], label: string): string[] {
   const normalized: string[] = [];
   const seen = new Set<string>();
   for (const raw of values) {
-    const id = text(raw, label);
+    const id = text(raw, label, MAX_ID_BYTES);
     if (!taskIdPattern.test(id)) {
       throw new Error(`${label} must use exact OpenSpec task IDs; ranges and free-form scopes are unsupported: ${id}`);
     }
@@ -167,14 +172,22 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       });
       if (records.size !== selectedTaskIds.length) throw new Error("Implementation task snapshot contains unselected tasks");
       // Complete every fallible validation/allocation before replacing active authority.
-      const campaignId = text(makeId(), "Implementation campaign ID");
+      const campaignId = text(makeId(), "Implementation campaign ID", MAX_ID_BYTES);
       if (campaigns.has(campaignId)) throw new Error(`Implementation campaign ID already exists: ${campaignId}`);
       const campaign: ImplementationCampaign = {
-        campaignId, changeId: text(input.changeId, "Implementation change ID"),
-        projectId: text(input.projectId, "Implementation project ID"), selectedTaskIds, selectedTasks,
+        campaignId, changeId: text(input.changeId, "Implementation change ID", MAX_ID_BYTES),
+        projectId: text(input.projectId, "Implementation project ID", MAX_PROJECT_ID_BYTES), selectedTaskIds, selectedTasks,
         inventoryDigest: input.inventoryDigest, plan, mode: input.mode, status: "active",
         reviewerAuthorizations: [], dispatches: [], captainDirect: [],
       };
+      const nextContinuation: ContinuationLease = {
+        campaignId: campaign.campaignId, projectId: campaign.projectId, changeId: campaign.changeId,
+        selectedTaskIds: [...campaign.selectedTaskIds], inventoryDigest: campaign.inventoryDigest, planDigest: campaign.plan.digest,
+        mode: campaign.mode, generation: 0, disposition: "active",
+      };
+      if (Buffer.byteLength(JSON.stringify(nextContinuation), "utf8") > MAX_CONTINUATION_IDENTITY_BYTES) {
+        throw new Error(`Implementation continuation identity exceeds ${MAX_CONTINUATION_IDENTITY_BYTES} bytes`);
+      }
       for (const existing of campaigns.values()) {
         if (existing.projectId === input.projectId && existing.status === "active") {
           existing.status = "ended";
@@ -183,11 +196,7 @@ export function createImplementationCampaignManager(options: ImplementationCampa
         }
       }
       campaigns.set(campaign.campaignId, campaign);
-      continuation = {
-        campaignId: campaign.campaignId, projectId: campaign.projectId, changeId: campaign.changeId,
-        selectedTaskIds: [...campaign.selectedTaskIds], inventoryDigest: campaign.inventoryDigest, planDigest: campaign.plan.digest,
-        mode: campaign.mode, generation: 0, disposition: "active",
-      };
+      continuation = nextContinuation;
       return copy(campaign);
     },
     authorizeReviewer(input: { campaignId: string; projectId?: string; reviewCampaignId: string; acceptanceScope: string; budget: number }): ImplementationCampaign {
@@ -268,11 +277,16 @@ export function createImplementationCampaignManager(options: ImplementationCampa
     },
     beginContinuationGeneration(campaignId: string, projectId: string, compactionGeneration?: number): ContinuationLease | undefined {
       if (!continuation || continuation.campaignId !== campaignId || continuation.projectId !== projectId || continuation.disposition !== "active") return undefined;
+      const campaign = campaigns.get(campaignId);
+      // Ended/switched campaigns cannot mint continuation even if disposition was left active.
+      if (!campaign || campaign.status !== "active" || campaign.projectId !== projectId) return undefined;
       // The caller supplies one process-local generation for each successful compaction.
       // Repeated lifecycle hooks for that generation must be idempotent, while a later
       // compaction is allowed to create its own bounded continuation.
       const generation = compactionGeneration ?? continuation.generation + 1;
-      if (!Number.isSafeInteger(generation) || generation < 1 || continuation.queuedGeneration === generation) return undefined;
+      if (!Number.isSafeInteger(generation) || generation < 1) return undefined;
+      // Duplicate generation is suppressed; stale/out-of-order generations cannot rewind authority.
+      if (continuation.queuedGeneration === generation || generation <= continuation.generation) return undefined;
       continuation = { ...continuation, generation, queuedGeneration: generation };
       return structuredClone(continuation);
     },

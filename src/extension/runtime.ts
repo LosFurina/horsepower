@@ -216,6 +216,14 @@ export class HorsepowerRuntime {
     this.#implementations.clearContinuation();
   }
 
+  pauseCampaignContinuation(projectId: string): ContinuationLease | undefined {
+    const normalized = resolve(projectId);
+    const lease = this.#implementations.currentContinuation(normalized);
+    if (!lease || lease.disposition !== "active") return undefined;
+    this.#implementations.setContinuationDisposition(lease.campaignId, "paused");
+    return this.#implementations.continuation(lease.campaignId, normalized);
+  }
+
   currentCampaignContinuation(projectId: string): ContinuationLease | undefined {
     const normalized = resolve(projectId);
     return this.#implementations.currentContinuation(normalized);
@@ -520,7 +528,15 @@ export class HorsepowerRuntime {
       destroyWorker: (workerId, force) => this.#manager.destroy(workerId, force),
       doctor: () => ({ generation: "process", workers: this.#manager.list().length }),
       reportDispatchTerminal: (report) => this.#lifecycle.reportDispatchTerminal(report),
-      reportChangeTerminal: (report) => this.#lifecycle.reportChangeTerminal(report),
+      reportChangeTerminal: async (report) => {
+        const result = await this.#lifecycle.reportChangeTerminal(report);
+        const identity = this.#lifecycle.identity(report.runId);
+        try {
+          const campaign = this.#implementations.activeCampaign(identity.projectId, identity.changeId);
+          this.#implementations.setContinuationDisposition(campaign.campaignId, "terminal");
+        } catch { /* no active campaign */ }
+        return result;
+      },
       identityForRun: (runId) => this.#lifecycle.identity(runId),
       projectId,
       createHandoff: (input) => handoffs.create(input).catch((cause) => { throw toolFailure({ code: "HANDOFF_FAILED", boundary: "handoff", remediation: "Inspect the managed handoff evidence and retry the bounded dispatch." }, cause); }),

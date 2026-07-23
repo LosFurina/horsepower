@@ -37,11 +37,22 @@ interface CampaignInventory {
   sections: Array<{ id: string; title: string; tasks: Array<{ id: string; description: string; status: "pending" | "complete"; sectionId: string }> }>;
 }
 
+interface CampaignContinuationIdentity {
+  campaignId: string;
+  projectId: string;
+  changeId: string;
+  selectedTaskIds: string[];
+  mode: "multi_agent" | "main_agent";
+  generation: number;
+  disposition?: "active" | "paused" | "blocked" | "terminal" | "superseded";
+}
+
 interface ExtensionRuntime {
   execute(input: unknown, context: HorsepowerRuntimeContext): Promise<unknown>;
   clearCampaignContinuation?(): void;
-  currentCampaignContinuation?(projectId: string): { campaignId: string; projectId: string; changeId: string; selectedTaskIds: string[]; mode: "multi_agent" | "main_agent"; generation: number } | undefined;
-  prepareCampaignContinuation?(input: { campaignId: string; projectId: string; generation?: number }): Promise<{ campaignId: string; projectId: string; changeId: string; selectedTaskIds: string[]; mode: "multi_agent" | "main_agent"; generation: number } | undefined>;
+  pauseCampaignContinuation?(projectId: string): CampaignContinuationIdentity | undefined;
+  currentCampaignContinuation?(projectId: string): CampaignContinuationIdentity | undefined;
+  prepareCampaignContinuation?(input: { campaignId: string; projectId: string; generation?: number }): Promise<CampaignContinuationIdentity | undefined>;
   discoverImplementationChanges?(input: { projectId: string }): Promise<CampaignCandidate[]>;
   loadImplementationTaskInventory?(input: { changeId: string; projectId: string }): Promise<CampaignInventory>;
   loadImplementationTestAndGatePlan?(input: { changeId: string; projectId: string }): Promise<TestAndGatePlan>;
@@ -262,21 +273,38 @@ export function registerHorsepowerExtension(
   const runtime = (ctx: ExtensionContext) => (lease ??= dependencies.acquireRuntime(ctx)).value;
 
   let compactionSerial = 0;
+  // One process-local arm per successful automatic compaction generation.
+  // Official Pi contract: arm only on session_compact with a saved entry and
+  // willRetry=false; enqueue at most once after agent_settled when idle with no
+  // pending steering/follow-up. Pi native overflow retry owns willRetry=true.
   let compactGeneration: { serial: number; reason: "threshold" | "overflow"; campaignId: string; projectId: string; handled: boolean } | undefined;
+  const clearCompactGeneration = () => { compactGeneration = undefined; };
   pi.on("session_start", (_event, ctx) => {
     lease ??= dependencies.acquireRuntime(ctx);
-    compactGeneration = undefined;
+    clearCompactGeneration();
   });
   pi.on("session_before_compact", (event) => {
-    const e = event as { reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean };
-    // A manual compaction, or a later compaction attempt, invalidates an older
-    // candidate. The successful event below is the only event that arms it.
-    if (e.reason === "manual") compactGeneration = undefined;
+    // A new compaction attempt supersedes any prior arm. Manual /compact never
+    // auto-continues; failed/aborted attempts never emit a successful compact.
+    void event;
+    clearCompactGeneration();
   });
   pi.on("session_compact", (event, ctx) => {
     const e = event as { reason?: "manual" | "threshold" | "overflow"; willRetry?: boolean; compactionEntry?: unknown };
-    if (e.reason !== "threshold" && e.reason !== "overflow") return;
-    if (e.willRetry === true || e.compactionEntry === undefined) return;
+    if (e.reason === "manual" || e.willRetry === true) {
+      clearCompactGeneration();
+      return;
+    }
+    if (e.reason !== "threshold" && e.reason !== "overflow") {
+      clearCompactGeneration();
+      return;
+    }
+    // Defensive: official SessionCompactEvent always carries compactionEntry, but
+    // missing success evidence must never authorize continuation.
+    if (e.compactionEntry === undefined || e.compactionEntry === null) {
+      clearCompactGeneration();
+      return;
+    }
     // Compaction hooks can be the first event that needs the runtime (the
     // session may not have emitted session_start in embedded/test hosts).
     const active = (lease ??= dependencies.acquireRuntime(ctx)).value;
@@ -284,22 +312,69 @@ export function registerHorsepowerExtension(
     // Defer until agent_settled: Pi may still enqueue native or user work.
     const projectId = ctx.cwd;
     const candidate = active.currentCampaignContinuation?.(projectId);
-    if (!candidate) return;
+    if (!candidate || (candidate.disposition !== undefined && candidate.disposition !== "active")) return;
     compactGeneration = { serial: ++compactionSerial, reason: e.reason, campaignId: candidate.campaignId, projectId, handled: false };
+  });
+  pi.on("agent_start", () => {
+    // Any turn that starts before Horsepower delivers its follow-up has won the
+    // continuation race. A settlement context is a snapshot and cannot reveal
+    // this later start, so invalidate the arm explicitly at the lifecycle edge.
+    clearCompactGeneration();
   });
   pi.on("agent_settled", (_event, ctx) => {
     const pending = compactGeneration;
-    if (!pending || pending.handled || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+    if (!pending || pending.handled) return;
+    if (ctx.cwd !== pending.projectId) {
+      pending.handled = true;
+      return;
+    }
+    // User/Pi/extension work that wins the settlement boundary owns continuation
+    // for this generation. Consume the arm rather than retrying after that work.
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+      pending.handled = true;
+      return;
+    }
     const active = lease?.value;
     const prepare = active?.prepareCampaignContinuation;
     if (!prepare) return;
     pending.handled = true;
     void (async () => {
+      const locale = dependencies.resolveOutputLocale ? await dependencies.resolveOutputLocale(pending.projectId).catch(() => "en" as const) : "en";
+      // Any newer compaction attempt or session replacement invalidates this
+      // in-flight closure before it may mint or deliver continuation authority.
+      if (compactGeneration !== pending) return;
       // The runtime owns authorization and returns a bounded identity only.
       const result = await prepare({ campaignId: pending.campaignId, projectId: pending.projectId, generation: pending.serial });
-      if (!result) return;
-      const details = { campaignId: result.campaignId, changeId: result.changeId, selectedTaskIds: [...result.selectedTaskIds], mode: result.mode, generation: result.generation };
-      pi.sendMessage({ customType: "horsepower-campaign-continuation", content: `Continue campaign ${details.campaignId} for change ${details.changeId}, tasks ${details.selectedTaskIds.join(",")}, mode ${details.mode}. Re-read official OpenSpec and current repository state.`, display: false, details }, { deliverAs: "followUp", triggerTurn: true });
+      // Revalidation is asynchronous. Re-check the exact arm, project, idle,
+      // and pending-message arbitration immediately before delivery so a switch,
+      // user follow-up, or new active turn during I/O always takes precedence.
+      if (compactGeneration !== pending || ctx.cwd !== pending.projectId || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+      if (!result) {
+        // Eligible arm existed, but lease/OpenSpec revalidation failed closed.
+        try { ctx.ui.notify(message(locale, "campaign.continuationStopped", { campaignId: pending.campaignId }), "info"); } catch { /* observational */ }
+        return;
+      }
+      // Allowlisted private payload only: stable campaign identity + guidance.
+      // Never copy compaction summaries, prompts, credentials, or private paths.
+      const details = {
+        campaignId: result.campaignId,
+        changeId: result.changeId,
+        selectedTaskIds: [...result.selectedTaskIds],
+        mode: result.mode,
+      };
+      const content = message(locale, "campaign.continuationQueued", {
+        campaignId: details.campaignId,
+        changeId: details.changeId,
+        taskIds: details.selectedTaskIds.join(","),
+        mode: details.mode,
+      });
+      pi.sendMessage({
+        customType: "horsepower-campaign-continuation",
+        content,
+        display: false,
+        details,
+      }, { deliverAs: "followUp", triggerTurn: true });
+      try { ctx.ui.notify(message(locale, "campaign.continuationNotice", { campaignId: details.campaignId, changeId: details.changeId }), "info"); } catch { /* observational */ }
     })().catch(() => { /* fail closed without side effects */ });
   });
 
@@ -544,6 +619,20 @@ export function registerHorsepowerExtension(
       ctx.ui.notify(JSON.stringify(campaignResult), "info");
     },
   });
+  pi.registerCommand("horsepower-campaign-pause", {
+    description: "Pause automatic continuation for the current implementation campaign",
+    handler: async (_args, ctx) => {
+      const active = runtime(ctx).pauseCampaignContinuation?.(ctx.cwd);
+      const locale = dependencies.resolveOutputLocale ? await dependencies.resolveOutputLocale(ctx.cwd).catch(() => "en" as const) : "en";
+      if (!active) {
+        ctx.ui.notify(message(locale, "campaign.continuationPauseUnavailable", {}), "warning");
+        return;
+      }
+      clearCompactGeneration();
+      ctx.ui.notify(message(locale, "campaign.continuationPaused", { campaignId: active.campaignId, changeId: active.changeId }), "info");
+    },
+  });
+
   pi.registerCommand("horsepower-review-authorize", {
     description: "Authorize a bounded reviewer in a main-Agent implementation campaign",
     handler: async (_args, ctx) => {
@@ -563,6 +652,7 @@ export function registerHorsepowerExtension(
   });
 
   pi.on("session_shutdown", async (event) => {
+    clearCompactGeneration();
     if ((event.reason === "new" || event.reason === "resume" || event.reason === "fork") && lease) {
       lease.value.clearCampaignContinuation?.();
     }

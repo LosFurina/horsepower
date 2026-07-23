@@ -91,6 +91,21 @@ test("configure --interactive runs the complete ordered journey while locale-onl
   expect(await run(["configure", "--locale", "en", "--json"])).toMatchObject({ exitCode: 0 });
 });
 
+test("configure --interactive persists the explicit Discord provider with none auth", async () => {
+  const setupTerminal = {
+    chooseLocale: vi.fn(async () => "en" as const), setLocale: vi.fn(), showSkillBoundary: vi.fn(), showSkillAudit: vi.fn(),
+    confirmSkillRisk: vi.fn(async () => true), chooseWebhookAction: vi.fn(async () => "configure" as const),
+    readWebhookConfiguration: vi.fn(async () => ({ provider: "discord" as const, url: "https://example.test/protocol-fixture", auth: { mode: "none" as const }, dispatch: true })),
+    chooseModelAction: vi.fn(async () => "skip" as const), showConfigurationSummary: vi.fn(),
+    showModels: vi.fn(), chooseModel: vi.fn(), chooseThinking: vi.fn(), chooseProbeAction: vi.fn(),
+  };
+  const { homeDir, run } = await harness({ terminal: setupTerminal, configurationTerminal: setupTerminal, resolveSkills: async () => ({ skills: [] }) });
+
+  expect(await run(["configure", "--interactive", "--json"])).toMatchObject({ exitCode: 0 });
+  const settings = JSON.parse(await readFile(join(homeDir, ".pi/agent/horsepower/settings.json"), "utf8"));
+  expect(settings.webhook).toMatchObject({ enabled: true, provider: "discord", auth: { mode: "none" }, notifications: { change: true, dispatch: true } });
+});
+
 test("configure --interactive without a terminal changes no configuration", async () => {
   const { homeDir, run } = await harness();
   const result = await run(["configure", "--interactive", "--json"]);
@@ -166,7 +181,9 @@ test("strictly parses commands and emits deterministic JSON with stable exit cod
   expect((await run(["slots", "--bogus"]))).toMatchObject({ exitCode: 2 });
   expect((await run(["slots", "--json", "--json"]))).toMatchObject({ exitCode: 2 });
   expect((await run(["--json", "slots"]))).toMatchObject({ exitCode: 0, stderr: "" });
-  expect((await run(["webhook", "--json", "configure", "--url", "https://example.test", "--auth", "none"]))).toMatchObject({ exitCode: 0, stderr: "" });
+  expect((await run(["webhook", "--json", "configure", "--provider", "discord", "--url", "https://example.test", "--auth", "none"]))).toMatchObject({ exitCode: 0, stderr: "" });
+  expect((await run(["webhook", "configure", "--provider", "discord", "--url", "https://example.test", "--auth", "hmac", "--secret", "secret-byte", "--json"]))).toMatchObject({ exitCode: 2 });
+  expect((await run(["webhook", "configure", "--provider", "unsupported", "--url", "https://example.test", "--auth", "none", "--json"]))).toMatchObject({ exitCode: 2 });
   expect((await run(["webhook", "configure", "--url", "https://example.test", "--auth", "none", "--change", "--no-change", "--json"]))).toMatchObject({ exitCode: 2 });
   expect((await run(["webhook", "configure", "--url", "https://example.test", "--auth", "none", "--dispatch", "--no-dispatch", "--json"]))).toMatchObject({ exitCode: 2 });
   for (const incompatible of [
@@ -489,7 +506,7 @@ test("CLI webhook settings exactly match runtime parsing and disabled settings r
   });
   const { webhookOptions } = await import("../../src/extension/index.js");
   expect(webhookOptions(homeDir, cwd)).toEqual({
-    config: { url: "https://example.test/hook", auth: { mode: "hmac", secret } },
+    config: { url: "https://example.test/hook", auth: { mode: "hmac", secret }, provider: "generic" },
     notifications: { change: true, dispatch: true },
   });
 
@@ -760,7 +777,7 @@ test.each([
 
   const { webhookOptions } = await import("../../src/extension/index.js");
   expect(webhookOptions(homeDir, cwd)).toEqual({
-    config: { url: "https://requested.test/hook", auth: { mode: "bearer", token: "requested-token" } },
+    config: { url: "https://requested.test/hook", auth: { mode: "bearer", token: "requested-token" }, provider: "generic" },
     notifications: { change: true, dispatch: true },
   });
   expect(await run(["webhook", "test", "--json"])).toMatchObject({ exitCode: 0 });

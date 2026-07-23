@@ -8,6 +8,13 @@ test("catalogs are exhaustive and render English and Chinese conclusions", () =>
   expect(Object.keys(catalogs.en).sort()).toEqual(Object.keys(catalogs["zh-CN"]).sort());
   expect(message("en", "dispatch.completed", { action: "review" })).toBe("review completed.");
   expect(message("zh-CN", "dispatch.completed", { action: "review" })).toBe("review 已完成。");
+  expect(message("en", "campaign.continuationQueued", {
+    campaignId: "campaign-1", changeId: "change-a", taskIds: "1.1,2.2", mode: "multi_agent",
+  })).toContain("campaign-1");
+  expect(message("zh-CN", "campaign.continuationQueued", {
+    campaignId: "campaign-1", changeId: "change-a", taskIds: "1.1,2.2", mode: "multi_agent",
+  })).toMatch(/campaign-1.*change-a.*1\.1,2\.2.*multi_agent/u);
+  expect(message("zh-CN", "campaign.continuationStopped", { campaignId: "campaign-1" })).toContain("campaign-1");
 });
 
 test("project locale overrides global and missing configuration defaults to English", async () => {

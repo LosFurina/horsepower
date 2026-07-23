@@ -589,6 +589,33 @@ slotPolicy:
   expect(() => scanPublicContent([{ path: "bin/horsepower", content: Buffer.from("settings.provider={...runtimeProvider??{},maxRetryDelayMs:retry.maxDelayMs}") }])).not.toThrow();
 });
 
+test("privacy scanner rejects concrete Discord webhook credentials and captured payloads but permits protocol-safe fixtures", () => {
+  const host = ["discord", ".com"].join("");
+  const route = ["api", "webhooks"].join("/");
+  const concreteUrl = `https://${host}/${route}/${"1".repeat(18)}/${"A".repeat(60)}`;
+  const concreteToken = ["discord_webhook_", "token"].join("");
+  const privatePath = ["", "Users", "operator", "captures", "discord-response.json"].join("/");
+  const forbidden = [
+    ["concrete webhook URL", concreteUrl],
+    ["labeled webhook token", `${concreteToken}=${"B".repeat(60)}`],
+    ["private capture path", privatePath],
+    ["captured external payload", JSON.stringify({ endpoint: concreteUrl, body: { content: "external message" } })],
+  ] as const;
+  for (const [label, content] of forbidden) {
+    expect(() => scanPublicContent([{ path: `test/fixtures/${label}.txt`, content: Buffer.from(content) }]), label)
+      .toThrow(/Forbidden public content/u);
+  }
+
+  const safe = [
+    ["test/fixtures/discord-request.json", JSON.stringify({ content: "change completed.", allowed_mentions: { parse: [] } })],
+    ["docs/webhooks.md", "Use <discord-webhook-url> and never commit receiver credentials."],
+    ["test/fixtures/local-receiver.txt", "http://127.0.0.1:43210/protocol-fixture"],
+  ] as const;
+  for (const [path, content] of safe) {
+    expect(() => scanPublicContent([{ path, content: Buffer.from(content) }]), path).not.toThrow();
+  }
+});
+
 test("privacy scanner policy source and tests are themselves scannable", async () => {
   const paths = ["src/release/index.ts", "test/unit/release.test.ts"];
   const contents = await Promise.all(paths.map(async (path) => ({ path, content: await readFile(path) })));

@@ -161,15 +161,15 @@ Horsepower SHALL NOT permit a change to be reported `completed` from unit-test e
 - **THEN** the Captain may explicitly report `blocked_needs_human` without passing the completion gate
 
 ### Requirement: Explicit change terminal reporting
-Horsepower SHALL consider a change terminal only when the Captain explicitly reports `completed`, `blocked_needs_human`, `failed`, or `canceled`. It SHALL NOT infer change completion from an assistant turn ending, becoming quiet, a worker or reviewer verdict, or an expression of confidence or satisfaction. A `completed` report SHALL use the current claim-matched verification manifest contract; non-complete terminal states SHALL truthfully describe the observed status and SHALL NOT require successful completion evidence.
+Horsepower SHALL consider a change terminal only when the Captain explicitly reports `completed`, `blocked_needs_human`, `failed`, or `canceled`. It SHALL NOT infer change completion from an assistant turn ending, becoming quiet, a worker or reviewer verdict, or an expression of confidence or satisfaction. A `completed` report SHALL use the current claim-matched verification manifest contract; non-complete terminal states SHALL truthfully describe the observed status and SHALL NOT require successful completion evidence. A configured change notification SHALL normalize the accepted terminal event once and deliver it through the explicitly selected `generic` or `discord` provider adapter without allowing provider outcome to alter terminal truth.
 
 #### Scenario: Captain reports completion
 - **WHEN** the Captain reports `completed` in valid OpenSpec context and the E2E completion gate passes
-- **THEN** Horsepower records process-lifetime terminal runtime evidence and triggers configured change notification
+- **THEN** Horsepower records process-lifetime terminal runtime evidence and triggers the configured provider-aware change notification
 
 #### Scenario: Captain reports verified completion
 - **WHEN** the Captain explicitly reports `completed` in valid current OpenSpec context and the fresh claim-matched completion gate passes
-- **THEN** Horsepower records process-lifetime terminal runtime evidence and triggers configured change notification
+- **THEN** Horsepower records process-lifetime terminal runtime evidence and triggers the configured provider-aware change notification
 
 #### Scenario: Legacy uncorrelated completion payload is used
 - **WHEN** the Captain reports `completed` using bare E2E or waiver fields without freshness and acceptance mapping
@@ -177,7 +177,11 @@ Horsepower SHALL consider a change terminal only when the Captain explicitly rep
 
 #### Scenario: Captain reports a non-complete terminal state
 - **WHEN** the Captain explicitly reports `blocked_needs_human`, `failed`, or `canceled`
-- **THEN** Horsepower triggers configured change notification without requiring successful completion evidence and without implying that acceptance passed
+- **THEN** Horsepower triggers the configured provider-aware change notification without requiring successful completion evidence and without implying that acceptance passed
+
+#### Scenario: Provider notification fails
+- **WHEN** a generic or Discord receiver rejects or cannot receive the accepted change terminal event
+- **THEN** Horsepower preserves the recorded change terminal state and records only bounded redacted delivery evidence
 
 #### Scenario: Assistant turn ends
 - **WHEN** the main assistant finishes a turn without explicit terminal reporting
@@ -315,3 +319,22 @@ Horsepower SHALL compute confirmation against the normalized current profiles, t
 #### Scenario: Drift occurs during implementation
 - **WHEN** dispatch-time revalidation finds relevant drift from the campaign-confirmed plan snapshot
 - **THEN** Horsepower blocks new work before budget or process creation and requires a newly confirmed campaign plan
+
+### Requirement: Post-compaction OpenSpec revalidation
+Immediately before enqueueing a Horsepower post-compaction continuation, the runtime SHALL use the supported official OpenSpec boundary to verify that the same change remains apply-ready and strictly valid, the active campaign's exact selected task IDs remain present, ordered, pending, and snapshot-equivalent, and the current inventory digest matches. The runtime SHALL repeat normal dispatch-time authorization before any later work-producing action and SHALL NOT repair or reinterpret drift automatically.
+
+#### Scenario: Official scope is unchanged
+- **WHEN** the active campaign's change, selected task order, descriptions, sections, pending states, and inventory digest still match current official OpenSpec facts
+- **THEN** post-compaction continuation may proceed under the existing user authorization
+
+#### Scenario: Selected task changed or completed
+- **WHEN** a selected task is missing, reordered, completed, renamed, moved to another section, or otherwise differs from the campaign snapshot
+- **THEN** Horsepower suppresses continuation and requires a fresh user-selected campaign rather than inferring a replacement scope
+
+#### Scenario: OpenSpec context is invalid
+- **WHEN** official OpenSpec status, doctor, strict validation, instructions, project ownership, or supported version checks fail
+- **THEN** Horsepower suppresses continuation with bounded actionable evidence and changes no OpenSpec fact
+
+#### Scenario: Drift occurs after continuation is queued
+- **WHEN** official scope changes between continuation enqueue and a work-producing dispatch
+- **THEN** existing dispatch-time revalidation rejects the action before worker, run, handoff, or budget side effects

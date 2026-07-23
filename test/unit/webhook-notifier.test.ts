@@ -12,10 +12,17 @@ const event = {
   evidenceRefs: ["npm run e2e: exit 0"],
 };
 
+const genericConfig = { url: "https://example.test", auth: { mode: "none" } as const, provider: "generic" as const };
+const genericHmacConfig = { url: "https://example.test/hook", auth: { mode: "hmac" as const, secret: "top-secret" }, provider: "generic" as const };
+const genericBearerConfig = { url: "https://example.test/hook", auth: { mode: "bearer" as const, token: "token-value" }, provider: "generic" as const };
+const discordConfig = { url: "https://discord.test/webhook", auth: { mode: "none" as const }, provider: "discord" as const };
+
+// ── Generic provider (regression) ───────────────────────────────────────
+
 test("Chinese webhook localizes only the human summary and preserves machine fields", async () => {
   let body: Record<string, unknown> | undefined;
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
-  const notifier = createWebhookNotifier({ config: { url: "https://example.test", auth: { mode: "none" } }, fetch: async (_url, init) => { body = JSON.parse(String(init?.body)); return new Response(null, { status: 204 }); } });
+  const notifier = createWebhookNotifier({ config: genericConfig, fetch: async (_url, init) => { body = JSON.parse(String(init?.body)); return new Response(null, { status: 204 }); } });
   const { changeId: _changeId, ...dispatchEvent } = event;
   await notifier.notify({ ...dispatchEvent, scope: "dispatch", outputLocale: "zh-CN", summary: "任务已完成。" });
   expect(body).toMatchObject({ scope: "dispatch", status: "completed", outputLocale: "zh-CN", summary: "dispatch 已完成。" });
@@ -26,7 +33,7 @@ test("signs a redacted canonical HMAC notification", async () => {
   const requests: Array<{ body: string; headers: Record<string, string> }> = [];
   const module = await import("../../src/lifecycle/webhook-notifier.js").catch(() => undefined);
   const notifier = module?.createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "hmac", secret: "top-secret" } },
+    config: genericHmacConfig,
     fetch: async (_url, init) => {
       requests.push({ body: String(init?.body), headers: init?.headers as Record<string, string> });
       return new Response(null, { status: 204 });
@@ -64,7 +71,7 @@ test("supports Bearer authentication and bounded non-blocking retries", async ()
   let attempts = 0;
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "bearer", token: "token-value" } },
+    config: genericBearerConfig,
     retryDelaysMs: [0, 5, 30],
     sleep: async (milliseconds) => { delays.push(milliseconds); },
     fetch: async (_url, init) => {
@@ -74,7 +81,7 @@ test("supports Bearer authentication and bounded non-blocking retries", async ()
     },
   });
 
-  await expect(notifier.notify(event)).resolves.toEqual({ delivered: true, attempts: 3 });
+  await expect(notifier.notify(event)).resolves.toMatchObject({ delivered: true, attempts: 3 });
   expect(delays).toEqual([5, 30]);
   expect(headers[0]?.authorization).toBe("Bearer token-value");
 });
@@ -83,7 +90,7 @@ test("times out hanging attempts and ignores unbounded custom retry schedules", 
   const sleeps: number[] = [];
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    config: genericConfig,
     retryDelaysMs: Array(100).fill(0),
     attemptTimeoutMs: 1,
     sleep: async (milliseconds) => { sleeps.push(milliseconds); },
@@ -100,7 +107,7 @@ test("removes raw and JSON-escaped authentication values from delivered payloads
   const bodies: string[] = [];
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "bearer", token: "token-value" } },
+    config: genericBearerConfig,
     fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response(null, { status: 204 }); },
   });
 
@@ -108,7 +115,7 @@ test("removes raw and JSON-escaped authentication values from delivered payloads
     .resolves.toMatchObject({ delivered: true });
 
   const hmac = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "hmac", secret: "line1\nline2" } },
+    config: { url: "https://example.test/hook", auth: { mode: "hmac", secret: "line1\nline2" }, provider: "generic" },
     fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response(null, { status: 204 }); },
   });
   await expect(hmac.notify({ ...event, summary: "line1\nline2" }))
@@ -121,7 +128,7 @@ test("hashes credential-bearing summary, evidence, and identifiers at the notifi
   const bodies: string[] = [];
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    config: genericConfig,
     fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response(null, { status: 204 }); },
   });
 
@@ -144,7 +151,7 @@ test("rejects unknown, malformed, and scope-incompatible event fields", async ()
   let fetched = false;
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    config: genericConfig,
     fetch: async () => { fetched = true; return new Response(null, { status: 204 }); },
   });
 
@@ -161,7 +168,7 @@ test("allows structurally valid credential-themed change identifiers", async () 
   let fetched = false;
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    config: genericConfig,
     fetch: async () => { fetched = true; return new Response(null, { status: 204 }); },
   });
 
@@ -176,7 +183,7 @@ test("rejects unbounded or credential-bearing event fields before delivery", asy
   let fetched = false;
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    config: genericConfig,
     fetch: async () => { fetched = true; return new Response(null, { status: 204 }); },
   });
 
@@ -189,7 +196,7 @@ test("delivery exhaustion does not throw or mutate the terminal event", async ()
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const original = structuredClone(event);
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    config: genericConfig,
     retryDelaysMs: [0, 1],
     sleep: async () => undefined,
     fetch: async () => { throw new Error("receiver unavailable with secret=do-not-log"); },
@@ -209,7 +216,7 @@ test("shutdown abandons in-process retries without persisting recovery", async (
   const fetch = vi.fn(async () => new Response("down", { status: 503 }));
   const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
   const notifier = createWebhookNotifier({
-    config: { url: "https://example.test/hook", auth: { mode: "none" } },
+    config: genericConfig,
     fetch: fetch as typeof globalThis.fetch,
     retryDelaysMs: [0, 10],
     sleep: async () => sleeping,
@@ -225,4 +232,172 @@ test("shutdown abandons in-process retries without persisting recovery", async (
   ])).resolves.toEqual({ delivered: false, attempts: 1, error: "Webhook delivery abandoned" });
   expect(fetch).toHaveBeenCalledTimes(1);
   releaseSleep();
+});
+
+// ── Discord provider transport (Task 3.1) ───────────────────────────────
+
+test("3.1: Discord provider sends content/body with allowed_mentions", async () => {
+  let sentBody: string | undefined;
+  let sentHeaders: Record<string, string> | undefined;
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: discordConfig,
+    fetch: async (_url, init) => {
+      sentBody = String(init?.body);
+      sentHeaders = init?.headers as Record<string, string>;
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  await expect(notifier.notify(event)).resolves.toMatchObject({ delivered: true, attempts: 1 });
+  expect(sentBody).toBeTruthy();
+  expect(sentHeaders).toBeTruthy();
+  const parsed = JSON.parse(sentBody!);
+  expect(parsed).toHaveProperty("content");
+  expect(parsed).toHaveProperty("allowed_mentions");
+  expect(parsed.allowed_mentions).toEqual({ parse: [] });
+  expect(typeof parsed.content).toBe("string");
+  expect(parsed.content.length).toBeGreaterThan(0);
+});
+
+test("3.1: Discord body does not contain Horsepower event headers", async () => {
+  let sentBody: string | undefined;
+  let sentHeaders: Record<string, string> | undefined;
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: discordConfig,
+    fetch: async (_url, init) => {
+      sentBody = String(init?.body);
+      sentHeaders = init?.headers as Record<string, string>;
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  await expect(notifier.notify(event)).resolves.toMatchObject({ delivered: true, attempts: 1 });
+  // Discord body is NOT canonical JSON — it's a Discord-native envelope
+  const parsed = JSON.parse(sentBody!);
+  expect(parsed).not.toHaveProperty("eventId");
+  expect(parsed).not.toHaveProperty("scope");
+  expect(parsed).not.toHaveProperty("runId");
+  expect(parsed).not.toHaveProperty("status");
+  expect(parsed).not.toHaveProperty("summary");
+  expect(parsed).not.toHaveProperty("evidenceRefs");
+  // No Horsepower-specific headers
+  expect(sentHeaders!["x-horsepower-event-id"]).toBeUndefined();
+  expect(sentHeaders!["x-horsepower-signature"]).toBeUndefined();
+  expect(sentHeaders!["x-horsepower-timestamp"]).toBeUndefined();
+  expect(sentHeaders!.authorization).toBeUndefined();
+});
+
+test("3.1: Discord transport preserves bounded retries", async () => {
+  const fetches: number[] = [];
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: discordConfig,
+    retryDelaysMs: [0, 5, 30],
+    sleep: async () => undefined,
+    fetch: async () => {
+      fetches.push(fetches.length);
+      return new Response(null, { status: fetches.length < 3 ? 503 : 204 });
+    },
+  });
+
+  await expect(notifier.notify(event)).resolves.toMatchObject({ delivered: true, attempts: 3 });
+});
+
+test("3.1: Discord transport propagates abandonment", async () => {
+  let releaseSleep!: () => void;
+  const sleeping = new Promise<void>((resolve) => { releaseSleep = resolve; });
+  const fetch = vi.fn(async () => new Response("down", { status: 503 }));
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: discordConfig,
+    fetch: fetch as typeof globalThis.fetch,
+    retryDelaysMs: [0, 10],
+    sleep: async () => sleeping,
+  });
+  const delivery = notifier.notify(event);
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+  notifier.abandon();
+
+  await expect(Promise.race([
+    delivery,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("abandon timed out")), 20)),
+  ])).resolves.toEqual({ delivered: false, attempts: 1, error: "Webhook delivery abandoned" });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  releaseSleep();
+});
+
+test("3.1: Discord transport respects attempt timeout", async () => {
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: discordConfig,
+    attemptTimeoutMs: 1,
+    retryDelaysMs: [0],
+    sleep: async () => undefined,
+    fetch: async (_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }),
+  });
+
+  await expect(notifier.notify(event)).resolves.toMatchObject({ delivered: false, attempts: 1 });
+});
+
+test("3.1: Discord delivery failure does not change terminal truth (returns bounded error)", async () => {
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: discordConfig,
+    retryDelaysMs: [0, 1],
+    sleep: async () => undefined,
+    fetch: async () => { throw new Error("receiver unavailable"); },
+  });
+
+  const result = await notifier.notify(event);
+  expect(result.delivered).toBe(false);
+  expect(result.attempts).toBe(2);
+  expect(result.error).toBe("Webhook delivery failed");
+  // Ensure error doesn't expose secrets or raw body
+  expect(result.error).not.toContain("receiver");
+});
+
+test("3.1: Discord content is bounded (within Discord byte limit)", async () => {
+  let sentBody: string | undefined;
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: discordConfig,
+    fetch: async (_url, init) => {
+      sentBody = String(init?.body);
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  await expect(notifier.notify(event)).resolves.toMatchObject({ delivered: true, attempts: 1 });
+  const parsed = JSON.parse(sentBody!);
+  // Discord limit is 2000 bytes; we use 2000 as DISCORD_CONTENT_MAX_BYTES
+  expect(Buffer.byteLength(parsed.content, "utf8")).toBeLessThanOrEqual(2000);
+});
+
+test("3.1: generic provider still produces canonical JSON with event headers", async () => {
+  let sentBody: string | undefined;
+  let sentHeaders: Record<string, string> | undefined;
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: genericConfig,
+    fetch: async (_url, init) => {
+      sentBody = String(init?.body);
+      sentHeaders = init?.headers as Record<string, string>;
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  await expect(notifier.notify(event)).resolves.toMatchObject({ delivered: true, attempts: 1 });
+  const parsed = JSON.parse(sentBody!);
+  expect(parsed).toHaveProperty("eventId");
+  expect(parsed).toHaveProperty("scope");
+  expect(parsed).toHaveProperty("status");
+  expect(parsed).toHaveProperty("summary");
+  expect(parsed).toHaveProperty("evidenceRefs");
+  expect(sentHeaders!["x-horsepower-event-id"]).toBeTruthy();
+  expect(sentHeaders!["content-type"]).toBe("application/json");
 });

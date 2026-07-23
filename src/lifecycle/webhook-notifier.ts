@@ -1,49 +1,26 @@
 import { createHash, createHmac } from "node:crypto";
 import { message, validateOutputLocale, type OutputLocale } from "../localization/index.js";
+import { renderDiscordWebhook } from "../discord/codec.js";
+import type {
+  TerminalWebhookEvent,
+  WebhookAuth,
+  WebhookConfig,
+  WebhookDeliveryResult,
+  WebhookProvider,
+  RenderedRequest,
+} from "./webhook-types.js";
 
-export type TerminalScope = "change" | "dispatch";
-export type TerminalStatus = "completed" | "blocked_needs_human" | "failed" | "canceled";
-
-export interface TerminalWebhookEvent {
-  eventId: string;
-  timestamp: string;
-  scope: TerminalScope;
-  runId: string;
-  changeId?: string;
-  status: TerminalStatus;
-  outputLocale?: OutputLocale;
-  summary: string;
-  evidenceRefs: readonly string[];
-}
-
-export type WebhookAuth =
-  | { mode: "hmac"; secret: string }
-  | { mode: "bearer"; token: string }
-  | { mode: "none" };
-
-export interface WebhookConfig {
-  url: string;
-  auth: WebhookAuth;
-}
-
-export interface WebhookNotifierOptions {
-  config: WebhookConfig;
-  fetch?: typeof fetch;
-  sleep?: (milliseconds: number) => Promise<void>;
-  retryDelaysMs?: readonly number[];
-  attemptTimeoutMs?: number;
-}
-
-export interface WebhookDeliveryResult {
-  delivered: boolean;
-  attempts: number;
-  error?: string;
-}
+export type { TerminalWebhookEvent, WebhookAuth, WebhookConfig, WebhookDeliveryResult, WebhookProvider, RenderedRequest };
+export type { TerminalScope, TerminalStatus } from "./webhook-types.js";
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+/**
+ * Normalize a raw terminal event into a bounded privacy-safe canonical event.
+ * This is the sole notification truth; the Discord adapter receives only this.
+ */
 function normalizeEvent(value: unknown, authenticationValue?: string): TerminalWebhookEvent | undefined {
   if (value === null || Array.isArray(value) || typeof value !== "object") return undefined;
   const raw = value as Record<string, unknown>;
@@ -91,6 +68,48 @@ function normalizeEvent(value: unknown, authenticationValue?: string): TerminalW
   return event;
 }
 
+/**
+ * Render a provider-specific request body and headers from a canonical event.
+ */
+function renderProviderRequest(
+  event: TerminalWebhookEvent,
+  config: WebhookConfig,
+): RenderedRequest {
+  if (config.provider === "discord") {
+    const discordBody = renderDiscordWebhook(event);
+    return {
+      body: JSON.stringify(discordBody),
+      headers: { "content-type": "application/json" },
+    };
+  }
+
+  // Generic provider: canonical JSON with Horsepower event headers
+  const body = JSON.stringify(event);
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-horsepower-event-id": event.eventId,
+    "x-horsepower-timestamp": event.timestamp,
+  };
+  if (config.auth.mode === "hmac") {
+    headers["x-horsepower-signature"] = createHmac("sha256", config.auth.secret)
+      .update(body)
+      .digest("hex");
+  } else if (config.auth.mode === "bearer") {
+    headers.authorization = `Bearer ${config.auth.token}`;
+  }
+  return { body, headers };
+}
+
+export interface WebhookNotifierOptions {
+  config: WebhookConfig;
+  fetch?: typeof fetch;
+  sleep?: (milliseconds: number) => Promise<void>;
+  retryDelaysMs?: readonly number[];
+  attemptTimeoutMs?: number;
+  /** Include bounded protocol diagnostics for an explicit user-requested probe. */
+  diagnostic?: boolean;
+}
+
 export function createWebhookNotifier(options: WebhookNotifierOptions) {
   const fetchImplementation = options.fetch ?? fetch;
   const sleepImplementation = options.sleep ?? sleep;
@@ -121,27 +140,26 @@ export function createWebhookNotifier(options: WebhookNotifierOptions) {
         : options.config.auth.mode === "bearer"
           ? options.config.auth.token
           : undefined;
+      const provider = options.config.provider ?? "generic";
       const event = normalizeEvent(input, authenticationValue);
-      if (!event) return { delivered: false, attempts: 0, error: "Invalid webhook event" };
-      const body = JSON.stringify(event);
-      const headers: Record<string, string> = {
-        "content-type": "application/json",
-        "x-horsepower-event-id": event.eventId,
-        "x-horsepower-timestamp": event.timestamp,
-      };
-      if (options.config.auth.mode === "hmac") {
-        headers["x-horsepower-signature"] = createHmac("sha256", options.config.auth.secret)
-          .update(body)
-          .digest("hex");
-      } else if (options.config.auth.mode === "bearer") {
-        headers.authorization = `Bearer ${options.config.auth.token}`;
-      }
+      if (!event) return options.diagnostic
+        ? { delivered: false, attempts: 0, provider, failureClass: "invalid_event", error: "Invalid webhook event" }
+        : { delivered: false, attempts: 0, error: "Invalid webhook event" };
+
+      // Provider-specific rendering
+      const { body, headers } = renderProviderRequest(event, options.config);
 
       let attempts = 0;
+      let statusCode: number | undefined;
+      let reachedReceiver = false;
       for (const delay of retryDelays) {
-        if (abandoned) return { delivered: false, attempts, error: "Webhook delivery abandoned" };
+        if (abandoned) return options.diagnostic
+          ? { delivered: false, attempts, provider, failureClass: "abandoned", error: "Webhook delivery abandoned" }
+          : { delivered: false, attempts, error: "Webhook delivery abandoned" };
         if (delay > 0) await Promise.race([sleepImplementation(delay), abandonedSignal]);
-        if (abandoned) return { delivered: false, attempts, error: "Webhook delivery abandoned" };
+        if (abandoned) return options.diagnostic
+          ? { delivered: false, attempts, provider, failureClass: "abandoned", error: "Webhook delivery abandoned" }
+          : { delivered: false, attempts, error: "Webhook delivery abandoned" };
         attempts += 1;
         try {
           const controller = new AbortController();
@@ -154,7 +172,11 @@ export function createWebhookNotifier(options: WebhookNotifierOptions) {
               body,
               signal: controller.signal,
             });
-            if (response.ok) return { delivered: true, attempts };
+            reachedReceiver = true;
+            statusCode = response.status;
+            if (response.ok) return options.diagnostic
+              ? { delivered: true, attempts, provider, statusCode }
+              : { delivered: true, attempts };
           } finally {
             clearTimeout(timeout);
             activeControllers.delete(controller);
@@ -163,7 +185,16 @@ export function createWebhookNotifier(options: WebhookNotifierOptions) {
           // The fixed result below deliberately omits receiver errors and credentials.
         }
       }
-      return { delivered: false, attempts, error: "Webhook delivery failed" };
+      return options.diagnostic
+        ? {
+          delivered: false,
+          attempts,
+          provider,
+          failureClass: reachedReceiver ? "receiver_rejected" : "transport_failed",
+          ...(statusCode === undefined ? {} : { statusCode }),
+          error: "Webhook delivery failed",
+        }
+        : { delivered: false, attempts, error: "Webhook delivery failed" };
     },
   };
 }

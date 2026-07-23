@@ -52,6 +52,26 @@ test("complete configuration orders locale, Skill education/audit, webhook, and 
   expect(ui.confirmSkillRisk).not.toHaveBeenCalled();
 });
 
+test("complete configuration passes explicit Discord provider without changing its none auth", async () => {
+  const configuration = {
+    provider: "discord" as const,
+    url: "https://discord.example.invalid/webhook",
+    auth: { mode: "none" as const },
+    dispatch: true,
+  };
+  const ui = terminal({
+    chooseWebhookAction: vi.fn(async () => "configure" as const),
+    readWebhookConfiguration: vi.fn(async () => configuration),
+  });
+  const applyWebhook = vi.fn(async () => "configured" as const);
+  const result = await runCompleteConfiguration({
+    initialLocale: "en", terminal: ui, persistLocale: vi.fn(), auditSkills: async () => cleanAudit,
+    applyWebhook, setupModels: async () => "configured",
+  });
+  expect(applyWebhook).toHaveBeenCalledWith("configure", configuration);
+  expect(result.webhook.status).toBe("configured");
+});
+
 test("default-No Skill risk refusal stops webhook and model changes", async () => {
   const ui = terminal({ confirmSkillRisk: vi.fn(async () => false) });
   const applyWebhook = vi.fn();

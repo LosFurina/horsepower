@@ -49,49 +49,405 @@ test("registers only Horsepower-namespaced tools and commands without altering c
 
   expect(pi.tools.map((tool) => tool.name)).toEqual(["other_tool", "horsepower_subagent"]);
   expect(pi.commands.map((command) => command.name)).toEqual([
-    "team", "horsepower-workers", "horsepower-doctor", "horsepower-campaign", "horsepower-review-authorize",
+    "team", "horsepower-workers", "horsepower-doctor", "horsepower-campaign", "horsepower-campaign-pause", "horsepower-review-authorize",
   ]);
   expect(pi.tools.some((tool) => ["subagent", "team_create"].includes(String(tool.name)))).toBe(false);
 });
 
-test("automatic compaction queues one bounded continuation after settlement", async () => {
-  const pi = fakePi();
-  const prepare = vi.fn(async (input: { campaignId: string; projectId: string; generation?: number }) => ({
-    campaignId: input.campaignId, projectId: input.projectId, changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent" as const, generation: input.generation ?? 1,
+function campaignRuntime(overrides: {
+  prepare?: ReturnType<typeof vi.fn>;
+  candidate?: Record<string, unknown> | undefined | (() => Record<string, unknown> | undefined);
+  locale?: "en" | "zh-CN";
+} = {}) {
+  const prepare = overrides.prepare ?? vi.fn(async (input: { campaignId: string; projectId: string; generation?: number }) => ({
+    campaignId: input.campaignId,
+    projectId: input.projectId,
+    changeId: "change-a",
+    selectedTaskIds: ["1.1", "2.2"],
+    mode: "multi_agent" as const,
+    generation: input.generation ?? 1,
   }));
+  const candidate = overrides.candidate === undefined && !("candidate" in overrides)
+    ? { campaignId: "campaign-1", projectId: "/active/project", changeId: "change-a", selectedTaskIds: ["1.1", "2.2"], mode: "multi_agent" as const, generation: 0, disposition: "active" as const }
+    : overrides.candidate;
   const runtime = {
-    execute: vi.fn(), currentCampaignContinuation: vi.fn(() => ({ campaignId: "campaign-1", projectId: "/active/project", changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent" as const, generation: 0 })),
+    execute: vi.fn(),
+    currentCampaignContinuation: typeof candidate === "function" ? vi.fn(candidate) : vi.fn(() => candidate),
     prepareCampaignContinuation: prepare,
+    clearCampaignContinuation: vi.fn(),
+    pauseCampaignContinuation: vi.fn(() => {
+      const current = typeof candidate === "function" ? candidate() : candidate;
+      return current ? { ...current, disposition: "paused" } : undefined;
+    }),
   };
+  return { prepare, runtime, locale: overrides.locale ?? "en" as const };
+}
+
+function compactCtx(overrides: { idle?: boolean; pending?: boolean; notify?: ReturnType<typeof vi.fn> } = {}) {
+  return {
+    cwd: "/active/project",
+    isIdle: () => overrides.idle ?? true,
+    hasPendingMessages: () => overrides.pending ?? false,
+    ui: { notify: overrides.notify ?? vi.fn() },
+  };
+}
+
+async function registerCompactionExtension(pi: FakePi, runtime: unknown, locale: "en" | "zh-CN" = "en") {
   const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
-  registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: runtime, cleanup: vi.fn(), abandon: vi.fn() }) });
-  const settled = { cwd: "/active/project", isIdle: () => true, hasPendingMessages: () => false };
+  registerHorsepowerExtension(pi as never, {
+    acquireRuntime: () => ({ value: runtime as never, cleanup: vi.fn(), abandon: vi.fn() }),
+    resolveOutputLocale: async () => locale,
+  });
+}
+
+async function flushMicrotasks(times = 4) {
+  for (let i = 0; i < times; i += 1) await Promise.resolve();
+}
+
+test("threshold compaction queues exactly one bounded continuation after settlement", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const notify = vi.fn();
+  const settled = compactCtx({ notify });
   pi.handlers.get("session_before_compact")![0]!({ reason: "threshold", willRetry: false }, settled);
-  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, settled);
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: { type: "compaction", summary: "secret /private/path and sk-live-abc" } }, settled);
   pi.handlers.get("agent_settled")![0]!({}, settled);
   pi.handlers.get("agent_settled")![0]!({}, settled);
-  await Promise.resolve();
+  await flushMicrotasks();
+  expect(prepare).toHaveBeenCalledOnce();
+  expect(prepare).toHaveBeenCalledWith({ campaignId: "campaign-1", projectId: "/active/project", generation: 1 });
+  expect(pi.messages).toHaveLength(1);
+  const payload = pi.messages[0]!;
+  expect(payload.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+  expect(payload.message).toEqual(expect.objectContaining({
+    customType: "horsepower-campaign-continuation",
+    display: false,
+    details: { campaignId: "campaign-1", changeId: "change-a", selectedTaskIds: ["1.1", "2.2"], mode: "multi_agent" },
+  }));
+  expect((payload.message as { content: string }).content).toContain("campaign-1");
+  expect((payload.message as { content: string }).content).toContain("change-a");
+  expect((payload.message as { content: string }).content).toContain("1.1,2.2");
+  expect((payload.message as { content: string }).content).toContain("multi_agent");
+  expect(JSON.stringify(payload)).not.toContain("/private");
+  expect(JSON.stringify(payload)).not.toContain("sk-live");
+  expect(JSON.stringify(payload)).not.toContain("summary");
+  expect(Object.keys((payload.message as { details: object }).details).sort()).toEqual(["campaignId", "changeId", "mode", "selectedTaskIds"]);
+  expect(notify).toHaveBeenCalledWith(expect.stringContaining("campaign-1"), "info");
+});
+
+test("overflow without Pi retry continues once after agent_settled", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const settled = compactCtx();
+  pi.handlers.get("session_before_compact")![0]!({ reason: "overflow", willRetry: false }, settled);
+  pi.handlers.get("session_compact")![0]!({ reason: "overflow", willRetry: false, compactionEntry: {} }, settled);
+  pi.handlers.get("agent_settled")![0]!({}, settled);
+  await flushMicrotasks();
   expect(prepare).toHaveBeenCalledOnce();
   expect(pi.messages).toHaveLength(1);
-  expect((pi.messages[0]!.message as any).details).toEqual(expect.objectContaining({ campaignId: "campaign-1", changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent", generation: 1 }));
-  expect(JSON.stringify(pi.messages[0])).not.toContain("/private");
 });
 
 test.each([
-  [{ reason: "manual", willRetry: false, compactionEntry: {} }, "manual"],
-  [{ reason: "overflow", willRetry: true, compactionEntry: {} }, "native retry"],
-  [{ reason: "threshold", willRetry: false }, "failed/aborted"],
-] as const)("compaction stop case $1", async (event, _label) => {
+  { label: "manual", event: { reason: "manual" as const, willRetry: false, compactionEntry: {} } },
+  { label: "native retry", event: { reason: "overflow" as const, willRetry: true, compactionEntry: {} } },
+  { label: "failed/aborted missing entry", event: { reason: "threshold" as const, willRetry: false } },
+  { label: "null entry", event: { reason: "threshold" as const, willRetry: false, compactionEntry: null } },
+])("compaction stop case $label", async ({ event }) => {
   const pi = fakePi();
-  const prepare = vi.fn(async () => undefined);
-  const runtime = { execute: vi.fn(), currentCampaignContinuation: vi.fn(() => ({ campaignId: "c", projectId: "/active/project", changeId: "x", selectedTaskIds: ["1.1"], mode: "main_agent" as const, generation: 0 })), prepareCampaignContinuation: prepare };
-  const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
-  registerHorsepowerExtension(pi as never, { acquireRuntime: () => ({ value: runtime, cleanup: vi.fn(), abandon: vi.fn() }) });
-  const ctx = { cwd: "/active/project", isIdle: () => true, hasPendingMessages: () => false };
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  pi.handlers.get("session_before_compact")![0]!({ reason: event.reason, willRetry: event.willRetry }, ctx);
   pi.handlers.get("session_compact")![0]!(event, ctx);
   pi.handlers.get("agent_settled")![0]!({}, ctx);
-  await Promise.resolve();
-  expect(prepare).not.toHaveBeenCalled(); expect(pi.messages).toHaveLength(0);
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test("pending messages or non-idle settlement consume the generation without continuation", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const arm = compactCtx();
+  pi.handlers.get("session_before_compact")![0]!({ reason: "threshold", willRetry: false }, arm);
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, arm);
+  pi.handlers.get("agent_settled")![0]!({}, compactCtx({ idle: false, pending: false }));
+  pi.handlers.get("agent_settled")![0]!({}, compactCtx({ idle: true, pending: true }));
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+  // Later settlement cannot revive the generation after other work won.
+  pi.handlers.get("agent_settled")![0]!({}, compactCtx());
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test.each([
+  ["settled-before-compact"],
+  ["compact-before-settled"],
+  ["before-compact-interleaved"],
+] as const)("event-order permutation %s remains exactly-once", async (order) => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  const before = () => pi.handlers.get("session_before_compact")![0]!({ reason: "threshold", willRetry: false }, ctx);
+  const compact = () => pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  const settled = () => pi.handlers.get("agent_settled")![0]!({}, ctx);
+  if (order === "settled-before-compact") {
+    settled();
+    before();
+    compact();
+    settled();
+  } else if (order === "compact-before-settled") {
+    before();
+    compact();
+    settled();
+    settled();
+  } else {
+    before();
+    settled();
+    compact();
+    before();
+    compact();
+    settled();
+  }
+  await flushMicrotasks();
+  expect(prepare).toHaveBeenCalledOnce();
+  expect(pi.messages).toHaveLength(1);
+});
+
+test("manual before_compact clears a previously armed automatic generation", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  pi.handlers.get("session_before_compact")![0]!({ reason: "manual", willRetry: false }, ctx);
+  pi.handlers.get("session_compact")![0]!({ reason: "manual", willRetry: false, compactionEntry: {} }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test("willRetry overflow does not enqueue Horsepower continuation", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  pi.handlers.get("session_before_compact")![0]!({ reason: "overflow", willRetry: true }, ctx);
+  // before_compact clears; compact with willRetry also refuses to arm.
+  pi.handlers.get("session_compact")![0]!({ reason: "overflow", willRetry: true, compactionEntry: { summary: "retry me" } }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test.each([
+  ["paused"],
+  ["blocked"],
+  ["terminal"],
+  ["superseded"],
+] as const)("disposition %s suppresses arming", async (disposition) => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime({
+    candidate: { campaignId: "campaign-1", projectId: "/active/project", changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent", generation: 0, disposition },
+  });
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test("prepare rejection emits stop notice and creates no follow-up side effect", async () => {
+  const pi = fakePi();
+  const prepare = vi.fn(async () => undefined);
+  const { runtime } = campaignRuntime({ prepare });
+  await registerCompactionExtension(pi, runtime);
+  const notify = vi.fn();
+  const ctx = compactCtx({ notify });
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(prepare).toHaveBeenCalledOnce();
+  expect(pi.messages).toHaveLength(0);
+  expect(notify).toHaveBeenCalledWith(expect.stringMatching(/campaign-1|suppressed|抑制/u), "info");
+});
+
+test("session replacement clears arm and campaign continuation lease", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  await pi.handlers.get("session_shutdown")![0]!({ reason: "new" }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(runtime.clearCampaignContinuation).toHaveBeenCalledOnce();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test("pending work or a project change during async revalidation prevents delivery", async () => {
+  for (const race of ["pending", "project"] as const) {
+    const pi = fakePi();
+    let resolvePreparation!: (value: {
+      campaignId: string; projectId: string; changeId: string; selectedTaskIds: string[];
+      mode: "multi_agent"; generation: number;
+    }) => void;
+    const prepare = vi.fn(() => new Promise((resolve) => { resolvePreparation = resolve; }));
+    const { runtime } = campaignRuntime({ prepare });
+    await registerCompactionExtension(pi, runtime);
+    let pending = false;
+    const ctx = {
+      cwd: "/active/project",
+      isIdle: () => true,
+      hasPendingMessages: () => pending,
+      ui: { notify: vi.fn() },
+    };
+    pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+    pi.handlers.get("agent_settled")![0]!({}, ctx);
+    await flushMicrotasks();
+    if (race === "pending") pending = true;
+    else ctx.cwd = "/other/project";
+    resolvePreparation({ campaignId: "campaign-1", projectId: "/active/project", changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent", generation: 1 });
+    await flushMicrotasks();
+    expect(pi.messages).toHaveLength(0);
+  }
+});
+
+test("settlement from another project cannot consume an armed generation", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const armed = compactCtx();
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, armed);
+  const other = { ...compactCtx(), cwd: "/other/project" };
+  pi.handlers.get("agent_settled")![0]!({}, other);
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+  pi.handlers.get("agent_settled")![0]!({}, armed);
+  await flushMicrotasks();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test("a newly started turn invalidates in-flight post-compaction delivery", async () => {
+  const pi = fakePi();
+  let resolvePreparation!: (value: {
+    campaignId: string; projectId: string; changeId: string; selectedTaskIds: string[];
+    mode: "multi_agent"; generation: number;
+  }) => void;
+  const prepare = vi.fn(() => new Promise((resolve) => { resolvePreparation = resolve; }));
+  const { runtime } = campaignRuntime({ prepare });
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  pi.handlers.get("agent_start")![0]!({}, ctx);
+  resolvePreparation({ campaignId: "campaign-1", projectId: "/active/project", changeId: "change-a", selectedTaskIds: ["1.1"], mode: "multi_agent", generation: 1 });
+  await flushMicrotasks();
+  expect(prepare).toHaveBeenCalledOnce();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test("a cleared or superseded arm cannot send after async revalidation settles", async () => {
+  const pi = fakePi();
+  let resolvePreparation!: (value: {
+    campaignId: string;
+    projectId: string;
+    changeId: string;
+    selectedTaskIds: string[];
+    mode: "multi_agent";
+    generation: number;
+  }) => void;
+  const prepare = vi.fn(() => new Promise((resolve) => { resolvePreparation = resolve; }));
+  const { runtime } = campaignRuntime({ prepare });
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(prepare).toHaveBeenCalledOnce();
+
+  // A new compaction attempt supersedes the in-flight arm before revalidation returns.
+  pi.handlers.get("session_before_compact")![0]!({ reason: "threshold", willRetry: false }, ctx);
+  resolvePreparation({
+    campaignId: "campaign-1",
+    projectId: "/active/project",
+    changeId: "change-a",
+    selectedTaskIds: ["1.1", "2.2"],
+    mode: "multi_agent",
+    generation: 1,
+  });
+  await flushMicrotasks();
+  expect(pi.messages).toHaveLength(0);
+});
+
+test("repeated automatic generations each continue at most once", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime);
+  const ctx = compactCtx();
+  for (const generation of [1, 2]) {
+    pi.handlers.get("session_before_compact")![0]!({ reason: "threshold", willRetry: false }, ctx);
+    pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: { id: generation } }, ctx);
+    pi.handlers.get("agent_settled")![0]!({}, ctx);
+    pi.handlers.get("agent_settled")![0]!({}, ctx);
+    await flushMicrotasks();
+  }
+  expect(prepare).toHaveBeenCalledTimes(2);
+  expect(pi.messages).toHaveLength(2);
+  expect(prepare.mock.calls.map((call) => call[0].generation)).toEqual([1, 2]);
+});
+
+test("campaign pause command records an explicit stop and clears an armed generation", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime();
+  await registerCompactionExtension(pi, runtime, "zh-CN");
+  const ctx = compactCtx();
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  const pause = pi.commands.find((command) => command.name === "horsepower-campaign-pause")!.options.handler as (args: string, ctx: unknown) => Promise<void>;
+  await pause("", ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(runtime.pauseCampaignContinuation).toHaveBeenCalledWith("/active/project");
+  expect(prepare).not.toHaveBeenCalled();
+  expect(pi.messages).toHaveLength(0);
+  expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/暂停|campaign-1/u), "info");
+});
+
+test("localized zh-CN continuation keeps stable identity tokens", async () => {
+  const pi = fakePi();
+  const { prepare, runtime } = campaignRuntime({ locale: "zh-CN" });
+  await registerCompactionExtension(pi, runtime, "zh-CN");
+  const notify = vi.fn();
+  const ctx = compactCtx({ notify });
+  pi.handlers.get("session_compact")![0]!({ reason: "threshold", willRetry: false, compactionEntry: {} }, ctx);
+  pi.handlers.get("agent_settled")![0]!({}, ctx);
+  await flushMicrotasks();
+  expect(prepare).toHaveBeenCalledOnce();
+  const content = (pi.messages[0]!.message as { content: string }).content;
+  expect(content).toMatch(/继续|campaign-1/u);
+  expect(content).toContain("campaign-1");
+  expect(content).toContain("change-a");
+  expect(content).toContain("1.1,2.2");
+  expect(content).toContain("multi_agent");
+  expect((pi.messages[0]!.message as { details: object }).details).toEqual({
+    campaignId: "campaign-1", changeId: "change-a", selectedTaskIds: ["1.1", "2.2"], mode: "multi_agent",
+  });
+  expect(notify.mock.calls[0]![0]).toMatch(/自动压缩|campaign-1/u);
 });
 
 test("user commands create implementation mode and bounded reviewer authorization", async () => {

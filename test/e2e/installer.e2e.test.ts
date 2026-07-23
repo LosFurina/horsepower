@@ -232,7 +232,7 @@ test("post-activation configuration failure preserves prior webhook bytes and in
   const before = await readFile(settingsPath);
   const ttyInput = join(fixturePaths.root, "tty-input-invalid");
   const ttyOutput = join(fixturePaths.root, "tty-output-invalid");
-  await writeFile(ttyInput, "configure\nhttps://example.test/hook\ninvalid-auth\n");
+  await writeFile(ttyInput, "configure\ngeneric\nhttps://example.test/hook\ninvalid-auth\n");
   await writeFile(ttyOutput, "");
   await expect(runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput, ["--locale", "zh-CN"])).resolves.toMatchObject({ stdout: expect.stringContaining("Horsepower 安装成功") });
   expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual({ ...JSON.parse(before.toString("utf8")), outputLocale: "zh-CN" });
@@ -257,7 +257,7 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
   const ttyInput = join(fixturePaths.root, "tty-input-bearer");
   const ttyOutput = join(fixturePaths.root, "tty-output-bearer");
   const sampleValue = "fixture-bearer-value-123";
-  await writeFile(ttyInput, `1\nconfigure\nhttps://example.test/hook\nbearer\n${sampleValue}\n\nskip\n`);
+  await writeFile(ttyInput, `1\nconfigure\ngeneric\nhttps://example.test/hook\nbearer\n${sampleValue}\n\nskip\n`);
   await writeFile(ttyOutput, "");
   const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   expect(`${await readFile(ttyOutput, "utf8")}${result.stdout}${result.stderr}`).not.toContain(sampleValue);
@@ -348,7 +348,7 @@ test("interactive HMAC webhook setup stores private credentials and dispatch opt
   const ttyInput = join(fixturePaths.root, "tty-input-hmac");
   const ttyOutput = join(fixturePaths.root, "tty-output-hmac");
   const sampleValue = "fixture-hmac-value-1234";
-  await writeFile(ttyInput, `1\nconfigure\nhttps://example.test/hook\nhmac\n${sampleValue}\ny\nskip\n`);
+  await writeFile(ttyInput, `1\nconfigure\ngeneric\nhttps://example.test/hook\nhmac\n${sampleValue}\ny\nskip\n`);
   await writeFile(ttyOutput, "");
   const result = await runInteractiveInstaller(fixturePaths, ttyInput, ttyOutput);
   const output = `${await readFile(ttyOutput, "utf8")}\n${result.stdout}\n${result.stderr}`;

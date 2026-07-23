@@ -61,6 +61,32 @@ test("guided setup renders every human prompt in the effective locale while iden
   expect(rendered).not.toContain("Next:");
 });
 
+test("interactive Discord webhook selection fixes direct auth to none and stays localized", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-webhook-terminal-discord-"));
+  roots.push(root);
+  const input = join(root, "input");
+  const output = join(root, "output");
+  await writeFile(input, "2\nhttps://discord.example.invalid/webhook\ny\n");
+  await writeFile(output, "");
+  process.env.HORSEPOWER_TTY_INPUT = input;
+  process.env.HORSEPOWER_TTY_OUTPUT = output;
+  const { createSetupTerminal } = await import("../../src/cli/terminal.js");
+  const terminal = createSetupTerminal("zh-CN");
+
+  await expect(terminal.readWebhookConfiguration("zh-CN")).resolves.toEqual({
+    provider: "discord",
+    url: "https://discord.example.invalid/webhook",
+    auth: { mode: "none" },
+    dispatch: true,
+  });
+  const rendered = await readFile(output, "utf8");
+  expect(rendered).toContain("Webhook provider");
+  expect(rendered).toContain("generic");
+  expect(rendered).toContain("discord");
+  expect(rendered).not.toContain("HMAC secret");
+  expect(rendered).not.toContain("Bearer token");
+});
+
 test("interactive menus render numbered choices and accept useful Enter defaults", async () => {
   const root = await mkdtemp(join(tmpdir(), "horsepower-setup-terminal-defaults-"));
   roots.push(root);

@@ -142,17 +142,23 @@ export function createSetupTerminal(initialLocale: OutputLocale = "en"): SetupTe
       return (await select(question, write, current, message(current, "configure.webhookAction", { actions: actions.join("/") }), actions, { color, defaultChoice: actions[0] })) ?? "cancel";
     },
     async readWebhookConfiguration(current): Promise<WebhookConfigurationInput | undefined> {
+      const provider = await select(question, write, current, message(current, "configure.webhookProvider"), ["generic", "discord"] as const, { color, defaultChoice: "generic" });
+      if (!provider) return undefined;
       const url = await question(message(current, "configure.webhookUrl"));
       if (!url) return undefined;
-      const mode = (await select(question, write, current, message(current, "configure.webhookAuth"), ["hmac", "bearer", "none"] as const)) ?? "hmac";
       let auth: WebhookConfigurationInput["auth"];
-      if (mode === "hmac") {
-        const credentialValue = await question(message(current, "configure.webhookSecret")); if (!credentialValue) return undefined; auth = { mode, secret: credentialValue };
-      } else if (mode === "bearer") {
-        const credentialValue = await question(message(current, "configure.webhookToken")); if (!credentialValue) return undefined; auth = { mode, token: credentialValue };
-      } else auth = { mode };
+      if (provider === "discord") {
+        auth = { mode: "none" };
+      } else {
+        const mode = (await select(question, write, current, message(current, "configure.webhookAuth"), ["hmac", "bearer", "none"] as const)) ?? "hmac";
+        if (mode === "hmac") {
+          const credentialValue = await question(message(current, "configure.webhookSecret")); if (!credentialValue) return undefined; auth = { mode, secret: credentialValue };
+        } else if (mode === "bearer") {
+          const credentialValue = await question(message(current, "configure.webhookToken")); if (!credentialValue) return undefined; auth = { mode, token: credentialValue };
+        } else auth = { mode };
+      }
       const dispatch = await question(message(current, "configure.webhookDispatch"));
-      return { url, auth, dispatch: dispatch === "y" || dispatch === "Y" || dispatch?.toLowerCase() === "yes" };
+      return { provider, url, auth, dispatch: dispatch === "y" || dispatch === "Y" || dispatch?.toLowerCase() === "yes" };
     },
     async chooseModelAction(current) {
       await write(`\n${ansi(color, "1;36", current === "zh-CN" ? "模型设置" : "Model setup")}\n\n`);

@@ -588,7 +588,7 @@ const exactPlaceholders = new Set([
   "project/craft", "p/m", "unknown/model",
   "provider", "model", "provider-model", "provider-judge", "provider-util", "provider-strong", "provider-craft",
   "provider-cheap", "provider-vision", "provider-ta", "provider-za", "provider-missing", "project-craft",
-  "mutated-model", "other-model", "pm", "unknown-model", "token-value",
+  "mutated-model", "other-model", "pm", "unknown-model", "token-value", "generic", "discord",
   "remove-this-credential", "never-print-this", "stale-credential", "malformed-project-secret",
   "incompatible-project-secret", "valid-secret", "incompatible-project-token", "stale-project-token",
   "notification-credential", "auth-credential", "array-credential", "global-credential", "project-secret-token",
@@ -753,8 +753,14 @@ const githubCredentialPattern = new RegExp(
   "mu",
 );
 const legacyWorkflowNames = [["Agent", "Flow"].join("")];
+const discordWebhookHost = String.raw`(?:discord(?:app)?\.com)`;
+const discordWebhookPath = String.raw`\/api\/webhooks\/\d{16,24}\/[A-Za-z0-9._-]{40,}`;
+const discordWebhookPattern = new RegExp(String.raw`https:\/\/(?:canary\.|ptb\.)?${discordWebhookHost}${discordWebhookPath}`, "imu");
+const discordWebhookTokenPattern = /\bdiscord[_-]?(?:webhook[_-]?)?token\s*[:=]\s*["']?[A-Za-z0-9._-]{40,}/imu;
 
 const forbiddenPatterns: ReadonlyArray<{ id: string; pattern: RegExp }> = [
+  { id: "discord-webhook", pattern: discordWebhookPattern },
+  { id: "credential", pattern: discordWebhookTokenPattern },
   { id: "credential", pattern: githubCredentialPattern },
   { id: "credential", pattern: /\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{20,}\b|\bAIza[A-Za-z0-9_-]{35}\b|\bAKIA[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{16,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/imu },
   { id: "machine-path", pattern: /(?:\/Users\/[^/\s"'`<>{}\[\]]+|\/home\/[^/\s"'`<>{}\[\]]+)(?:\/|(?=$|[\s"'`<>{}\[\],.;:)]))|[A-Za-z]:\\Users\\[^\\\s"'`<>{}\[\]]+\\/mu },

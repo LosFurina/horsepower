@@ -24,7 +24,8 @@ Use `horsepower_subagent` only for work the Captain explicitly chooses to dispat
 - In `main_agent` mode, do not dispatch a worker unless the user separately authorizes a bounded reviewer with `/horsepower-review-authorize`; reviewer output never authorizes a fixer or another review.
 - In `multi_agent` mode, delegate substantive work explicitly; the Captain retains scope, budget, finding deduplication, verification, and final judgment.
 - Include the active `implementationCampaignId`, `workKind`, and a comma-separated `taskScope` containing only exact selected OpenSpec task IDs in every work-producing dispatch. Never use ranges, free-form labels, completed tasks, or IDs from another change.
-- Campaign creation triggers the Captain automatically; never ask the user to send `go`.
+- Campaign creation triggers the Captain automatically; never ask the user to send `go`. The same eligible active campaign also continues automatically after successful automatic Pi context compaction when Pi has no native retry; do not ask for `go` after compaction.
+- Automatic post-compaction continuation preserves the exact confirmed change, ordered task IDs, and `multi_agent` or `main_agent` mode. Never infer, expand, reorder, or switch scope/mode from a compaction summary. Manual `/compact` does not authorize continuation; scope drift, explicit pause/block/terminal state, pending user work, or session/project replacement must stop it and require the appropriate fresh user action. `/horsepower-campaign-pause` records an explicit pause for the current project; resuming requires a newly confirmed `/horsepower-campaign`, never `go`.
 - Treat live worker progress as observational. Every worker display identifies dispatch name, agent and role, requested/resolved slot, concrete model, thinking, and handoff mode.
 - If a dispatch returns structured `failed` or `canceled`, report it immediately. Never wait silently, claim completion from an absent result, or accept a managed handoff without a validated report.
 - Present principal user-facing conclusions in the `outputLocale` returned by Horsepower (`en` or `zh-CN`), even when worker briefs, reports, reviewer discussion, or raw evidence are English. Preserve machine fields, commands, paths, IDs, digests, artifact references, and raw evidence verbatim.
@@ -47,6 +48,14 @@ Use `horsepower_subagent` only for work the Captain explicitly chooses to dispat
 - Every one-shot and persistent worker runs with `--no-skills`: no global, project, settings, package, or extension-contributed Skill is discovered by workers, and there is no Skill allowlist escape hatch.
 - The main Captain remains in the user's normal, user-controlled Pi environment. `horsepower skill-audit` observes only statically resolvable global/current-project exposure; it does not load extensions, change Skill configuration, or predict future projects.
 - Treat workers as process-isolated, not security-isolated; they share the user's filesystem, environment, credentials, and network.
+
+## Webhook operations
+
+- Webhooks use an explicit `generic` or `discord` provider. Missing provider is legacy `generic`; never infer or switch provider from a URL.
+- `generic` preserves canonical JSON and supports HMAC, Bearer, or `none`. Direct Discord incoming webhooks require `auth.mode=none`; the URL itself is the credential. Never print or copy that URL into reports, prompts, handoffs, diagnostics, or committed fixtures.
+- Use `horsepower webhook test` only when the user explicitly requests a visible delivery probe. It exercises the production normalization, provider adapter, timeout, and transport path and returns bounded provider/status/attempt evidence. `horsepower doctor` is static and network-side-effect free; never claim receiver health from doctor.
+- Delivery and retry are bounded and current-process only. Pi exit abandons pending retry; there is no persistent outbox. Notification failure cannot change or infer change/dispatch terminal truth.
+- Migrate legacy generic settings by leaving them unchanged. Reconfigure an actual Discord endpoint explicitly as `discord`; do not carry generic HMAC/Bearer auth into Discord. Rotate URLs, HMAC secrets, or Bearer tokens transactionally, test the replacement explicitly, then revoke the old credential. Disablement removes webhook credentials.
 
 ## Verification and review discipline
 

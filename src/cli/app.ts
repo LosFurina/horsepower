@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readdir, readlink, rm, symlink } from "node:fs/
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { readJsonObject, writeJsonObjects, type JsonObject, type JsonWrite } from "../config/json-store.js";
 import { resolveHorsepowerPaths } from "../config/paths.js";
-import { isCredentialKey, parseWebhookSettings, redactCredentials, validateWebhookSettingsShape, validateWebhookUrl } from "../config/webhook.js";
+import { isCredentialKey, parseWebhookSettings, redactCredentials, validateWebhookProvider, validateWebhookSettingsShape, validateWebhookUrl } from "../config/webhook.js";
 import { createWebhookNotifier, type WebhookAuth } from "../lifecycle/webhook-notifier.js";
 import { validateOpenSpecInstallation } from "../openspec/boundary.js";
 import { parseReleaseCompatibility, validateReleaseCompatibility } from "../release-manifest.js";
@@ -16,9 +16,89 @@ import type { ModelCapabilityProbe } from "../runtime/model-capability-probe.js"
 import { collectGuidedSetup, commitSetup, requiredSetupSlots, SetupFailure, type SetupTerminal } from "./setup.js";
 import { discoverAgents } from "../agents/catalog.js";
 import { ConfigurationFailure, runCompleteConfiguration, type CompleteConfigurationTerminal, type WebhookConfigurationInput } from "./configuration.js";
+import { createDefaultTransport, runUpdate, type UpdateTransport, type UpdateResult } from "../release/updater.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string }
-interface CommandResult { data: unknown; ok?: boolean; exitCode?: number; message?: string; summaryId?: MessageId; outputLocale?: OutputLocale }
+interface CommandResult { data: unknown; ok?: boolean; exitCode?: number; message?: string; summaryId?: MessageId; summaryVariables?: () => Readonly<Record<string, string | number>>; outputLocale?: OutputLocale }
+
+type HelpNode = {
+  name: string;
+  description: string;
+  descriptionZh: string;
+  usage: string;
+  arguments?: readonly string[];
+  options?: readonly string[];
+  examples?: readonly string[];
+  children?: readonly HelpNode[];
+};
+
+const leaf = (name: string, description: string, descriptionZh: string, usage: string, options: readonly string[] = [], arguments_: readonly string[] = []): HelpNode =>
+  ({ name, description, descriptionZh, usage, options, arguments: arguments_, examples: [usage] });
+
+const helpRegistry: HelpNode = {
+  name: "horsepower", description: "Horsepower command-line interface", descriptionZh: "Horsepower 命令行界面", usage: "horsepower <command> [options]", options: ["--json", "-h", "--help"], examples: ["horsepower configure --interactive  # complete locale, Skill, webhook, and model journey", "horsepower setup --interactive  # model slots only", "horsepower help update"],
+  children: [
+    leaf("help", "Show command help", "显示命令帮助", "horsepower help [path]", ["--json"], ["path"]),
+    { ...leaf("configure", "Configure locale, Skills, webhooks, and models", "配置语言、Skill、webhook 和模型", "horsepower configure [options]", ["--interactive", "--locale en|zh-CN", "--scope global|project"]), examples: ["horsepower configure --interactive  # complete locale, Skill, webhook, and model journey", "horsepower setup --interactive  # model slots only"] },
+    leaf("setup", "Configure model slots", "配置模型 slot", "horsepower setup [options]", ["--interactive"]),
+    leaf("slots", "Show effective model slots", "显示生效的模型 slot", "horsepower slots", ["--json"]),
+    leaf("set", "Set a model slot", "设置模型 slot", "horsepower set SLOT --model MODEL --thinking LEVEL", ["--model MODEL", "--thinking LEVEL", "--scope global|project"], ["SLOT"]),
+    leaf("unset", "Remove a model slot", "移除模型 slot", "horsepower unset SLOT", ["--scope global|project"], ["SLOT"]),
+    { name: "webhook", description: "Configure or test webhooks", descriptionZh: "配置或测试 webhook", usage: "horsepower webhook <action>", options: [], examples: ["horsepower webhook test"], children: [
+      leaf("configure", "Configure webhook delivery", "配置 webhook 投递", "horsepower webhook configure --provider PROVIDER --url URL --auth MODE", ["--provider generic|discord", "--url URL", "--auth hmac|bearer|none", "--change|--no-change", "--dispatch|--no-dispatch"]),
+      leaf("skip", "Skip webhook setup", "跳过 webhook 设置", "horsepower webhook skip"),
+      leaf("disable", "Disable webhook delivery", "停用 webhook 投递", "horsepower webhook disable"),
+      leaf("test", "Send an explicit webhook test", "发送显式 webhook 测试", "horsepower webhook test"),
+    ] },
+    leaf("skill-audit", "Audit external Skill exposure", "审计外部 Skill 暴露", "horsepower skill-audit", ["--locale en|zh-CN", "--json"]),
+    leaf("doctor", "Check configuration and installation", "检查配置与安装", "horsepower doctor", ["--installation-only", "--json"]),
+    leaf("update", "Update to an official release", "更新到官方 release", "horsepower update [--version VERSION]", ["--version VERSION", "--json"]),
+    leaf("preflight", "Verify a staged release", "验证暂存 release", "horsepower preflight STAGED_ROOT --version VERSION", ["--version VERSION"], ["STAGED_ROOT"]),
+    leaf("enable", "Enable Pi integration", "启用 Pi 集成", "horsepower enable"),
+    leaf("disable", "Disable Pi integration", "停用 Pi 集成", "horsepower disable"),
+    leaf("uninstall", "Uninstall code while preserving data", "卸载代码并保留数据", "horsepower uninstall"),
+    leaf("purge", "Permanently remove user data", "永久删除用户数据", "horsepower purge --yes", ["--yes"]),
+    { name: "handoff", description: "Inspect persisted handoffs", descriptionZh: "检查持久化 handoff", usage: "horsepower handoff <action>", options: [], examples: ["horsepower handoff list"], children: [
+      leaf("list", "List project handoffs", "列出项目 handoff", "horsepower handoff list"),
+      leaf("inspect", "Inspect one handoff", "检查一个 handoff", "horsepower handoff inspect RUN_ID", [], ["RUN_ID"]),
+      leaf("clean", "Remove one handoff", "删除一个 handoff", "horsepower handoff clean RUN_ID", [], ["RUN_ID"]),
+      leaf("clean-terminal", "Remove terminal handoffs", "删除终态 handoff", "horsepower handoff clean-terminal"),
+    ] },
+  ],
+};
+function findHelp(path: readonly string[]): HelpNode | undefined {
+  let node: HelpNode | undefined = helpRegistry;
+  for (const part of path) { node = node.children?.find((child) => child.name === part); if (!node) return undefined; }
+  return node;
+}
+function resolveHelpPath(argv: readonly string[]): { path: string[]; invalid: boolean } {
+  const explicitHelpCommand = argv[0] === "help";
+  const candidates = explicitHelpCommand ? argv.slice(1) : argv;
+  const tokens = candidates.filter((item) => item !== "--help" && item !== "-h" && item !== "--json");
+  if (explicitHelpCommand && tokens.length === 0 && candidates.some((item) => item === "--help" || item === "-h")) {
+    return { path: ["help"], invalid: false };
+  }
+  const path: string[] = [];
+  let node = helpRegistry;
+  for (const token of tokens) {
+    if (token.startsWith("-")) break;
+    const child = node.children?.find((item) => item.name === token);
+    if (!child) return { path, invalid: path.length === 0 || Boolean(node.children?.length) };
+    path.push(token); node = child;
+  }
+  return { path, invalid: false };
+}
+function helpData(node: HelpNode, path: readonly string[], locale: OutputLocale): Record<string, unknown> {
+  return {
+    commandPath: ["horsepower", ...path].join(" "),
+    usage: node.usage,
+    description: locale === "zh-CN" ? node.descriptionZh : node.description,
+    arguments: [...(node.arguments ?? [])],
+    options: [...(node.options ?? [])],
+    subcommands: (node.children ?? []).map((child) => ({ name: child.name, description: locale === "zh-CN" ? child.descriptionZh : child.description })),
+    examples: [...(node.examples ?? [])],
+  };
+}
 interface RunResult { code: number; stdout: string; stderr: string }
 export interface CliOptions {
   homeDir: string;
@@ -48,6 +128,8 @@ export interface CliOptions {
     create(target: string, path: string): Promise<void>;
     remove(path: string): Promise<void>;
   };
+  updateTransport?: UpdateTransport;
+  updateExecFile?: (file: string, args: readonly string[], options?: { timeout?: number; env?: Record<string, string> }) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 }
 
 class UsageError extends Error {}
@@ -470,7 +552,7 @@ export function createCli(options: CliOptions) {
           if (action === "skip") { await webhook(flags(["skip"])); return "skipped"; }
           if (action === "disable") { await webhook(flags(["disable"])); return "disabled"; }
           if (!configuration) throw new UsageError("Webhook configuration was canceled");
-          const args = ["configure", "--url", configuration.url, "--auth", configuration.auth.mode, "--change", configuration.dispatch ? "--dispatch" : "--no-dispatch"];
+          const args = ["configure", "--provider", configuration.provider, "--url", configuration.url, "--auth", configuration.auth.mode, "--change", configuration.dispatch ? "--dispatch" : "--no-dispatch"];
           if (configuration.auth.mode === "hmac") args.push("--secret", configuration.auth.secret);
           if (configuration.auth.mode === "bearer") args.push("--token", configuration.auth.token);
           await webhook(flags(args));
@@ -537,11 +619,12 @@ export function createCli(options: CliOptions) {
       return { data: redactSettings(next), message: `Webhook disabled (${scope})` };
     }
     if (action === "configure") {
-      only(parsed, ["url", "auth", "secret", "token"], ["dispatch", "no-dispatch", "change", "no-change"]);
+      only(parsed, ["provider", "url", "auth", "secret", "token"], ["dispatch", "no-dispatch", "change", "no-change"]);
       if (parsed.switches.has("change") && parsed.switches.has("no-change")) throw new UsageError("Choose --change or --no-change");
       if (parsed.switches.has("dispatch") && parsed.switches.has("no-dispatch")) throw new UsageError("Choose --dispatch or --no-dispatch");
+      const provider = parsed.values.get("provider") ?? "generic";
       const url = parsed.values.get("url"), mode = parsed.values.get("auth"); if (!url || !mode) throw new UsageError("webhook configure requires --url and --auth");
-      try { validateWebhookUrl(url); }
+      try { validateWebhookProvider(provider); validateWebhookUrl(url); }
       catch (cause) { throw new UsageError((cause as Error).message); }
       const secret = parsed.values.get("secret"), token = parsed.values.get("token");
       let auth: WebhookAuth; if (mode === "hmac") { if (!secret) throw new UsageError("HMAC authentication requires --secret"); if (token) throw new UsageError("HMAC authentication does not accept --token"); auth = { mode, secret }; }
@@ -568,6 +651,7 @@ export function createCli(options: CliOptions) {
       };
       const nextWebhook = mergeObjects(preserved, {
         enabled: true,
+        provider,
         url,
         notifications: requestedNotifications,
       });
@@ -577,7 +661,7 @@ export function createCli(options: CliOptions) {
       const prospectiveProject = scope === "project" ? next : projectSettings;
       try {
         const effective = parseWebhookSettings(prospectiveGlobal.webhook, prospectiveProject.webhook);
-        if (!effective || effective.config.url !== url || JSON.stringify(effective.config.auth) !== JSON.stringify(auth)
+        if (!effective || effective.config.provider !== provider || effective.config.url !== url || JSON.stringify(effective.config.auth) !== JSON.stringify(auth)
           || effective.notifications.change !== requestedNotifications.change
           || effective.notifications.dispatch !== requestedNotifications.dispatch) {
           throw new Error("configured webhook does not match the effective settings");
@@ -588,9 +672,30 @@ export function createCli(options: CliOptions) {
     }
     if (action === "test") {
       only(parsed, [], []); const globalSettings = await trustedOptionalObject(options.homeDir, paths.global.settings); const projectSettings = await trustedOptionalObject(options.cwd, paths.project.settings); const parsedSettings = parseWebhookSettings(globalSettings.webhook, projectSettings.webhook); if (!parsedSettings) throw new Error("Webhook is disabled");
-      const notifier = createWebhookNotifier({ config: parsedSettings.config, ...(options.fetch ? { fetch: options.fetch } : {}), retryDelaysMs: [0] });
-      const result = await notifier.notify({ eventId: randomUUID(), timestamp: (options.now ?? (() => new Date()))().toISOString(), scope: "change", runId: "cli-webhook-test", status: "completed", summary: "webhook test", evidenceRefs: [] }); notifier.abandon();
-      if (!result.delivered) throw new Error(result.error ?? "Webhook delivery failed"); return { data: result, message: "Webhook delivered" };
+      const notifier = createWebhookNotifier({
+        config: parsedSettings.config,
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        retryDelaysMs: [0],
+        diagnostic: true,
+      });
+      const result = await notifier.notify({
+        eventId: randomUUID(),
+        timestamp: (options.now ?? (() => new Date()))().toISOString(),
+        scope: "change",
+        runId: "cli-webhook-test",
+        status: "completed",
+        summary: "webhook test",
+        evidenceRefs: [],
+      });
+      notifier.abandon();
+      return {
+        data: result,
+        ok: result.delivered,
+        exitCode: result.delivered ? 0 : 1,
+        message: result.delivered
+          ? `Webhook test delivered (${parsedSettings.config.provider}, ${result.attempts} attempt${result.attempts === 1 ? "" : "s"})`
+          : `Webhook test failed (${parsedSettings.config.provider}, ${result.failureClass ?? "transport_failed"}, ${result.attempts} attempt${result.attempts === 1 ? "" : "s"}); verify provider settings and receiver acceptance`,
+      };
     }
     throw new UsageError(`Unknown webhook command: ${action}`);
   }
@@ -689,7 +794,7 @@ export function createCli(options: CliOptions) {
       try {
         const configured = parseWebhookSettings(globalSettings.value!.webhook, projectSettings.value!.webhook);
         checks.push(configured
-          ? { id: "notification", status: "ok", message: localizedMessage(outputLocale, "doctor.webhookEnabled", { mode: configured.config.auth.mode }) }
+          ? { id: "notification", status: "ok", message: localizedMessage(outputLocale, "doctor.webhookEnabled", { provider: configured.config.provider ?? "generic", mode: configured.config.auth.mode }) }
           : { id: "notification", status: "skipped", message: localizedMessage(outputLocale, "doctor.webhookDisabled") });
       } catch (cause) {
         checks.push({ id: "notification", status: "error", message: localizedMessage(outputLocale, "doctor.webhookInvalid"), action: localizedMessage(outputLocale, "doctor.webhookRepairAction"), rawEvidence: (cause as Error).message });
@@ -860,17 +965,57 @@ export function createCli(options: CliOptions) {
     only(parsed, [], ["yes"]); if (parsed.positionals.length) throw new UsageError("purge accepts no arguments"); if (!parsed.switches.has("yes")) { if (options.interactive !== true || !options.confirm) throw new UsageError("Purge requires --yes in noninteractive mode"); const confirmed = await options.confirm("Permanently remove Horsepower user data? Type yes to continue: "); if (confirmed === undefined) throw new UsageError("Purge requires --yes when no controlling terminal is available"); if (!confirmed) return { data: { purged: false }, message: "Purge canceled; no data changed" }; }
     await verifyTrustedPath(options.homeDir, topology.root); await verifyTrustedPath(options.cwd, paths.project.root); for (const link of topology.links) await verifyTrustedPath(options.homeDir, link.path, true); const codePaths = [topology.current, topology.versions, ...topology.links.map((link) => link.path)]; for (const path of codePaths) await requireAbsent(path, `Run horsepower uninstall before purge; installed code or link remains: ${path}`); const root = await purgeRootState(topology.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory", standards: "directory", workflows: "directory", personas: "directory", memory: "directory", state: "directory" }); const projectRoot = await purgeRootState(paths.project.root, { "model-slots.json": "file", "settings.json": "file", agents: "directory" }); for (const state of [root, projectRoot]) if (state.status === "conflict") throw new Error(state.message); await rm(topology.root, { recursive: true, force: true }); await rm(paths.project.root, { recursive: true, force: true }); return { data: { purged: true }, message: "Horsepower user data purged" };
   }
+  async function updateCommand(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
+    only(parsed, ["version"], []);
+    if (parsed.positionals.length) throw new UsageError("update accepts no positional arguments");
+    requireSupportedPlatform();
+    const transport = options.updateTransport ?? createDefaultTransport(options.fetch ?? globalThis.fetch);
+    const fsPromise = import("../release/updater.js");
+    const fs = (await fsPromise).defaultFilesystem;
+    const { createFileLock, createProcessSeam } = await fsPromise;
+    const lock = createFileLock(join(topology.root, ".update.lock"), fs);
+    const execFileFn = options.updateExecFile ?? (async (file: string, args: readonly string[]) => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      try {
+        const result = await promisify(execFile)(file, args, { encoding: "utf8", timeout: 15_000 });
+        return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", exitCode: 0 };
+      } catch (cause) {
+        const error = cause as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number };
+        return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", exitCode: typeof error.code === "number" ? error.code : 1 };
+      }
+    });
+    const proc = createProcessSeam(execFileFn);
+    const result: UpdateResult = await runUpdate({
+      homeDir: options.homeDir,
+      transport,
+      fs,
+      process: proc,
+      clock: { now: options.now ?? (() => new Date()) },
+      lock,
+      ...(parsed.values.has("version") ? { versionOverride: parsed.values.get("version")! } : {}),
+    });
+    const locale = await resolveOutputLocale(paths.global.settings, paths.project.settings).catch(() => "en" as const);
+    const summaryId: MessageId = result.status === "already_current" ? "update.alreadyCurrent"
+      : result.status === "updated" ? "update.updated"
+        : result.status === "rolled_back" ? "update.rolledBack"
+          : "update.failed";
+    const ok = result.status === "already_current" || result.status === "updated";
+    return {
+      data: result,
+      ok,
+      exitCode: ok ? 0 : 1,
+      summaryId,
+      summaryVariables: () => ({ version: result.resolvedVersion ?? "", reason: result.reason ?? "" }),
+      outputLocale: locale,
+    };
+  }
   async function help(parsed: ReturnType<typeof flags>): Promise<CommandResult> {
     only(parsed, [], []);
-    if (parsed.positionals.length) throw new UsageError("help accepts no positional arguments");
-    return { data: {
-      commands: [
-        "horsepower configure --interactive  # complete locale, Skill, webhook, and model journey",
-        "horsepower configure --locale en|zh-CN [--scope global|project]  # locale only",
-        "horsepower setup --interactive  # model slots only",
-        "horsepower skill-audit [--json]", "horsepower doctor [--json]",
-      ],
-    } };
+    const node = findHelp(parsed.positionals);
+    if (!node) throw new UsageError(`Unknown help path: ${parsed.positionals.join(" ")}`);
+    const locale = await resolveOutputLocale(paths.global.settings, paths.project.settings).catch(() => "en" as OutputLocale);
+    return { data: helpData(node, parsed.positionals, locale), outputLocale: locale };
   }
 
   type ParsedFlags = ReturnType<typeof flags>;
@@ -897,16 +1042,24 @@ export function createCli(options: CliOptions) {
     handoff: { run: handoff, summaryId: completed },
     "skill-audit": { run: skillAudit, summaryId: "audit.summary", summaryVariables: () => ({ status: "", count: 0 }) },
     doctor: { run: doctor, summaryId: "doctor.healthy" },
+    update: { run: updateCommand, requiresPlatform: true, summaryId: (parsed) => "update.alreadyCurrent", },
     preflight: { run: preflight, requiresPlatform: true, summaryId: completed },
     enable: { run: (parsed) => setIntegrationState(parsed, "enabled"), requiresPlatform: true, summaryId: "cli.enabled" },
     disable: { run: (parsed) => setIntegrationState(parsed, "disabled"), requiresPlatform: true, summaryId: "cli.disabled" },
     uninstall: { run: uninstall, requiresPlatform: true, summaryId: completed },
     purge: { run: purge, requiresPlatform: true, summaryId: completed },
   } satisfies Record<string, CommandDefinition>;
+  const registryCommands = (helpRegistry.children ?? []).map((node) => node.name).sort();
+  const executableCommands = Object.keys(commands).sort();
+  if (registryCommands.join("\n") !== executableCommands.join("\n")) {
+    throw new Error("CLI_HELP_REGISTRY_MISMATCH");
+  }
 
   return { async run(argv: readonly string[]): Promise<CliResult> {
-    const helpRequested = argv.includes("--help") || argv.includes("-h");
-    const effectiveArgv = helpRequested ? ["help", ...(argv.includes("--json") ? ["--json"] : [])] : argv;
+    const helpRequested = argv[0] === "help" || argv.some((argument) => argument === "--help" || argument === "-h");
+    const helpResolution = helpRequested ? resolveHelpPath(argv) : { path: [], invalid: false };
+    if (helpResolution.invalid) return { exitCode: 2, stdout: "", stderr: "horsepower: Unknown help path\n" };
+    const effectiveArgv = helpRequested ? ["help", ...helpResolution.path, ...(argv.includes("--json") ? ["--json"] : [])] : argv;
     let machine = effectiveArgv.includes("--json");
     const commandName = argv.find((argument) => !argument.startsWith("--")) ?? "horsepower";
     let locale: OutputLocale = "en";
@@ -927,7 +1080,15 @@ export function createCli(options: CliOptions) {
       const audit = command === "skill-audit" ? result.data as SkillAuditResult : undefined;
       const summary = audit ? localizedMessage(locale, "audit.summary", { status: audit.status, count: audit.externalCount }) : localizedMessage(locale, summaryId, { command: commandName, ...definition.summaryVariables?.(parsed) });
       if (machine) return { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" };
-      if (command === "help") return { exitCode, stdout: `${(result.data as { commands: string[] }).commands.join("\n")}\n`, stderr: "" };
+      if (command === "help") {
+        const data = result.data as Record<string, unknown>;
+        const subcommands = Array.isArray(data.subcommands) ? data.subcommands as Array<Record<string, unknown>> : [];
+        const heading = locale === "zh-CN" ? "子命令：" : "Subcommands:";
+        const optionsHeading = locale === "zh-CN" ? "选项：" : "Options:";
+        const examplesHeading = locale === "zh-CN" ? "示例：" : "Examples:";
+        const lines = [String(data.commandPath), String(data.usage), String(data.description), ...(subcommands.length ? ["", heading, ...subcommands.map((item) => `  ${String(item.name)}  ${String(item.description)}`)] : []), ...(Array.isArray(data.options) && data.options.length ? ["", optionsHeading, ...data.options.map(String)] : []), ...(Array.isArray(data.examples) && data.examples.length ? ["", examplesHeading, ...data.examples.map(String)] : [])];
+        return { exitCode, stdout: `${lines.join("\n")}\n`, stderr: "" };
+      }
       if (audit) {
         const rows = groupAuditSkillNames(audit.skills).map(({ group, names }) => `- ${group}: ${names.join(", ")}`);
         const text = [summary, ...rows, ...(audit.skills.length > 0 ? [localizedMessage(locale, "audit.details")] : []), localizedMessage(locale, "audit.boundary"), localizedMessage(locale, "audit.scope"), ...(audit.status === "complete" ? [] : [localizedMessage(locale, "audit.incomplete")]), localizedMessage(locale, "audit.candidates"), audit.candidateScanCommand].join("\n");

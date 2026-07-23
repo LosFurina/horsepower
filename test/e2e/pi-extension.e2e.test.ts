@@ -180,6 +180,6 @@ test("official Pi RPC loads the bundled extension and exposes only Horsepower co
   const response = JSON.parse(stdout.trim()) as { success: boolean; data: { commands: Array<{ name: string }> } };
   expect(response.success).toBe(true);
   expect(response.data.commands.map(({ name }) => name)).toEqual([
-    "horsepower-workers", "horsepower-doctor", "horsepower-campaign", "horsepower-review-authorize",
+    "horsepower-workers", "horsepower-doctor", "horsepower-campaign", "horsepower-campaign-pause", "horsepower-review-authorize",
   ]);
 });

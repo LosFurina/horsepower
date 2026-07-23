@@ -34,7 +34,7 @@ Only an active process-local campaign lease created from explicit user selection
 - **WHEN** the user selects another campaign or the current campaign ends during compaction
 - **THEN** Horsepower invalidates the old continuation lease and never resumes it
 
-#### Scenario: Work is explicitly paused, blocked, or terminal
+#### Scenario: Work has an explicit stop state
 - **WHEN** the Captain or user records an explicit pause, `blocked_needs_human`, `failed`, `canceled`, or `completed` state
 - **THEN** Horsepower suppresses post-compaction continuation for that campaign
 

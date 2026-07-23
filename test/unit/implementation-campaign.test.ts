@@ -57,6 +57,21 @@ test("rejects a campaign larger than the claim-matched manifest can represent", 
   })).toThrow("permits at most 100 task IDs");
 });
 
+test("continuation identity fields and aggregate projection are bounded before replacing authority", () => {
+  const campaigns = createImplementationCampaignManager({ makeId: () => "implementation-bounded" });
+  const active = campaigns.begin({ ...base, mode: "multi_agent" });
+  const oversizedId = `1.${"9".repeat(129)}`;
+  expect(() => campaigns.begin({
+    ...base,
+    selectedTaskIds: [oversizedId],
+    selectedTasks: [{ id: oversizedId, description: "Oversized", status: "pending", sectionId: "1" }],
+    plan: planFor([oversizedId]),
+    mode: "multi_agent",
+  })).toThrow("exceeds 128 bytes");
+  expect(campaigns.status(active.campaignId, "/project")).toMatchObject({ status: "active" });
+  expect(campaigns.currentContinuation("/project")).toMatchObject({ campaignId: active.campaignId, disposition: "active" });
+});
+
 test("campaign begin snapshots official plan digest and selected-task mappings", () => {
   const campaigns = createImplementationCampaignManager({ makeId: () => "implementation-plan" });
   const campaign = campaigns.begin({ ...base, mode: "multi_agent" });
@@ -103,34 +118,81 @@ test("continuation lease preserves exact identity, bounds generations, and inval
   const campaigns = createImplementationCampaignManager({ makeId: () => "campaign-lease" });
   const campaign = campaigns.begin({ ...base, mode: "multi_agent" });
   expect(campaigns.currentContinuation("/project")).toMatchObject({
-    campaignId: campaign.campaignId, changeId: "change-a", selectedTaskIds: ["4.7", "4.8"],
-    inventoryDigest: digest, planDigest, mode: "multi_agent", generation: 0, disposition: "active",
+    campaignId: campaign.campaignId, projectId: "/project", changeId: "change-a",
+    selectedTaskIds: ["4.7", "4.8"], inventoryDigest: digest, planDigest,
+    mode: "multi_agent", generation: 0, disposition: "active",
   });
+  expect(campaigns.continuation(campaign.campaignId, "/project")).toMatchObject({
+    campaignId: campaign.campaignId, selectedTaskIds: ["4.7", "4.8"], mode: "multi_agent",
+  });
+  // Lease is authorization metadata only: no OpenSpec task descriptions/sections stored twice.
+  expect(campaigns.currentContinuation("/project")).not.toHaveProperty("selectedTasks");
+  expect(campaigns.currentContinuation("/project")).not.toHaveProperty("sections");
+
   const first = campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 7);
   expect(first).toMatchObject({ generation: 7, queuedGeneration: 7 });
+  // Duplicate generation is idempotent/no-op.
   expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 7)).toBeUndefined();
-  campaigns.setContinuationDisposition(campaign.campaignId, "paused");
-  expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 8)).toBeUndefined();
+  // Stale/out-of-order generation cannot rewind authority.
+  expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 6)).toBeUndefined();
+  expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 0)).toBeUndefined();
+  expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", Number.NaN)).toBeUndefined();
+
+  for (const disposition of ["paused", "blocked", "terminal", "superseded"] as const) {
+    campaigns.setContinuationDisposition(campaign.campaignId, "active");
+    campaigns.setContinuationDisposition(campaign.campaignId, disposition);
+    expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 20)).toBeUndefined();
+  }
+
   campaigns.setContinuationDisposition(campaign.campaignId, "active");
-  expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 8)).toMatchObject({ generation: 8 });
-  campaigns.setContinuationDisposition(campaign.campaignId, "terminal");
+  expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 8)).toMatchObject({ generation: 8, queuedGeneration: 8 });
+  // Auto-increment after an explicit generation stays monotonic and one-shot per generation.
+  expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project")).toMatchObject({ generation: 9, queuedGeneration: 9 });
   expect(campaigns.beginContinuationGeneration(campaign.campaignId, "/project", 9)).toBeUndefined();
+
+  // Project identity must match; returned clones are immutable w.r.t. stored lease.
   expect(campaigns.currentContinuation("/other")).toBeUndefined();
+  expect(campaigns.continuation(campaign.campaignId, "/other")).toBeUndefined();
   const selected = campaigns.currentContinuation("/project")!;
   selected.selectedTaskIds.push("9.9");
   expect(campaigns.currentContinuation("/project")!.selectedTaskIds).toEqual(["4.7", "4.8"]);
 });
 
-test("switch, end, project ownership, and process replacement invalidate prior authorization", () => {
+test("switch, end, clear, and process replacement invalidate prior continuation authority", () => {
   let id = 0;
   const campaigns = createImplementationCampaignManager({ makeId: () => `implementation-${++id}` });
   const first = campaigns.begin({ ...base, mode: "multi_agent" });
+  expect(campaigns.beginContinuationGeneration(first.campaignId, "/project", 1)).toMatchObject({ generation: 1 });
+
+  // Beginning another campaign supersedes the prior lease and ends the old campaign.
   const second = campaigns.begin({ ...base, mode: "main_agent" });
   expect(campaigns.status(first.campaignId, "/project")).toMatchObject({ status: "ended", outcome: "switched" });
-  expect(() => campaigns.status(second.campaignId, "/other")).toThrow("another project");
+  expect(campaigns.continuation(first.campaignId, "/project")).toBeUndefined();
+  expect(campaigns.beginContinuationGeneration(first.campaignId, "/project", 2)).toBeUndefined();
+  expect(campaigns.currentContinuation("/project")).toMatchObject({
+    campaignId: second.campaignId, mode: "main_agent", disposition: "active", generation: 0,
+  });
+
+  // Explicit end supersedes the active lease.
   campaigns.end({ campaignId: second.campaignId, projectId: "/project" });
-  expect(() => campaigns.authorizeDispatch({ campaignId: second.campaignId, changeId: "change-a", projectId: "/project", taskScope: "4.8", workKind: "review" })).toThrow("is not active");
-  expect(() => createImplementationCampaignManager().status(second.campaignId, "/project")).toThrow("Unknown implementation campaign");
+  expect(campaigns.currentContinuation("/project")).toMatchObject({ campaignId: second.campaignId, disposition: "superseded" });
+  expect(campaigns.beginContinuationGeneration(second.campaignId, "/project", 3)).toBeUndefined();
+  expect(() => campaigns.authorizeDispatch({
+    campaignId: second.campaignId, changeId: "change-a", projectId: "/project", taskScope: "4.8", workKind: "review",
+  })).toThrow("is not active");
+
+  // Session/project replacement clears process-local authority.
+  const third = campaigns.begin({ ...base, changeId: "change-b", mode: "multi_agent" });
+  expect(campaigns.currentContinuation("/project")?.campaignId).toBe(third.campaignId);
+  campaigns.clearContinuation();
+  expect(campaigns.currentContinuation("/project")).toBeUndefined();
+  expect(campaigns.continuation(third.campaignId, "/project")).toBeUndefined();
+  expect(campaigns.beginContinuationGeneration(third.campaignId, "/project", 1)).toBeUndefined();
+
+  // A fresh manager (process restart) never restores prior authorization.
+  expect(() => createImplementationCampaignManager().status(third.campaignId, "/project")).toThrow("Unknown implementation campaign");
+  expect(createImplementationCampaignManager().currentContinuation("/project")).toBeUndefined();
+  expect(() => campaigns.status(second.campaignId, "/other")).toThrow("another project");
 });
 
 test("corrective dispatch requires explicit review campaign and root-cause correlation before recording", () => {

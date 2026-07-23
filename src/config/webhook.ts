@@ -1,4 +1,4 @@
-import type { WebhookAuth, WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
+import type { WebhookAuth, WebhookProvider, WebhookConfig } from "../lifecycle/webhook-types.js";
 import type { JsonObject } from "./json-store.js";
 
 const SECRET = "[REDACTED]";
@@ -98,6 +98,17 @@ export function redactCredentials(value: unknown, key = "", insideAuth = false):
   ]));
 }
 
+const validProviders = new Set<WebhookProvider>(["generic", "discord"]);
+
+export function validateWebhookProvider(value: unknown): WebhookProvider {
+  if (value === undefined || value === null) return "generic";
+  if (typeof value !== "string") throw new Error("Invalid Horsepower webhook configuration: provider must be a string");
+  if (!validProviders.has(value as WebhookProvider)) {
+    throw new Error('Invalid Horsepower webhook configuration: unsupported provider. Use "generic" or "discord".');
+  }
+  return value as WebhookProvider;
+}
+
 export function validateWebhookUrl(value: string): URL {
   let parsed: URL;
   try { parsed = new URL(value); } catch { throw new Error("Invalid Horsepower webhook configuration: url is invalid"); }
@@ -112,7 +123,7 @@ export function validateWebhookUrl(value: string): URL {
 }
 
 export interface ParsedWebhook {
-  config: WebhookNotifierOptions["config"];
+  config: WebhookConfig;
   notifications: { change?: boolean; dispatch?: boolean };
 }
 
@@ -128,6 +139,8 @@ function validateWebhookShape(value: JsonObject, label: string): void {
     throw new Error(`Invalid Horsepower webhook configuration: ${label}notifications.dispatch must be boolean`);
   }
   if (value.auth !== undefined) parseWebhookAuth(value.auth);
+  // Validate provider if present
+  if (value.provider !== undefined) validateWebhookProvider(value.provider);
 }
 
 function parseWebhookAuth(authValue: unknown): WebhookAuth {
@@ -136,6 +149,16 @@ function parseWebhookAuth(authValue: unknown): WebhookAuth {
   if (authValue.mode === "hmac" && typeof authValue.secret === "string" && authValue.secret.length > 0 && authValue.token === undefined) return { mode: "hmac", secret: authValue.secret };
   if (authValue.mode === "bearer" && typeof authValue.token === "string" && authValue.token.length > 0 && authValue.secret === undefined) return { mode: "bearer", token: authValue.token };
   throw new Error("Invalid Horsepower webhook configuration: auth credentials are missing, invalid, or incompatible");
+}
+
+/**
+ * Validate that provider and authentication mode are compatible.
+ * Discord webhooks must use auth.mode=none because the URL carries the credential.
+ */
+function validateProviderAuthCompatibility(provider: WebhookProvider, auth: WebhookAuth): void {
+  if (provider === "discord" && auth.mode !== "none") {
+    throw new Error("Invalid Horsepower webhook configuration: Discord provider requires auth.mode=none");
+  }
 }
 
 export function validateWebhookSettingsShape(value: unknown, label = ""): void {
@@ -170,6 +193,10 @@ export function parseWebhookSettings(globalValue: unknown, projectValue?: unknow
   }
   validateWebhookUrl(merged.url);
   const auth = parseWebhookAuth(merged.auth);
+  const provider = validateWebhookProvider(merged.provider);
+
+  // Validate provider/auth compatibility
+  validateProviderAuthCompatibility(provider, auth);
 
   const notifications = settingObject(merged.notifications, "notifications");
   if (notifications.change !== undefined && typeof notifications.change !== "boolean") {
@@ -179,7 +206,7 @@ export function parseWebhookSettings(globalValue: unknown, projectValue?: unknow
     throw new Error("Invalid Horsepower webhook configuration: notifications.dispatch must be boolean");
   }
   return {
-    config: { url: merged.url, auth },
+    config: { url: merged.url, auth, provider },
     notifications: {
       ...(typeof notifications.change === "boolean" ? { change: notifications.change } : {}),
       ...(typeof notifications.dispatch === "boolean" ? { dispatch: notifications.dispatch } : {}),

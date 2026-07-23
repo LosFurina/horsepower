@@ -178,6 +178,236 @@ test("shares process-local capability evidence across one-shot and persistent cr
   await runtime.shutdown();
 });
 
+test("post-compaction continuation revalidates official OpenSpec identity and fails closed without side effects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-continuation-revalidate-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const agents = join(root, "agents");
+  await mkdir(join(home, ".pi", "agent", "horsepower"), { recursive: true });
+  await mkdir(agents, { recursive: true });
+  await writeFile(join(home, ".pi", "agent", "horsepower", "model-slots.json"), JSON.stringify({ slots: {
+    judgment: { model: "provider/model", thinking: "high" }, craft: { model: "provider/model", thinking: "high" }, utility: { model: "provider/model", thinking: "off" },
+  } }));
+  await writeFile(join(agents, "coder.md"), "---\nname: coder\nrole: Code\ntools: []\nstandards: []\n---\nCode only.\n");
+  const oneShot = { single: vi.fn(async (input) => ({ name: input.name, text: "done" })), parallel: vi.fn(), chain: vi.fn() };
+  const manager = fakeManager();
+  manager.create.mockResolvedValue({ workerId: "worker-1" });
+  let version = "1.6.0";
+  let doctorHealthy = true;
+  let doctorPath = project;
+  let isComplete = true;
+  let validateFailed = 0;
+  let inventory = {
+    changeId: "change-a",
+    projectRoot: project,
+    digest: "a".repeat(64),
+    sections: [
+      {
+        id: "1",
+        title: "Selected",
+        tasks: [
+          { id: "1.1", description: "Task 1.1", status: "pending" as "pending" | "complete", sectionId: "1" },
+          { id: "1.2", description: "Task 1.2", status: "pending" as "pending" | "complete", sectionId: "1" },
+        ],
+      },
+    ],
+  };
+  let plan = planFixture(["1.1", "1.2"]);
+  const runOpenSpec = vi.fn(async (args: readonly string[]) => {
+    if (args[0] === "--version") return { code: 0, stdout: `${version}\n`, stderr: "", truncated: false };
+    if (args[0] === "doctor") return {
+      code: 0,
+      stdout: JSON.stringify({ root: { healthy: doctorHealthy, path: doctorPath } }),
+      stderr: "",
+      truncated: false,
+    };
+    if (args[0] === "status") return {
+      code: isComplete ? 0 : 1,
+      stdout: isComplete ? JSON.stringify({ changeName: "change-a", isComplete: true }) : "",
+      stderr: isComplete ? "" : "not ready",
+      truncated: false,
+    };
+    if (args[0] === "validate") return {
+      code: validateFailed === 0 ? 0 : 1,
+      stdout: JSON.stringify({ summary: { totals: { failed: validateFailed } } }),
+      stderr: "",
+      truncated: false,
+    };
+    return { code: 1, stdout: "", stderr: "unexpected", truncated: false };
+  });
+  const readText = vi.fn(async (path: string) => path.endsWith("SKILL.md")
+    ? `name: openspec-apply-change\nauthor: openspec\nallowed-tools: Bash(openspec:*)\ngeneratedBy: ${version}\n`
+    : path.endsWith("opsx-apply.md") ? "Implement tasks from an OpenSpec change" : (await import("node:fs/promises")).readFile(path, "utf8"));
+  const { createHorsepowerRuntime } = await import("../../src/extension/runtime.js");
+  const runtime = createHorsepowerRuntime({
+    homeDir: home, bundledAgentsDir: agents, manager: manager as never, runOpenSpec, readText,
+    oneShot: oneShot as never,
+    loadTaskInventory: async () => structuredClone(inventory),
+    loadTestAndGatePlan: async () => structuredClone(plan),
+  });
+  const campaign = await runtime.beginImplementationCampaign({
+    changeId: "change-a", projectId: project, ...campaignSelection(["1.1", "1.2"]), mode: "multi_agent",
+  });
+  const context = { captain: true, cwd: project, modelRegistry: modelRegistry as never };
+  const dispatch = {
+    action: "single", handoffMode: "inline", changeId: "change-a", agent: "coder", modelSlot: "craft",
+    task: "work", taskScope: "1.1", workKind: "implementation", implementationCampaignId: campaign.campaignId, name: "worker",
+  };
+  const sideEffects = () => ({ singles: oneShot.single.mock.calls.length, creates: manager.create.mock.calls.length });
+
+  // Unchanged official scope may continue under existing user authorization.
+  await expect(runtime.prepareCampaignContinuation({ campaignId: campaign.campaignId, projectId: project, generation: 1 }))
+    .resolves.toMatchObject({
+      campaignId: campaign.campaignId, projectId: project, changeId: "change-a",
+      selectedTaskIds: ["1.1", "1.2"], inventoryDigest: "a".repeat(64), mode: "multi_agent",
+      generation: 1, queuedGeneration: 1, disposition: "active",
+    });
+  // Duplicate generation is suppressed after successful revalidation.
+  await expect(runtime.prepareCampaignContinuation({ campaignId: campaign.campaignId, projectId: project, generation: 1 }))
+    .resolves.toBeUndefined();
+
+  async function expectNoContinuation(mutate: () => void | Promise<void>, generation: number) {
+    const before = sideEffects();
+    await mutate();
+    await expect(runtime.prepareCampaignContinuation({
+      campaignId: campaign.campaignId, projectId: project, generation,
+    })).resolves.toBeUndefined();
+    expect(sideEffects()).toEqual(before);
+  }
+
+  // Completed selected task suppresses continuation.
+  await expectNoContinuation(() => {
+    inventory = {
+      ...inventory,
+      sections: [{ id: "1", title: "Selected", tasks: [
+        { id: "1.1", description: "Task 1.1", status: "complete", sectionId: "1" },
+        { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+      ] }],
+    };
+  }, 2);
+
+  // Missing selected task suppresses continuation.
+  await expectNoContinuation(() => {
+    inventory = {
+      ...inventory,
+      sections: [{ id: "1", title: "Selected", tasks: [
+        { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+      ] }],
+    };
+  }, 3);
+
+  // Reordered selected tasks suppress continuation.
+  await expectNoContinuation(() => {
+    inventory = {
+      ...inventory,
+      sections: [{ id: "1", title: "Selected", tasks: [
+        { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+        { id: "1.1", description: "Task 1.1", status: "pending", sectionId: "1" },
+      ] }],
+    };
+  }, 4);
+
+  // Renamed description suppresses continuation.
+  await expectNoContinuation(() => {
+    inventory = {
+      ...inventory,
+      sections: [{ id: "1", title: "Selected", tasks: [
+        { id: "1.1", description: "Renamed task", status: "pending", sectionId: "1" },
+        { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+      ] }],
+    };
+  }, 5);
+
+  // Moved section suppresses continuation.
+  await expectNoContinuation(() => {
+    inventory = {
+      ...inventory,
+      sections: [{ id: "2", title: "Moved", tasks: [
+        { id: "1.1", description: "Task 1.1", status: "pending", sectionId: "2" },
+        { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "2" },
+      ] }],
+    };
+  }, 6);
+
+  // Inventory digest drift suppresses continuation.
+  await expectNoContinuation(() => {
+    inventory = {
+      changeId: "change-a",
+      projectRoot: project,
+      digest: "b".repeat(64),
+      sections: [{ id: "1", title: "Selected", tasks: [
+        { id: "1.1", description: "Task 1.1", status: "pending", sectionId: "1" },
+        { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+      ] }],
+    };
+  }, 7);
+
+  // Project ownership mismatch suppresses continuation.
+  await expectNoContinuation(() => {
+    inventory = { ...inventory, projectRoot: join(root, "other-project"), digest: "a".repeat(64) };
+  }, 8);
+
+  // Unsupported CLI version / invalid context suppress continuation and change no OpenSpec facts.
+  inventory = {
+    changeId: "change-a",
+    projectRoot: project,
+    digest: "a".repeat(64),
+    sections: [{ id: "1", title: "Selected", tasks: [
+      { id: "1.1", description: "Task 1.1", status: "pending", sectionId: "1" },
+      { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+    ] }],
+  };
+  await expectNoContinuation(() => { version = "1.5.0"; }, 9);
+  version = "1.6.0";
+  await expectNoContinuation(() => { doctorHealthy = false; }, 10);
+  doctorHealthy = true;
+  // Official doctor root that is healthy but for a different project still fails closed only when
+  // inventory ownership drifts; pure doctor-path mismatch without inventory drift is not enough alone.
+  await expectNoContinuation(() => { isComplete = false; }, 11);
+  isComplete = true;
+  await expectNoContinuation(() => { validateFailed = 1; }, 12);
+  validateFailed = 0;
+
+  // Plan drift also fails closed before minting a generation.
+  await expectNoContinuation(() => { plan = planFixture(["1.1", "1.2"], "d".repeat(64)); }, 13);
+  plan = planFixture(["1.1", "1.2"]);
+
+  // Restore eligible official facts: continuation proceeds once.
+  await expect(runtime.prepareCampaignContinuation({ campaignId: campaign.campaignId, projectId: project, generation: 14 }))
+    .resolves.toMatchObject({ generation: 14, queuedGeneration: 14, selectedTaskIds: ["1.1", "1.2"] });
+
+  // Post-enqueue drift is still rejected by dispatch-time revalidation before work side effects.
+  inventory = {
+    ...inventory,
+    sections: [{ id: "1", title: "Selected", tasks: [
+      { id: "1.1", description: "Task 1.1", status: "complete", sectionId: "1" },
+      { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+    ] }],
+  };
+  const beforeDispatch = sideEffects();
+  await expect(runtime.execute({ ...dispatch, name: "post-enqueue-drift" }, context))
+    .rejects.toThrow(/Selected OpenSpec task drifted: 1\.1|CAMPAIGN_AUTHORIZATION_FAILED/);
+  expect(sideEffects()).toEqual(beforeDispatch);
+
+  // Explicit stop dispositions and process-local clear remain fail-closed.
+  inventory = {
+    changeId: "change-a",
+    projectRoot: project,
+    digest: "a".repeat(64),
+    sections: [{ id: "1", title: "Selected", tasks: [
+      { id: "1.1", description: "Task 1.1", status: "pending", sectionId: "1" },
+      { id: "1.2", description: "Task 1.2", status: "pending", sectionId: "1" },
+    ] }],
+  };
+  runtime.clearCampaignContinuation();
+  await expect(runtime.prepareCampaignContinuation({ campaignId: campaign.campaignId, projectId: project, generation: 15 }))
+    .resolves.toBeUndefined();
+  expect(runtime.currentCampaignContinuation(project)).toBeUndefined();
+  expect(oneShot.single).not.toHaveBeenCalled();
+  expect(manager.create).not.toHaveBeenCalled();
+  await runtime.shutdown();
+});
+
 test("dispatch revalidates selected task snapshot before worker side effects while ignoring unselected drift", async () => {
   const root = await mkdtemp(join(tmpdir(), "horsepower-task-drift-"));
   const home = join(root, "home");
@@ -319,6 +549,12 @@ test("explicit change run permits valid terminal report and rejects invalid corr
     },
   }, ctx)).resolves.toMatchObject({ run: { runId: begun.runId, changeId: "change-a", status: "completed", verification: { scopeDigest: "scope-digest" } } });
   expect(snapshotRuns).toEqual([begun.runId]);
+  expect(runtime.currentCampaignContinuation("/project")).toMatchObject({ disposition: "terminal" });
+  await expect(runtime.prepareCampaignContinuation({
+    campaignId: runtime.currentCampaignContinuation("/project")!.campaignId,
+    projectId: "/project",
+    generation: 1,
+  })).resolves.toBeUndefined();
 });
 
 test("process-global notification retries bind disabled and enabled settings to each project run", async () => {

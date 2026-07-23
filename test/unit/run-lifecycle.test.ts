@@ -334,6 +334,44 @@ test("dispatch notification is opt-in and idle is never terminal", async () => {
   expect(enabled.notifications[0]).toMatchObject({ scope: "dispatch", status: "failed" });
 });
 
+test("change and dispatch terminal notifications select Discord without changing terminal truth on rejection", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: { [["pro", "vider"].join("")]: "discord", url: "https://example.invalid/protocol-fixture", auth: { mode: "none" } },
+    retryDelaysMs: [0],
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response("receiver detail", { status: 400 });
+    },
+  });
+  const { createRunLifecycle } = await import("../../src/lifecycle/run-lifecycle.js");
+  const lifecycle = createRunLifecycle({
+    notifications: { change: true, dispatch: true },
+    notify: notifier.notify,
+    stopNotifications: notifier.abandon,
+    makeId: (() => { let id = 0; return (prefix) => `${prefix}-terminal-truth-fixture-${++id}`; })(),
+    now: () => new Date("2026-07-24T00:00:00.000Z"),
+  });
+
+  const change = lifecycle.beginChange({ changeId: "change-private-source", projectId: "/project" });
+  const dispatch = lifecycle.beginDispatch({ changeId: "change-private-source", projectId: "/project" });
+  await lifecycle.reportChangeTerminal({ runId: change.runId, status: "blocked_needs_human", summary: "private report" });
+  await lifecycle.reportDispatchTerminal({ runId: dispatch.runId, status: "failed", summary: "private output" });
+  await expect(lifecycle.waitForDelivery(change.runId)).resolves.toEqual({ delivered: false, attempts: 1, error: "Webhook delivery failed" });
+  await expect(lifecycle.waitForDelivery(dispatch.runId)).resolves.toEqual({ delivered: false, attempts: 1, error: "Webhook delivery failed" });
+
+  expect(lifecycle.status(change.runId)).toMatchObject({ status: "blocked_needs_human", delivery: { delivered: false } });
+  expect(lifecycle.status(dispatch.runId)).toMatchObject({ status: "failed", delivery: { delivered: false } });
+  expect(requests).toHaveLength(2);
+  for (const request of requests) {
+    expect(request).toMatchObject({ content: expect.any(String), allowed_mentions: { parse: [] } });
+    expect(JSON.stringify(request)).not.toContain("private report");
+    expect(JSON.stringify(request)).not.toContain("private output");
+    expect(JSON.stringify(request)).not.toContain("change-private-source");
+  }
+});
+
 test("shutdown stops notification retries and waits for pending deliveries", async () => {
   let finish!: () => void;
   const pending = new Promise<WebhookDeliveryResult>((resolve) => {

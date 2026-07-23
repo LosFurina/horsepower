@@ -4,6 +4,7 @@ import type { SkillAuditResult } from "../skills/audit.js";
 export type WebhookAction = "preserve" | "skip" | "disable" | "configure" | "cancel";
 export type ModelAction = "configure" | "skip" | "cancel";
 export interface WebhookConfigurationInput {
+  provider: "generic" | "discord";
   url: string;
   auth: { mode: "hmac"; secret: string } | { mode: "bearer"; token: string } | { mode: "none" };
   dispatch: boolean;
