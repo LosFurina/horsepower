@@ -1,10 +1,13 @@
 import type { OutputLocale } from "../localization/index.js";
 import type { OneShotProgress, WorkerIdentity } from "../runtime/one-shot.js";
+import type { CaptainFailure } from "../failures/captain-failure.js";
 
 const MAX_CHILDREN = 8;
 const MAX_FIELD_BYTES = 256;
 const MAX_SUMMARY_BYTES = 512;
 const MAX_CARD_BYTES = 50 * 1_024;
+/** After this interval without substantive assistant/tool progress, the card reports a soft stall. */
+export const WORKER_PROGRESS_STALL_THRESHOLD_MS = 30_000;
 
 type ParallelEvent = OneShotProgress & { identity: WorkerIdentity };
 type ChildStatus = "pending" | "running" | "completed" | "failed" | "canceled";
@@ -14,12 +17,16 @@ interface ChildSnapshot {
   operation: string;
   status: ChildStatus;
   telemetry?: { elapsedMs: number; usage?: { input?: number; output?: number }; latestAssistantSummary?: string };
+  lastSubstantiveProgressAt?: number;
+  diagnostic?: { code: "WORKER_PROGRESS_STALLED"; message: string };
   summary?: string;
+  failure?: Pick<CaptainFailure, "code" | "stage" | "remediation">;
   target?: string;
   terminal: boolean;
 }
 
 export interface ParallelCardDetails {
+  dispatchStatus: "running" | "completed" | "failed" | "canceled";
   parallel: {
     total: number;
     pending: number;
@@ -125,12 +132,19 @@ export function createParallelCardProjection(locale: OutputLocale) {
     const identity = current.identity.runId === undefined && event.identity.runId
       ? boundedIdentity(event.identity)
       : current.identity;
+    const substantive = event.type !== "starting";
+    const progressAt = substantive ? (event.telemetry?.elapsedMs ?? current.lastSubstantiveProgressAt ?? 0) : current.lastSubstantiveProgressAt;
+    const elapsed = event.telemetry?.elapsedMs ?? 0;
+    const stalled = !nextStatus.match(/completed|failed|canceled/u) && progressAt !== undefined && elapsed - progressAt >= WORKER_PROGRESS_STALL_THRESHOLD_MS;
     children.set(key, {
       identity,
       operation: operation(event),
       status: nextStatus,
+      ...(progressAt === undefined ? {} : { lastSubstantiveProgressAt: progressAt }),
+      ...(stalled ? { diagnostic: { code: "WORKER_PROGRESS_STALLED", message: `No substantive worker progress for ${WORKER_PROGRESS_STALL_THRESHOLD_MS}ms; dispatch remains running.` } } : substantive ? {} : current.diagnostic ? { diagnostic: current.diagnostic } : {}),
       ...(telemetry(event) ?? current.telemetry ? { telemetry: telemetry(event) ?? current.telemetry } : {}),
       ...("summary" in event ? { summary: safe(event.summary, MAX_SUMMARY_BYTES) } : {}),
+      ...(event.type === "failed" ? { failure: { code: "DISPATCH_FAILED", stage: safe(event.stage), remediation: "Inspect the dispatch result and retry after resolving the reported stage." } } : {}),
       ...("target" in event && event.target ? { target: safe(event.target) } : {}),
       terminal: nextStatus === "completed" || nextStatus === "failed" || nextStatus === "canceled",
     });
@@ -140,7 +154,8 @@ export function createParallelCardProjection(locale: OutputLocale) {
   function snapshot(): ParallelCardResult {
     const list = order.map((key) => children.get(key)!);
     const count = (value: ChildStatus) => list.filter((child) => child.status === value).length;
-    const details: ParallelCardDetails = { parallel: {
+    const dispatchStatus = list.some((child) => !child.terminal) ? "running" : list.some((child) => child.status === "failed") ? "failed" : list.some((child) => child.status === "canceled") ? "canceled" : "completed";
+    const details: ParallelCardDetails = { dispatchStatus, parallel: {
       total: list.length, pending: count("pending"), running: count("running"), completed: count("completed"), failed: count("failed"), canceled: count("canceled"),
       children: list,
     } };
@@ -158,6 +173,8 @@ export function createParallelCardProjection(locale: OutputLocale) {
       lines.push(`${labels.operation}: ${child.operation}`, `${labels.status}: ${humanStatus(child.status)}`);
       if (child.target) lines.push(`target: ${child.target}`);
       if (child.summary) lines.push(`summary: ${child.summary}`);
+      if (child.diagnostic) lines.push(`diagnostic: ${child.diagnostic.code} — ${child.diagnostic.message}`);
+      if (child.failure) lines.push(`failure: ${child.failure.code} @ ${child.failure.stage} — ${child.failure.remediation}`);
       if (child.telemetry) {
         lines.push(`${labels.elapsed}: ${child.telemetry.elapsedMs}ms`);
         if (child.telemetry.usage?.input !== undefined) lines.push(`${labels.input}: ${child.telemetry.usage.input}`);

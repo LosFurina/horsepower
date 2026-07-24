@@ -295,7 +295,12 @@ trap cleanup EXIT HUP INT TERM
 MODEL_SETUP_COMPLETE=0
 CONFIGURATION_COMPLETE=0
 LOCALE_PERSISTED=0
-if HOME="$HOME_DIR" "$CLI_LINK" configure --locale "$LOCALE" --json >/dev/null; then LOCALE_PERSISTED=1; fi
+CONFIGURE_LOCALE_ERROR="$TMP/configure-locale.error"
+if HOME="$HOME_DIR" "$CLI_LINK" configure --locale "$LOCALE" --json >/dev/null 2>"$CONFIGURE_LOCALE_ERROR"; then
+  LOCALE_PERSISTED=1
+else
+  printf '%s\n' "Warning: locale configuration failed: $(cat "$CONFIGURE_LOCALE_ERROR")" >&2
+fi
 if [ "$INTERACTIVE" -eq 1 ]; then
   CONFIGURATION_JSON="$TMP/configuration.json"
   CONFIGURATION_ERROR="$TMP/configuration.error"

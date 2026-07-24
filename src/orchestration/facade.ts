@@ -6,6 +6,7 @@ import type { ReviewCampaign, ReviewCampaignOutcome, ReviewFindingDisposition, R
 import { OneShotBatchError, type OneShotExecutor, type OneShotInvocation, type OneShotProgress, type WorkerIdentity } from "../runtime/one-shot.js";
 import type { ResolvedSlot } from "../slots/registry.js";
 import { horsepowerActionSchemas, horsepowerSubagentSchema } from "./schema.js";
+import { projectFailure, projectComposite, type CaptainFailure, type CompositeOutcome } from "../failures/captain-failure.js";
 
 interface CreateWorkerInput {
   name: string;
@@ -68,7 +69,11 @@ export interface OrchestrationOptions {
 
 function required(input: Record<string, unknown>, field: string): string {
   const value = input[field];
-  if (typeof value !== "string" || !value.trim()) throw new Error(`$.${field}: required`);
+  if (typeof value !== "string" || !value.trim()) {
+    const error = new Error(`$.${field}: required`);
+    Object.assign(error, { horsepowerFailure: projectFailure({ code: "INPUT_REQUIRED", boundary: "orchestration", stage: "validation", path: `$.${field}`, message: "Required field is missing.", remediation: "Provide the field and retry the dispatch." }) });
+    throw error;
+  }
   return value;
 }
 
@@ -171,7 +176,7 @@ function failureEvidence(cause: unknown, stage: string) {
   const code = typeof metadata?.code === "string" ? metadata.code : typeof direct?.code === "string" ? direct.code : undefined;
   const boundary = typeof metadata?.boundary === "string" ? metadata.boundary : undefined;
   const remediation = typeof metadata?.remediation === "string" ? metadata.remediation : undefined;
-  return { stage, message, ...(code ? { code } : {}), ...(boundary ? { boundary } : {}), ...(remediation ? { remediation } : {}) };
+  return projectFailure({ code: code ?? "DISPATCH_FAILED", boundary: boundary ?? "orchestration", stage, message, remediation: remediation ?? "Inspect the reported stage and retry after resolving the cause." });
 }
 
 export function createOrchestration(options: OrchestrationOptions) {

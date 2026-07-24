@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import type { JsonObject } from "../config/json-store.js";
 import { validateReleaseCompatibility } from "../release-manifest.js";
 import { inspectReleaseArchive, scanPublicContent, type ArchiveEntry } from "./index.js";
+import { projectFailure } from "../failures/captain-failure.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -769,7 +770,8 @@ function relativePath(archivePath: string): string {
 // ---------------------------------------------------------------------------
 
 function failResult(code: string, message: string): UpdateResult {
-  return { status: "failed", currentVersion: "unknown", reason: `${code}: ${message}` };
+  const failure = projectFailure({ code: `UPDATE_${code.toUpperCase().replace(/[^A-Z0-9]+/gu, "_")}`, boundary: "updater", stage: "update", message, remediation: "Inspect the reported update stage, repair the installation if necessary, and retry.", retryable: !["invalid current", "installation ownership conflict", "cli link unowned", "versions unowned"].includes(code) });
+  return { status: "failed", currentVersion: "unknown", reason: `${code}: ${message} (${JSON.stringify(failure)})` };
 }
 
 // ---------------------------------------------------------------------------

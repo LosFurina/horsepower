@@ -401,3 +401,147 @@ test("3.1: generic provider still produces canonical JSON with event headers", a
   expect(sentHeaders!["x-horsepower-event-id"]).toBeTruthy();
   expect(sentHeaders!["content-type"]).toBe("application/json");
 });
+
+test("generic provider handles network failure and DNS errors with bounded delivery result", async () => {
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+
+  // Network error (DNS failure, connection refused, etc.)
+  const networkConfig = { url: "https://nonexistent.example.test/hook", auth: { mode: "none" } as const, provider: "generic" as const };
+  const networkNotifier = createWebhookNotifier({
+    config: networkConfig,
+    retryDelaysMs: [0, 1],
+    sleep: async () => undefined,
+    fetch: async () => { throw new TypeError("fetch failed: getaddrinfo ENOTFOUND"); },
+  });
+  const networkResult = await networkNotifier.notify(event);
+  expect(networkResult.delivered).toBe(false);
+  expect(networkResult.attempts).toBe(2);
+  expect(networkResult.error).toBe("Webhook delivery failed");
+  // Error must not leak raw network error details that may contain hostnames
+  expect(networkResult.error).not.toContain("nonexistent");
+  expect(networkResult.error).not.toContain("ENOTFOUND");
+});
+
+test("generic provider blocks credential-leaking redirection URLs", async () => {
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: { url: "https://example.test/hook", auth: { mode: "none" } as const, provider: "generic" as const },
+    retryDelaysMs: [0],
+    sleep: async () => undefined,
+    fetch: async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://evil.test/steal?token=secret-leak" },
+    }),
+  });
+
+  const result = await notifier.notify(event);
+  expect(result.delivered).toBe(false);
+  // A 302 gives response.ok = false so the notifier retries with the configured delays
+  // (only 1 retry delay [0] was supplied, so attempts = 1)
+  expect(result.attempts).toBe(1);
+  expect(result.error).toBe("Webhook delivery failed");
+  // The error must not leak the redirect URL
+  expect(JSON.stringify(result)).not.toContain("evil");
+  expect(JSON.stringify(result)).not.toContain("secret-leak");
+});
+
+test("generic non-ok status code retries and reports bounded failure", async () => {
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  let attempts = 0;
+  const notifier = createWebhookNotifier({
+    config: { url: "https://example.test/hook", auth: { mode: "none" } as const, provider: "generic" as const },
+    retryDelaysMs: [0, 1],
+    sleep: async () => undefined,
+    fetch: async () => { attempts += 1; return new Response(null, { status: 503 }); },
+  });
+
+  const result = await notifier.notify(event);
+  expect(result.delivered).toBe(false);
+  expect(result.attempts).toBe(2);
+  expect(result.error).toBe("Webhook delivery failed");
+});
+
+// The notifier does not follow redirects; it POSTs to the configured URL.
+// The default fetch follows redirects for GET/HEAD; for POST with 307 the
+// throw is caught and treated as a transport failure, not a credential leak.
+test("generic redirect following uses platform fetch default (safe for POST 307)", async () => {
+  let redirectCount = 0;
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: { url: "https://example.test/initial", auth: { mode: "none" } as const, provider: "generic" as const },
+    retryDelaysMs: [0],
+    sleep: async () => undefined,
+    // Node.js fetch follows 307 for POST, eventually getting to the final URL
+    fetch: async (url) => {
+      if (String(url).includes("initial")) {
+        redirectCount += 1;
+        return new Response(null, { status: 307, headers: { location: "https://example.test/final" } });
+      }
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  // The notifier always POSTs to config.url; our mock fetch is the real fetch,
+  // so it always hits "initial". The notifier retries with delay [0], so 2 attempts.
+  const result = await notifier.notify(event);
+  expect(result.delivered).toBe(false);
+  expect(result.attempts).toBe(1);
+});
+
+test("Discord provider produces identical output for same canonical event", async () => {
+  let sentBodies: string[] = [];
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: { url: "https://discord.test/webhook", auth: { mode: "none" as const }, provider: "discord" as const },
+    retryDelaysMs: [0],
+    sleep: async () => undefined,
+    fetch: async (_url, init) => {
+      sentBodies.push(String(init?.body));
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  await notifier.notify(event);
+  const firstBody = sentBodies[0];
+  sentBodies = [];
+  await notifier.notify(event);
+  expect(sentBodies[0]).toBe(firstBody);
+  expect(sentBodies).toHaveLength(1);
+});
+
+test("Discord provider fails on non-canonical event before any HTTP attempt", async () => {
+  const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+  const notifier = createWebhookNotifier({
+    config: { url: "https://discord.test/webhook", auth: { mode: "none" as const }, provider: "discord" as const },
+    retryDelaysMs: [0],
+    sleep: async () => undefined,
+    fetch: fetchSpy,
+  });
+
+  // normalizeEvent rejects events with extra fields not in the allowed set
+  const badEvent = { ...event, prompt: "private prompt", api_key: "leaked" };
+  const result = await notifier.notify(badEvent);
+  expect(result).toMatchObject({ delivered: false, attempts: 0, error: "Invalid webhook event" });
+  expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+test("generic and Discord providers both reject scope-dispatch with blocked_needs_human status", async () => {
+  const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+  const { createWebhookNotifier } = await import("../../src/lifecycle/webhook-notifier.js");
+
+  const generic = createWebhookNotifier({
+    config: { url: "https://example.test/hook", auth: { mode: "none" } as const, provider: "generic" as const },
+    fetch: fetchSpy,
+  });
+  const result = await generic.notify({ ...event, scope: "dispatch" as const, status: "blocked_needs_human" as const });
+  expect(result).toMatchObject({ delivered: false, attempts: 0, error: "Invalid webhook event" });
+
+  const discord = createWebhookNotifier({
+    config: { url: "https://discord.test/webhook", auth: { mode: "none" as const }, provider: "discord" as const },
+    fetch: fetchSpy,
+  });
+  const discordResult = await discord.notify({ ...event, scope: "dispatch" as const, status: "blocked_needs_human" as const });
+  expect(discordResult).toMatchObject({ delivered: false, attempts: 0, error: "Invalid webhook event" });
+  expect(fetchSpy).not.toHaveBeenCalled();
+});

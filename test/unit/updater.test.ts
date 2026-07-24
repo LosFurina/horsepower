@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -338,3 +338,59 @@ test("createDefaultTransport resolves latest release tag from GitHub redirect", 
   const identity = await transport.resolveLatestRelease();
   expect(identity).toEqual({ owner: "LosFurina", repo: "horsepower", version: "0.2.0" });
 });
+
+test("update rollback leaves no residual temp files or dangling current- links", async () => {
+  const homeDir = await temp();
+  await installFixture(homeDir, "0.1.0");
+
+  const { archive, checksum } = await buildFixtureArchive("0.2.0");
+  const assets = new Map<string, { archive: Buffer; checksum: Buffer }>();
+  assets.set("0.2.0", { archive, checksum });
+
+  const hp = join(homeDir, ".pi/agent/horsepower");
+  // The current link already exists (created by installFixture), verify it
+  expect(await readlink(join(hp, "current"))).toBe("versions/v0.1.0");
+
+  // Run an update where doctor fails — triggers rollback
+  const result = await runUpdate({
+    homeDir,
+    transport: stubTransport(assets),
+    fs: defaultFilesystem,
+    process: { execFile: async () => ({ stdout: "", stderr: "doctor failed", exitCode: 1 }) },
+    clock: { now: () => new Date() },
+    lock: createFileLock(join(hp, ".update.lock"), defaultFilesystem),
+  });
+
+  expect(result.status).toBe("rolled_back");
+
+  // Check no residual state
+  const entries = [];
+  for (const name of await readdir(hp)) {
+    if (name.startsWith(".current-") || name.startsWith(".current-prior-") || name.startsWith(".archive-") || name.endsWith(".tmp")) {
+      entries.push(name);
+    }
+  }
+  expect(entries).toEqual([]);
+
+  // Current points back to original
+  expect(await readlink(join(hp, "current"))).toBe("versions/v0.1.0");
+
+  // The new version directory does exist (it was extracted before doctor ran)
+  let versionExists = false;
+  try {
+    const manifest = JSON.parse(await readFile(join(hp, "versions/v0.2.0/release-manifest.json"), "utf8"));
+    versionExists = manifest.version === "0.2.0";
+  } catch { /* absent — acceptable */ }
+  // The new version may or may not exist depending on when rollback happens
+  // (extraction vs post-doctor). Both are valid.
+  if (!versionExists) {
+    // If version dir doesn't exist, confirm no partial v0.2.0 residue
+    await expect(readdir(join(hp, "versions"))).resolves.toEqual(["v0.1.0"]);
+  } else {
+    // If it does exist, the current symlink still points to v0.1.0
+    expect(await readlink(join(hp, "current"))).toBe("versions/v0.1.0");
+  }
+});
+
+// Note: "test("update rejects partial Pi integration without changing current", ...)" is above.
+// That test validates PI link conflict detection. Rollback residual state is above.

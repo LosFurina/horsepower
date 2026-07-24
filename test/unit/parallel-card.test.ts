@@ -80,3 +80,81 @@ test("ignores unknown and duplicate identities, bounds UTF-8 details, and return
   (first.details.parallel.children[0]!.identity as { name: string }).name = "mutated";
   expect(card.snapshot().details.parallel.children[0]!.identity.name).toBe("task-1");
 });
+
+test("detects stall when worker makes no substantive progress past threshold", () => {
+  const card = createParallelCardProjection("en");
+  card.reduce({ type: "accepted", identity: identity(1) });
+  // Establish a substantive progress baseline
+  card.reduce({ type: "assistant", identity: identity(1), summary: "baseline", telemetry: { elapsedMs: 0 } });
+  // Long gap without any substantive event => stall
+  card.reduce({ type: "starting", identity: identity(1), telemetry: { elapsedMs: 35_000 } });
+  const snap = card.snapshot();
+  expect(snap.details.parallel.children[0]!.diagnostic).toBeDefined();
+  expect(snap.details.parallel.children[0]!.diagnostic!.code).toBe("WORKER_PROGRESS_STALLED");
+});
+
+test("does not stall after substantive assistant progress", () => {
+  const card = createParallelCardProjection("en");
+  card.reduce({ type: "accepted", identity: identity(1) });
+  card.reduce({ type: "assistant", identity: identity(1), summary: "making progress", telemetry: { elapsedMs: 0 } });
+  card.reduce({ type: "starting", identity: identity(1), telemetry: { elapsedMs: 5_000 } });
+  const snap = card.snapshot();
+  expect(snap.details.parallel.children[0]!.diagnostic).toBeUndefined();
+});
+
+test("stall clears and re-triggers after new substantive progress then long gap", () => {
+  const card = createParallelCardProjection("en");
+  card.reduce({ type: "accepted", identity: identity(1) });
+  card.reduce({ type: "assistant", identity: identity(1), summary: "first", telemetry: { elapsedMs: 0 } });
+  // Long gap triggers stall
+  card.reduce({ type: "starting", identity: identity(1), telemetry: { elapsedMs: 35_000 } });
+  expect(card.snapshot().details.parallel.children[0]!.diagnostic).toBeDefined();
+  // New substantive progress clears stall
+  card.reduce({ type: "assistant", identity: identity(1), summary: "resumed", telemetry: { elapsedMs: 36_000 } });
+  expect(card.snapshot().details.parallel.children[0]!.diagnostic).toBeUndefined();
+  // Another long gap re-triggers stall
+  card.reduce({ type: "starting", identity: identity(1), telemetry: { elapsedMs: 70_000 } });
+  expect(card.snapshot().details.parallel.children[0]!.diagnostic).toBeDefined();
+});
+
+test("terminal child never reports stall", () => {
+  const card = createParallelCardProjection("en");
+  card.reduce({ type: "accepted", identity: identity(1) });
+  card.reduce({ type: "assistant", identity: identity(1), summary: "progress", telemetry: { elapsedMs: 0 } });
+  card.reduce({ type: "completed", identity: identity(1), telemetry: { elapsedMs: 5_000 } });
+  card.reduce({ type: "starting", identity: identity(1), telemetry: { elapsedMs: 40_000 } });
+  expect(card.snapshot().details.parallel.children[0]!.diagnostic).toBeUndefined();
+  expect(card.snapshot().details.parallel.children[0]!.terminal).toBe(true);
+});
+
+test("dispatchStatus derives failed when any child fails", () => {
+  const card = createParallelCardProjection("en");
+  [1, 2].forEach((i) => card.reduce({ type: "accepted", identity: identity(i) }));
+  card.reduce({ type: "completed", identity: identity(1), telemetry: { elapsedMs: 10 } });
+  card.reduce({ type: "failed", identity: identity(2), stage: "worker", summary: "fail" });
+  expect(card.snapshot().details.dispatchStatus).toBe("failed");
+});
+
+test("dispatchStatus derives canceled when all terminal and some canceled", () => {
+  const card = createParallelCardProjection("en");
+  [1, 2].forEach((i) => card.reduce({ type: "accepted", identity: identity(i) }));
+  card.reduce({ type: "completed", identity: identity(1), telemetry: { elapsedMs: 10 } });
+  card.reduce({ type: "canceled", identity: identity(2), summary: "canceled" });
+  expect(card.snapshot().details.dispatchStatus).toBe("canceled");
+});
+
+test("dispatchStatus is running while any child is not terminal", () => {
+  const card = createParallelCardProjection("en");
+  [1, 2].forEach((i) => card.reduce({ type: "accepted", identity: identity(i) }));
+  card.reduce({ type: "completed", identity: identity(1), telemetry: { elapsedMs: 10 } });
+  // child 2 is still pending/running
+  expect(card.snapshot().details.dispatchStatus).toBe("running");
+});
+
+test("dispatchStatus is completed when all children completed", () => {
+  const card = createParallelCardProjection("en");
+  [1, 2].forEach((i) => card.reduce({ type: "accepted", identity: identity(i) }));
+  card.reduce({ type: "completed", identity: identity(1), telemetry: { elapsedMs: 10 } });
+  card.reduce({ type: "completed", identity: identity(2), telemetry: { elapsedMs: 20 } });
+  expect(card.snapshot().details.dispatchStatus).toBe("completed");
+});

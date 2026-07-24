@@ -26,6 +26,7 @@ import type { ModelCapabilityProbe } from "../runtime/model-capability-probe.js"
 import { createPiCapabilityProbe } from "../runtime/pi-capability-probe.js";
 import { createPreLaunchCapabilityGate } from "../runtime/pre-launch-capability-gate.js";
 import { createSlotRegistry, type SlotConfiguration } from "../slots/registry.js";
+import { createDiagnosticBuffer } from "../failures/captain-failure.js";
 
 export interface HorsepowerRuntimeContext {
   captain: boolean;
@@ -86,6 +87,7 @@ export class HorsepowerRuntime {
   readonly #notifiers = new Set<ReturnType<typeof createWebhookNotifier>>();
   readonly #operations = new Set<Promise<unknown>>();
   #closed = false;
+  #diagnostics?: ReturnType<typeof createDiagnosticBuffer>;
   #shutdown?: Promise<void>;
 
   constructor(options: CreateHorsepowerRuntimeOptions) {
@@ -213,7 +215,10 @@ export class HorsepowerRuntime {
       }
       await this.#revalidateCampaignTasks({ campaignId: lease.campaignId, changeId: lease.changeId, projectId: lease.projectId, cwd: projectId, selectedTaskIds: lease.selectedTaskIds });
       return this.#implementations.beginContinuationGeneration(lease.campaignId, lease.projectId, input.generation);
-    } catch { return undefined; }
+    } catch (cause) {
+      this.#diagnostics?.record({ code: "CAMPAIGN_CONTINUATION_SUPPRESSED", boundary: "campaign", stage: "continuation-revalidation", message: cause, remediation: "Review the reported change/task drift and start a new campaign." });
+      return undefined;
+    }
   }
 
   async #loadTaskInventory(cwd: string, changeId: string): Promise<OpenSpecTaskInventory> {
@@ -269,6 +274,8 @@ export class HorsepowerRuntime {
     const raw = input as Record<string, unknown>;
     const cwd = resolve(context.cwd);
     const projectId = await realpath(cwd).catch(() => cwd);
+  const diagnostics = createDiagnosticBuffer();
+    this.#diagnostics = diagnostics;
     const paths = resolveHorsepowerPaths({ homeDir: this.#options.homeDir, projectDir: cwd });
     const readText = this.#options.readText ?? ((path: string) => readFile(path, "utf8"));
     const safe = new Set(["status", "list", "read", "abort", "destroy", "doctor", "review_campaign_status"]);
@@ -453,7 +460,7 @@ export class HorsepowerRuntime {
       readWorker: (workerId, options) => this.#manager.read(workerId, options),
       abortWorker: (workerId) => this.#manager.abort(workerId),
       destroyWorker: (workerId, force) => this.#manager.destroy(workerId, force),
-      doctor: () => ({ generation: "process", workers: this.#manager.list().length }),
+      doctor: () => ({ generation: "process", workers: this.#manager.list().length, ...diagnostics.snapshot() }),
       reportDispatchTerminal: (report) => this.#lifecycle.reportDispatchTerminal(report),
       reportChangeTerminal: async (report) => {
         const result = await this.#lifecycle.reportChangeTerminal(report);

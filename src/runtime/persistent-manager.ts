@@ -3,6 +3,7 @@ import type { ThinkingLevel } from "../slots/registry.js";
 import { capabilityRejectionError, type CapabilityRejectionError } from "./capability-rejection.js";
 import { createEventStream, type EventStream, type EventStreamReadOptions, type EventStreamReadResult } from "./event-stream.js";
 import { addProgressUsage, normalizeAssistantSummary, telemetrySnapshot, type ProgressTelemetry, type ProgressUsage } from "./progress-telemetry.js";
+import { projectFailure, type CaptainFailure } from "../failures/captain-failure.js";
 
 export type WorkerStatus = "starting" | "idle" | "running" | "failed" | "destroying" | "destroyed";
 export type MessageStatus = "accepted" | "queued" | "running" | "completed" | "failed" | "canceled";
@@ -50,6 +51,8 @@ export interface WorkerSummary {
   createdAt: number;
   lastActivityAt: number;
   error?: string;
+  failure?: CaptainFailure;
+  secondaryFailures?: CaptainFailure[];
   handoffMode?: "managed" | "inline";
   handoffRunId?: string;
   telemetry?: ProgressTelemetry;
@@ -62,6 +65,7 @@ interface MessageState {
   finalText?: string;
   error?: string;
   failure?: CapabilityRejectionError;
+  structuredFailure?: CaptainFailure;
   abortObserved?: boolean;
   abortRequested?: boolean;
   startedAt: number;
@@ -110,6 +114,7 @@ export interface SendWorkerResult {
   status: MessageStatus | WorkerStatus;
   text?: string;
   error?: string;
+  failure?: CaptainFailure;
   timedOut?: true;
   telemetry?: ProgressTelemetry;
 }
@@ -249,7 +254,10 @@ export class PersistentWorkerManager {
   async send(input: SendWorkerInput): Promise<SendWorkerResult> {
     const worker = this.#require(input.workerId);
     if (worker.summary.status === "failed") {
-      throw new Error(`Persistent worker failed: ${worker.summary.error ?? "unknown error"}`);
+      const failure = worker.summary.failure;
+      const error = new Error(`Persistent worker failed: ${failure?.message ?? worker.summary.error ?? "unknown error"}`);
+      Object.assign(error, { failure });
+      throw error;
     }
     if (worker.summary.status === "destroying" || worker.summary.status === "destroyed") {
       throw new Error(`Persistent worker ${input.workerId} is being destroyed`);
@@ -308,12 +316,13 @@ export class PersistentWorkerManager {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       message.status = "failed";
       message.error = error.message;
+      message.structuredFailure = projectFailure({ code: "HP-PERSISTENT-RPC-REQUEST", boundary: "persistent-worker", stage: "rpc", message: error.message, remediation: "Inspect the worker status and event stream before retrying." });
       message.reject(error);
       worker.queue = worker.queue.filter((id) => id !== messageId);
       worker.summary.queuedMessageIds = worker.summary.queuedMessageIds.filter((id) => id !== messageId);
       if (worker.summary.activeMessageId === messageId) delete worker.summary.activeMessageId;
       if (!worker.summary.activeMessageId && worker.queue.length === 0) worker.summary.status = "idle";
-      this.#append(worker, "message.failed", messageId, undefined, error.message);
+      this.#append(worker, "message.failed", messageId, undefined, error.message, message.structuredFailure);
       throw error;
     }
 
@@ -473,6 +482,7 @@ export class PersistentWorkerManager {
       text: message.finalText ?? "",
       telemetry: this.#telemetry(this.#require(workerId), message),
       ...(message.error === undefined ? {} : { error: message.error }),
+      ...(message.structuredFailure ? { failure: message.structuredFailure } : {}),
     };
   }
 
@@ -537,6 +547,7 @@ export class PersistentWorkerManager {
         const message = worker.messages.get(activeId);
         if (message) {
           message.failure = failure;
+          message.structuredFailure = projectFailure({ code: failure.code ?? "HP-PERSISTENT-RPC-FAILURE", boundary: "persistent-worker", stage: "rpc", message: failure.message, remediation: "Inspect the worker status and event stream before retrying." });
           message.error = failure.message;
         }
       }
@@ -549,6 +560,7 @@ export class PersistentWorkerManager {
         message!.error = typeof value.errorMessage === "string"
           ? value.errorMessage
           : `Worker message ${String(value.stopReason)}`;
+        message!.structuredFailure ??= projectFailure({ code: value.stopReason === "aborted" ? "HP-PERSISTENT-MESSAGE-CANCELED" : "HP-PERSISTENT-MESSAGE-FAILED", boundary: "persistent-worker", stage: "message", message: message!.error, remediation: "Inspect the worker event stream and retry if appropriate." });
         message!.abortObserved = value.stopReason === "aborted";
       } else {
         const text = assistantText(event);
@@ -603,6 +615,7 @@ export class PersistentWorkerManager {
           if (!queued) continue;
           queued.status = "canceled";
           queued.error = "Queued message canceled by abort";
+          queued.structuredFailure = projectFailure({ code: "HP-PERSISTENT-MESSAGE-CANCELED", boundary: "persistent-worker", stage: "cancellation", message: queued.error, remediation: "Resubmit the message after the worker is idle.", messageId: queued.messageId });
           queued.reject(new Error(queued.error));
           this.#append(worker, "message.canceled", queuedId, undefined, queued.error);
         }
@@ -624,13 +637,16 @@ export class PersistentWorkerManager {
     worker.exited = true;
     if (worker.destroyRequested) return;
     const error = `Persistent worker exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"})`;
+    const failure = projectFailure({ code: "HP-PERSISTENT-WORKER-EXIT", boundary: "persistent-worker", stage: "worker-exit", message: error, remediation: "Inspect the worker event stream and restart the worker.", retryable: true, workerId: worker.summary.workerId });
     worker.summary.status = "failed";
     worker.summary.error = error;
+    worker.summary.failure = failure;
     this.#append(worker, "worker.failed", worker.summary.activeMessageId, undefined, error);
     for (const message of worker.messages.values()) {
       if (message.status === "running" || message.status === "queued" || message.status === "accepted") {
         message.status = "failed";
         message.error = error;
+        message.structuredFailure = projectFailure({ ...failure, message: error, messageId: message.messageId });
         message.reject(new Error(error));
       }
     }

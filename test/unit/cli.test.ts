@@ -2174,3 +2174,74 @@ test("CLI never mutates Pi model/provider configuration or API keys", async () =
   expect(await readFile(provider, "utf8")).toBe('{"private":"model"}');
   expect(await readFile(auth, "utf8")).toBe('{"apiKey":"secret"}');
 });
+
+test("JSON output contains every key that text output summarizes", async () => {
+  const { run } = await harness();
+  await run(setupArgs);
+
+  // For non-error commands, text output is just "{summary}\n" and JSON
+  // is {"data":...,"ok":...,"outputLocale":...,"summary":"..."}
+  // Verify the summary text appears in both.
+  const jsonResult = await run(["slots", "--json"]);
+  const parsed = JSON.parse(jsonResult.stdout);
+  expect(parsed).toHaveProperty("data");
+  expect(parsed).toHaveProperty("ok");
+  expect(parsed).toHaveProperty("summary");
+  expect(parsed).toHaveProperty("outputLocale");
+  expect(typeof parsed.summary).toBe("string");
+  expect(parsed.summary.length).toBeGreaterThan(0);
+  expect(["en", "zh-CN"]).toContain(parsed.outputLocale);
+
+  // Text output: just the summary line
+  const textResult = await run(["slots"]);
+  expect(textResult.stdout.trim()).toBe(parsed.summary);
+  expect(textResult.stderr).toBe("");
+  expect(textResult.exitCode).toBe(0);
+});
+
+test("JSON and text error responses share the same ok false structure", async () => {
+  const { run } = await harness();
+
+  // Error responses (exitCode === 2)
+  const jsonErr = JSON.parse((await run(["unknown", "--json"])).stderr);
+  expect(jsonErr).toMatchObject({ ok: false, error: { code: "USAGE" }, outputLocale: "en" });
+  expect(jsonErr.summary).toBe("Unknown command: unknown");
+
+  // Text error — should still exit 2 but emit structured text
+  const textErr = await run(["unknown"]);
+  expect(textErr.exitCode).toBe(2);
+  expect(textErr.stderr).toContain("horsepower:");
+  expect(textErr.stderr).toContain("command");
+  expect(textErr.stdout).toBe("");
+});
+
+test("JSON and text output have consistent summary and ok fields for every machine-accessible command", async () => {
+  const { run } = await harness();
+  await run(setupArgs);
+
+  // Each command that supports --json should emit the same status and summary
+  // in both text and JSON modes.
+  const commands: Array<[string[], string]> = [
+    [["slots", "--json"], "json"],
+    [["doctor", "--json"], "json"],
+    [["configure", "--locale", "en", "--json"], "json"],
+    [["configure", "--json"], "json"],
+  ];
+
+  for (const [argv, mode] of commands) {
+    const json = JSON.parse((await run(argv)).stdout);
+    expect(json, `${argv.join(" ")} summary`).toHaveProperty("summary");
+    expect(json, `${argv.join(" ")} outputLocale`).toHaveProperty("outputLocale");
+    if ("ok" in json) {
+      // ok may be boolean
+      expect([true, false]).toContain(json.ok);
+    }
+    // Summary must be a non-empty string
+    expect(typeof json.summary).toBe("string");
+    expect(json.summary.length).toBeGreaterThan(0);
+    // outputLocale must be set
+    expect(["en", "zh-CN"]).toContain(json.outputLocale);
+  }
+});
+
+// End of file

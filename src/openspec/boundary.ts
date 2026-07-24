@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isSupportedOpenSpecVersion, unsupportedOpenSpecMessage } from "../compatibility.js";
 import { parseOpenSpecTaskInventory, type OpenSpecTaskInventory } from "./task-inventory.js";
 import { createHash } from "node:crypto";
+import { projectFailure } from "../failures/captain-failure.js";
 
 export type SafeAction = "status" | "list" | "read" | "abort" | "destroy" | "doctor";
 export type AdvancingAction = "single" | "parallel" | "chain" | "create" | "send" | "steer" | "begin_change" | "report_terminal";
@@ -32,6 +33,11 @@ export interface AuthorizationInput {
   action: HorsepowerAction;
   cwd: string;
   changeId?: string;
+}
+
+function boundaryFailure(code: string, stage: string, message: string, remediation: string, identity: Record<string, unknown> = {}): Error {
+  const failure = projectFailure({ code, boundary: "openspec", stage, message, remediation, ...identity });
+  return Object.assign(new Error(failure.message), { horsepowerFailure: failure });
 }
 
 const MAX_DISCOVERY_BYTES = 1024 * 1024;
@@ -95,15 +101,11 @@ export async function validateOpenSpecInstallation(
   cwd: string,
 ): Promise<{ version: string; projectRoot: string }> {
   const versionResult = await options.run(["--version"], { cwd });
-  if (versionResult.timedOut) throw new Error("OpenSpec version check timed out; run openspec doctor and retry");
+  if (versionResult.timedOut) throw boundaryFailure("OPENSPEC_VERSION_TIMEOUT", "version", "OpenSpec version check timed out", "Run openspec doctor and retry.");
   if (versionResult.truncated || Buffer.byteLength(versionResult.stdout, "utf8") > MAX_DISCOVERY_BYTES) throw new Error("OpenSpec version output exceeded the 1 MiB limit");
-  if (versionResult.code !== 0) {
-    throw new Error(
-      "Official OpenSpec CLI was not found. Install @fission-ai/openspec from the official Fission-AI/OpenSpec project.",
-    );
-  }
+  if (versionResult.code !== 0) throw boundaryFailure("OPENSPEC_CLI_UNAVAILABLE", "version", "Official OpenSpec CLI was not found", "Install @fission-ai/openspec from the official Fission-AI/OpenSpec project.");
   const version = versionResult.stdout.trim();
-  if (!isSupportedOpenSpecVersion(version)) throw new Error(unsupportedOpenSpecMessage(version));
+  if (!isSupportedOpenSpecVersion(version)) throw boundaryFailure("OPENSPEC_VERSION_UNSUPPORTED", "version", unsupportedOpenSpecMessage(version), "Install a supported official OpenSpec version.", { name: version });
   const doctor = checkedJson(await options.run(["doctor", "--json"], { cwd }), "doctor");
   let projectRoot: string;
   try {
@@ -185,7 +187,7 @@ export function createOpenSpecBoundary(options: OpenSpecBoundaryOptions) {
     }
     await Promise.all(Array.from({ length: Math.min(DISCOVERY_CONCURRENCY, admitted.length) }, () => inspectNext()));
     const failure = outcomes.find((outcome) => outcome.error)?.error;
-    if (failure) throw failure;
+    if (failure) throw boundaryFailure("OPENSPEC_DISCOVERY_FAILED", "discovery", failure.message, "Run openspec doctor and resolve the reported change artifact problem.");
     return outcomes.flatMap((outcome) => outcome.candidate ? [outcome.candidate] : []);
   }
   async function applyContext(input: { cwd: string; changeId: string }, verifiedContext?: VerifiedOpenSpecContext) {

@@ -61,7 +61,7 @@ async function loadModelCatalog() {
           }
         }
       }
-    } catch { /* Built-in models may have no user declaration; exact support remains unverified. */ }
+    } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write(`Warning: unable to read model declarations: ${cause instanceof Error ? cause.message : String(cause)}\n`); }
     const models = parsePiListModelRows(stdout).map((model) => {
       const thinkingLevelMap = declaredMaps.get(`${model.provider}/${model.id}`);
       return thinkingLevelMap ? { ...model, thinkingLevelMap } : model;
@@ -75,9 +75,10 @@ async function loadModelCatalog() {
         const scoped = (await resolveModelScope([...enabledModels], { getAvailable: async () => models } as never)).map(({ model }) => model);
         if (scoped.length > 0) selected = scoped;
       }
-    } catch { /* Optional scope filtering cannot erase an established current Pi catalog. */ }
+    } catch (cause) { process.stderr.write(`Warning: model scope could not be applied: ${cause instanceof Error ? cause.message : String(cause)}\n`); }
     return createPiModelCatalog({ getAll: () => selected });
-  } catch {
+  } catch (cause) {
+    process.stderr.write(`Model catalog unavailable: ${cause instanceof Error ? cause.message : String(cause)}\n`);
     return { status: "unavailable" as const, reason: "registry-error" as const };
   }
 }

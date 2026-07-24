@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, rename, rm, readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { projectFailure } from "../failures/captain-failure.js";
 
 export type JsonObject = Record<string, unknown>;
 
 export async function readJsonObject(path: string): Promise<JsonObject> {
-  const contents = await readFile(path, "utf8");
+  let contents: string;
+  try { contents = await readFile(path, "utf8"); }
+  catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") throw cause;
+    throw new Error(JSON.stringify(projectFailure({ code: "CONFIG_READ_FAILED", boundary: "configuration", stage: "read", path, message: cause instanceof Error ? cause.message : String(cause), remediation: "Repair permissions or the configuration path, then retry." })));
+  }
   let value: unknown;
   try {
     value = JSON.parse(contents);
@@ -13,7 +19,7 @@ export async function readJsonObject(path: string): Promise<JsonObject> {
     throw new Error(`Malformed JSON in ${path}`);
   }
   if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new Error(`Expected a JSON object in ${path}`);
+    throw new Error(JSON.stringify(projectFailure({ code: "CONFIG_INVALID_SHAPE", boundary: "configuration", stage: "parse", path, message: `Expected a JSON object in ${path}`, remediation: "Replace the configuration with a JSON object." })));
   }
   return value as JsonObject;
 }
