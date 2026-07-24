@@ -27,6 +27,7 @@ export interface ImplementationCampaign {
   selectedTasks: CampaignTaskSnapshot[];
   inventoryDigest: string;
   testing: CampaignTestingGuidance;
+  pollIntervalSeconds: number;
   mode: ImplementationMode;
   status: "active" | "ended";
   outcome?: "switched" | "ended";
@@ -44,6 +45,7 @@ export interface ContinuationLease {
   selectedTaskIds: string[];
   inventoryDigest: string;
   testingPrompt: string;
+  pollIntervalSeconds: number;
   mode: ImplementationMode;
   generation: number;
   disposition: "active" | "paused" | "blocked" | "terminal" | "superseded";
@@ -65,7 +67,7 @@ function text(value: string, label: string, maxBytes?: number): string {
   return normalized;
 }
 function positive(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer`);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483) throw new Error(`${label} must be a positive integer within safe timer range`);
   return value;
 }
 function copy(campaign: ImplementationCampaign): ImplementationCampaign { return structuredClone(campaign); }
@@ -138,6 +140,7 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       selectedTasks: readonly CampaignTaskSnapshot[];
       inventoryDigest: string;
       testing: CampaignTestingGuidance;
+      pollIntervalSeconds?: number;
       mode: ImplementationMode;
     }): ImplementationCampaign {
       const selectedTaskIds = exactTaskIds(input.selectedTaskIds, "implementation task ID");
@@ -158,13 +161,13 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       const campaign: ImplementationCampaign = {
         campaignId, changeId: text(input.changeId, "Implementation change ID", MAX_ID_BYTES),
         projectId: text(input.projectId, "Implementation project ID", MAX_PROJECT_ID_BYTES), selectedTaskIds, selectedTasks,
-        inventoryDigest: input.inventoryDigest, testing, mode: input.mode, status: "active",
+        inventoryDigest: input.inventoryDigest, testing, pollIntervalSeconds: positive(input.pollIntervalSeconds ?? 30, "Campaign polling interval"), mode: input.mode, status: "active",
         reviewerAuthorizations: [], dispatches: [], captainDirect: [],
       };
       const nextContinuation: ContinuationLease = {
         campaignId: campaign.campaignId, projectId: campaign.projectId, changeId: campaign.changeId,
         selectedTaskIds: [...campaign.selectedTaskIds], inventoryDigest: campaign.inventoryDigest, testingPrompt: campaign.testing.prompt,
-        mode: campaign.mode, generation: 0, disposition: "active",
+        pollIntervalSeconds: campaign.pollIntervalSeconds, mode: campaign.mode, generation: 0, disposition: "active",
       };
       if (Buffer.byteLength(JSON.stringify(nextContinuation), "utf8") > MAX_CONTINUATION_IDENTITY_BYTES) {
         throw new Error(`Implementation continuation identity exceeds ${MAX_CONTINUATION_IDENTITY_BYTES} bytes`);

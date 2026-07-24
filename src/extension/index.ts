@@ -10,6 +10,7 @@ import { horsepowerSubagentSchema } from "../orchestration/schema.js";
 import { message, resolveOutputLocale, type OutputLocale } from "../localization/index.js";
 import { acquireGlobalRuntime, type RuntimeLease } from "../runtime/global-runtime.js";
 import type { OneShotProgress, WorkerIdentity } from "../runtime/one-shot.js";
+import { deliverSettlementNotice } from "../runtime/settlement-delivery.js";
 import type { CreateHorsepowerRuntimeOptions, HorsepowerRuntime, HorsepowerRuntimeContext } from "./runtime.js";
 import { createHorsepowerRuntime } from "./runtime.js";
 import { createParallelCardProjection } from "./parallel-card.js";
@@ -57,7 +58,7 @@ interface ExtensionRuntime {
   beginImplementationCampaign?(input: {
     changeId: string; projectId: string; selectedTaskIds: string[];
     selectedTasks: Array<{ id: string; description: string; status: "pending"; sectionId: string; checks?: string[] }>;
-    inventoryDigest: string; mode: "multi_agent" | "main_agent"; testingPrompt: string;
+    inventoryDigest: string; mode: "multi_agent" | "main_agent"; testingPrompt: string; pollIntervalSeconds?: number;
   } | { changeId: string; projectId: string; taskScopes: string[]; mode: "multi_agent" | "main_agent" }): Promise<unknown>;
   authorizeImplementationReviewer?(input: { campaignId: string; projectId: string; reviewCampaignId: string; acceptanceScope: string; budget: number }): Promise<unknown>;
 }
@@ -219,7 +220,10 @@ export function registerHorsepowerExtension(
 ): void {
   let lease: ExtensionLease | undefined;
   let cleanup: Promise<void> | undefined;
+  let sessionGeneration = 0;
+  let sessionProject = "";
   const runtime = (ctx: ExtensionContext) => (lease ??= dependencies.acquireRuntime(ctx)).value;
+  const deliveryOwner = () => ({ cwd: sessionProject, generation: sessionGeneration });
 
   let compactionSerial = 0;
   // One process-local arm per successful automatic compaction generation.
@@ -230,6 +234,10 @@ export function registerHorsepowerExtension(
   const clearCompactGeneration = () => { compactGeneration = undefined; };
   pi.on("session_start", (_event, ctx) => {
     lease ??= dependencies.acquireRuntime(ctx);
+    // Keep the process-global runtime's delivery target aligned with Pi's
+    // current session; the callback rechecks this owner immediately before send.
+    sessionProject = ctx.cwd;
+    sessionGeneration += 1;
     clearCompactGeneration();
   });
   pi.on("session_before_compact", (event) => {
@@ -265,6 +273,8 @@ export function registerHorsepowerExtension(
     compactGeneration = { serial: ++compactionSerial, reason: e.reason, campaignId: candidate.campaignId, projectId, handled: false };
   });
   pi.on("agent_start", () => {
+    // Agent lifecycle remains observable through the live context checks used by
+    // settlement delivery; no message is sent while this turn is active.
     // Any turn that starts before Horsepower delivers its follow-up has won the
     // continuation race. A settlement context is a snapshot and cannot reveal
     // this later start, so invalidate the arm explicitly at the lifecycle edge.
@@ -416,6 +426,12 @@ export function registerHorsepowerExtension(
         ctx.ui.notify(`${labels.appendFailed} ${safeTitlePart(detail, 120)} ${preview}`.trim(), "error");
         return;
       }
+      // Commands must provide visible acknowledgement in interactive TUI as well as RPC.
+      if (presentation.workers.length === 0) {
+        ctx.ui.notify(labels.empty, "info");
+      } else if (ctx.mode !== "rpc") {
+        ctx.ui.notify(`${labels.workers}: ${presentation.workers.length}`, "info");
+      }
       if (ctx.mode === "rpc") ctx.ui.notify(labels.tuiUnavailable, "info");
     },
   });
@@ -515,6 +531,12 @@ export function registerHorsepowerExtension(
       const promptLabel = locale === "zh-CN"
         ? "描述本次 campaign 的测试强度（例如：仅运行相关测试；或覆盖单元、集成、失败路径与可用的 E2E）"
         : "Describe the testing intensity for this campaign (for example: only relevant tests; or unit, integration, failure paths, and available E2E)";
+      const pollInput = await ctx.ui.input(locale === "zh-CN" ? "请输入 worker polling interval（秒，默认 30）" : "Worker polling interval in seconds (positive integer, default 30)");
+      const pollIntervalSeconds = pollInput?.trim() === "" || pollInput === undefined ? 30 : Number(pollInput.trim());
+      if (!Number.isSafeInteger(pollIntervalSeconds) || pollIntervalSeconds <= 0 || pollIntervalSeconds > 2_147_483) {
+        ctx.ui.notify(locale === "zh-CN" ? "polling interval 无效；请输入正整数秒数，未创建 campaign。" : "Polling interval is invalid; enter a positive integer number of seconds. No campaign was created.", "error");
+        return;
+      }
       const rawTestingPrompt = await ctx.ui.input(promptLabel);
       const testingPrompt = rawTestingPrompt?.replace(/\s+/gu, " ").trim() ?? "";
       if (!testingPrompt || Buffer.byteLength(testingPrompt, "utf8") > 2_000 || /https?:\/\/|Authorization:|Bearer\s+|api[_-]?key|token[=:]/iu.test(testingPrompt)) {
@@ -530,10 +552,11 @@ export function registerHorsepowerExtension(
         `mode: ${mode}`,
         ...checkLines,
         `${locale === "zh-CN" ? "测试强度" : "Testing intensity"}: ${testingPrompt}`,
+        `${locale === "zh-CN" ? "轮询间隔" : "Polling interval"}: ${pollIntervalSeconds}s`,
       ]);
       const confirmed = await ctx.ui.confirm(
         locale === "zh-CN" ? "确认这些精确任务、检查、实施模式和测试强度吗？" : "Confirm these exact tasks, checks, execution mode, and testing intensity?",
-        `${t.count(selectedTaskIds.length)}; changeId=${changeId}; taskIds=${selectedTaskIds.join(",")}; mode=${mode}; testingIntensity=${testingPrompt}`,
+        `${t.count(selectedTaskIds.length)}; changeId=${changeId}; taskIds=${selectedTaskIds.join(",")}; mode=${mode}; pollIntervalSeconds=${pollIntervalSeconds}; testingIntensity=${testingPrompt}`,
       );
       if (!confirmed) {
         ctx.ui.notify(locale === "zh-CN" ? "已取消 campaign 确认；未创建 campaign。" : "Campaign confirmation canceled; no campaign was created.", "info");
@@ -546,6 +569,7 @@ export function registerHorsepowerExtension(
           selectedTasks: selectedTasks.map((task) => ({ ...task, status: "pending" as const })),
           inventoryDigest: inventory.digest,
           testingPrompt,
+          pollIntervalSeconds,
           mode,
         }) as typeof result;
       } catch (cause) {
@@ -557,11 +581,12 @@ export function registerHorsepowerExtension(
         campaignId: result.campaignId, changeId: result.changeId, mode: result.mode,
         selectedTaskIds: result.selectedTaskIds, selectedTaskCount: result.selectedTaskIds.length,
         testingPrompt,
+        pollIntervalSeconds,
         selectedTaskChecks: selectedTasks.map((task) => ({ taskId: task.id, checks: task.checks ?? [] })),
       };
       pi.sendMessage({
         customType: "horsepower-campaign",
-        content: `${t.kickoff} campaignId=${campaignResult.campaignId}; changeId=${campaignResult.changeId}; taskIds=${campaignResult.selectedTaskIds.join(",")}; mode=${campaignResult.mode}; testingIntensity=${testingPrompt}.`,
+        content: `${t.kickoff} campaignId=${campaignResult.campaignId}; changeId=${campaignResult.changeId}; taskIds=${campaignResult.selectedTaskIds.join(",")}; mode=${campaignResult.mode}; pollIntervalSeconds=${pollIntervalSeconds}; testingIntensity=${testingPrompt}.`,
         display: true,
         details: campaignResult,
       }, { deliverAs: "followUp", triggerTurn: true });
@@ -645,6 +670,8 @@ export function webhookOptions(homeDir: string, projectDir: string): CreateHorse
   );
 }
 
+let currentDeliveryOwner: { cwd: string; generation: number; context: ExtensionContext; sendMessage: (message: { customType: string; content: string; display: boolean; details: Record<string, unknown> }, options: { deliverAs: "followUp"; triggerTurn: true }) => void } | undefined;
+
 function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
   const homeDir = homedir();
   const bundledAgentsDir = bundledAgentsDirectory();
@@ -654,6 +681,14 @@ function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
       bundledAgentsDir,
       readText: (path) => readFile(path, "utf8"),
       resolveWebhook: (cwd) => webhookOptions(homeDir, cwd),
+      settlementDelivery: (notice) => {
+        const owner = currentDeliveryOwner;
+        if (!owner) return;
+        deliverSettlementNotice(owner.context as typeof owner.context & { sendMessage: typeof owner.sendMessage }, notice, { cwd: owner.cwd, generation: owner.generation }, () => {
+          const active = currentDeliveryOwner;
+          return active ? { cwd: active.cwd, generation: active.generation } : undefined;
+        });
+      },
     }),
   });
 }
@@ -661,7 +696,10 @@ function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
 export default function horsepowerExtension(pi: ExtensionAPI): void {
   const homeDir = homedir();
   registerHorsepowerExtension(pi, {
-    acquireRuntime: defaultLease,
+    acquireRuntime: (ctx) => {
+      if (ctx) currentDeliveryOwner = { cwd: ctx.cwd, generation: (currentDeliveryOwner?.generation ?? 0) + 1, context: ctx, sendMessage: pi.sendMessage.bind(pi) };
+      return defaultLease(ctx);
+    },
     resolveOutputLocale: async (cwd) => {
       const paths = resolveHorsepowerPaths({ homeDir, projectDir: cwd });
       return resolveOutputLocale(paths.global.settings, paths.project.settings);

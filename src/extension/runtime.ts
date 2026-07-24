@@ -27,6 +27,7 @@ import { createPiCapabilityProbe } from "../runtime/pi-capability-probe.js";
 import { createPreLaunchCapabilityGate } from "../runtime/pre-launch-capability-gate.js";
 import { createSlotRegistry, type SlotConfiguration } from "../slots/registry.js";
 import { createDiagnosticBuffer } from "../failures/captain-failure.js";
+import { deliverSettlementNotice } from "../runtime/settlement-delivery.js";
 
 export interface HorsepowerRuntimeContext {
   captain: boolean;
@@ -53,6 +54,7 @@ export interface CreateHorsepowerRuntimeOptions {
   loadTaskInventory?: (input: { cwd: string; changeId: string }) => Promise<OpenSpecTaskInventory>;
   discoverUnfinishedChanges?: (input: { cwd: string }) => Promise<OpenSpecChangeCandidate[]>;
   acceptanceSnapshot?: (input: { runId: string; changeId: string; projectId: string }) => AcceptanceSnapshot | Promise<AcceptanceSnapshot>;
+  settlementDelivery?: (notice: { workerId: string; status: "completed" | "failed" | "canceled"; messageId?: string; elapsedMs: number; lastProgressAgeMs: number }) => void;
 }
 
 interface ToolFailureMetadata { code: string; boundary: string; remediation: string }
@@ -92,7 +94,7 @@ export class HorsepowerRuntime {
 
   constructor(options: CreateHorsepowerRuntimeOptions) {
     this.#options = options;
-    this.#manager = options.manager ?? new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter() });
+    this.#manager = options.manager ?? new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter(), ...(options.settlementDelivery ? { onSettlement: options.settlementDelivery } : {}) });
     this.#capabilityGate = createPreLaunchCapabilityGate({
       cache: createCapabilityEvidenceCache(),
       probe: options.capabilityProbe ?? createPiCapabilityProbe(),
@@ -142,6 +144,7 @@ export class HorsepowerRuntime {
     inventoryDigest: string;
     mode: ImplementationMode;
     testingPrompt: string;
+    pollIntervalSeconds?: number;
   } | {
     changeId: string;
     projectId: string;
@@ -176,6 +179,7 @@ export class HorsepowerRuntime {
       inventoryDigest: input.inventoryDigest,
       testing: { prompt: input.testingPrompt, selectedTaskChecks: selectedTasks.map((task) => ({ taskId: task.id, checks: task.checks ?? [] })) },
       mode: input.mode,
+      pollIntervalSeconds: input.pollIntervalSeconds ?? 30,
     });
   }
 

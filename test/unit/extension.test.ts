@@ -469,7 +469,7 @@ test("user commands create implementation mode and bounded reviewer authorizatio
     .mockResolvedValueOnce("horsepower-alpha1 — 1/2 tasks complete")
     .mockResolvedValueOnce("All unfinished tasks")
     .mockResolvedValueOnce("Main Agent direct execution");
-  ctx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
+  ctx.ui.input = vi.fn().mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests");
   ctx.ui.confirm = vi.fn(async () => true);
   const campaign = pi.commands.find((command) => command.name === "horsepower-campaign")!.options.handler as (args: string, ctx: unknown) => Promise<void>;
   await campaign("", ctx);
@@ -477,7 +477,7 @@ test("user commands create implementation mode and bounded reviewer authorizatio
   expect(beginImplementationCampaign).toHaveBeenCalledWith({
     changeId: "horsepower-alpha1", projectId: "/active/project", selectedTaskIds: ["4.7"],
     selectedTasks: [{ id: "4.7", description: "Do work", status: "pending", sectionId: "4" }],
-    inventoryDigest: "a".repeat(64), testingPrompt: "Run focused tests", mode: "main_agent",
+    inventoryDigest: "a".repeat(64), testingPrompt: "Run focused tests", pollIntervalSeconds: 30, mode: "main_agent",
   });
   expect(pi.messages).toEqual([{ message: expect.objectContaining({ customType: "horsepower-campaign", details: expect.objectContaining({ campaignId: "implementation-1", mode: "main_agent" }) }), options: { deliverAs: "followUp", triggerTurn: true } }]);
 
@@ -512,7 +512,7 @@ test.each([
     resolveOutputLocale: async () => locale,
   });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn().mockResolvedValueOnce(entry).mockResolvedValueOnce("Run focused tests");
+  ctx.ui.input = vi.fn().mockResolvedValueOnce(entry).mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests");
   ctx.ui.select = vi.fn()
     .mockResolvedValueOnce(locale === "zh-CN" ? "change-a — 1/2 个任务已完成" : "change-a — 1/2 tasks complete")
     .mockResolvedValueOnce(scope)
@@ -541,7 +541,7 @@ test("large campaign inventory preserves every selectable task ID in bounded UI 
     beginImplementationCampaign,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
+  ctx.ui.input = vi.fn().mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests");
   ctx.ui.select = vi.fn().mockResolvedValueOnce("change-large — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
   ctx.ui.confirm = vi.fn(async () => true);
 
@@ -573,7 +573,7 @@ test("campaign with no unfinished tasks returns an actionable outcome without cr
     beginImplementationCampaign,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
+  ctx.ui.input = vi.fn().mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests");
   ctx.ui.select = vi.fn(async () => "change-done — 1/1 tasks complete");
   ctx.ui.confirm = vi.fn();
 
@@ -599,7 +599,7 @@ test("campaign cancellation and creation failure never kick off while repeated c
     beginImplementationCampaign: canceledBegin,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const canceledCtx = context() as any;
-  canceledCtx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
+  canceledCtx.ui.input = vi.fn().mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests");
   canceledCtx.ui.select = vi.fn()
     .mockResolvedValueOnce("change-a — 1/2 tasks complete")
     .mockResolvedValueOnce("All unfinished tasks")
@@ -619,7 +619,7 @@ test("campaign cancellation and creation failure never kick off while repeated c
     beginImplementationCampaign: repeatedBegin,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const repeatedCtx = context() as any;
-  repeatedCtx.ui.input = vi.fn().mockResolvedValue("Run focused tests");
+  repeatedCtx.ui.input = vi.fn().mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests").mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests");
   repeatedCtx.ui.select = vi.fn()
     .mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team")
     .mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
@@ -642,7 +642,7 @@ test("campaign cancellation and creation failure never kick off while repeated c
     beginImplementationCampaign: vi.fn(async () => { throw new Error("Campaign creation failed"); }),
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const failedCtx = context() as any;
-  failedCtx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
+  failedCtx.ui.input = vi.fn().mockResolvedValueOnce("").mockResolvedValueOnce("Run focused tests");
   failedCtx.ui.select = vi.fn().mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
   failedCtx.ui.confirm = vi.fn(async () => true);
   await (failedPi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", failedCtx);

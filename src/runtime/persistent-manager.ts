@@ -34,7 +34,17 @@ export interface WorkerConnection {
   once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
 }
 
+export interface WorkerObservationMetadata {
+  campaignId?: string;
+  nextPollAt?: number;
+  lastProgressAt?: number;
+  stallState?: "none" | "stalled";
+  unchangedPolls?: number;
+}
+
 export interface WorkerSummary {
+  /** Monotonic substantive progress revision used by runtime observation. */
+  progressRevision?: number;
   workerId: string;
   name: string;
   agent: string;
@@ -53,6 +63,7 @@ export interface WorkerSummary {
   error?: string;
   failure?: CaptainFailure;
   secondaryFailures?: CaptainFailure[];
+  observation?: WorkerObservationMetadata;
   handoffMode?: "managed" | "inline";
   handoffRunId?: string;
   telemetry?: ProgressTelemetry;
@@ -97,6 +108,7 @@ export interface PersistentWorkerManagerOptions {
   now?: () => number;
   progressEventLimit?: number;
   progressByteLimit?: number;
+  onSettlement?: (notice: { workerId: string; status: "completed" | "failed" | "canceled"; messageId?: string; elapsedMs: number; lastProgressAgeMs: number }) => void;
 }
 
 export interface SendWorkerInput {
@@ -145,6 +157,9 @@ export class PersistentWorkerManager {
   readonly #creatingNames = new Set<string>();
   #creating = 0;
   #shuttingDown = false;
+  #progressRevision = new Map<string, number>();
+  #observations = new Map<string, WorkerObservationMetadata>();
+  readonly #onSettlement?: PersistentWorkerManagerOptions["onSettlement"];
 
   constructor(options: PersistentWorkerManagerOptions) {
     this.#startWorker = options.startWorker;
@@ -154,6 +169,7 @@ export class PersistentWorkerManager {
     this.#now = options.now ?? Date.now;
     this.#progressEventLimit = options.progressEventLimit ?? 200;
     this.#progressByteLimit = options.progressByteLimit ?? 64 * 1024;
+    this.#onSettlement = options.onSettlement;
   }
 
   async create(input: WorkerLaunchInput): Promise<WorkerSummary> {
@@ -203,6 +219,7 @@ export class PersistentWorkerManager {
         exited: false,
       };
       this.#workers.set(workerId, state);
+      this.#progressRevision.set(workerId, 0);
       connection.on("event", (event) => this.#processEvent(state, event));
       connection.on("exit", (code, signal) => this.#processExit(state, code, signal));
 
@@ -238,7 +255,8 @@ export class PersistentWorkerManager {
     const worker = this.#require(workerId);
     const active = worker.summary.activeMessageId ? worker.messages.get(worker.summary.activeMessageId) : undefined;
     const latest = active ?? [...worker.messages.values()].at(-1);
-    return structuredClone({ ...worker.summary, ...(latest ? { telemetry: this.#telemetry(worker, latest) } : {}) });
+    const observation = this.#observations.get(worker.summary.workerId);
+    return structuredClone({ ...worker.summary, progressRevision: this.#progressRevision.get(worker.summary.workerId) ?? 0, ...(observation ? { observation } : {}), ...(latest ? { telemetry: this.#telemetry(worker, latest) } : {}) });
   }
 
   list(): WorkerSummary[] {
@@ -425,6 +443,8 @@ export class PersistentWorkerManager {
     }
     worker.summary.status = "destroyed";
     this.#workers.delete(workerId);
+    this.#progressRevision.delete(workerId);
+    this.#observations.delete(workerId);
     return { workerId, destroyed: true };
   }
 
@@ -577,6 +597,7 @@ export class PersistentWorkerManager {
         });
         delete message!.error;
         delete message!.abortObserved;
+        this.#progressRevision.set(worker.summary.workerId, (this.#progressRevision.get(worker.summary.workerId) ?? 0) + 1);
         this.#append(worker, "progress", activeId, undefined, undefined, { telemetry: this.#telemetry(worker, message!) });
       }
       return;
@@ -627,6 +648,7 @@ export class PersistentWorkerManager {
       message.resolve(message);
       this.#append(worker, "turn.completed", activeId, message.latestAssistantSummary ?? "");
     }
+    this.#onSettlement?.({ workerId: worker.summary.workerId, status: message.status as "completed" | "failed" | "canceled", messageId: message.messageId, elapsedMs: Math.max(0, (message.stoppedAt ?? this.#now()) - message.startedAt), lastProgressAgeMs: Math.max(0, (message.stoppedAt ?? this.#now()) - worker.summary.lastActivityAt) });
     delete worker.summary.activeMessageId;
     if (worker.queue.length === 0 && worker.summary.status !== "destroying") {
       worker.summary.status = "idle";

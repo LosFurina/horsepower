@@ -17,6 +17,16 @@ export interface WorkerListTelemetry {
   elapsedMs: number;
   usage?: { input?: number; output?: number };
   latestAssistantSummary?: string;
+  lastOperation?: string;
+}
+
+export type WorkerStallState = "none" | "stalled";
+
+export interface WorkerObservation {
+  campaignId?: string;
+  nextPollAt?: number;
+  lastProgressAt?: number;
+  stallState?: WorkerStallState;
 }
 
 export interface WorkerListItem {
@@ -33,6 +43,7 @@ export interface WorkerListItem {
   activeMessageId?: string;
   queuedMessageCount: number;
   telemetry?: WorkerListTelemetry;
+  observation?: WorkerObservation;
 }
 
 export interface WorkerListPresentation {
@@ -56,6 +67,7 @@ export interface WorkerListSource {
   activeMessageId?: string;
   queuedMessageIds?: readonly string[];
   telemetry?: ProgressTelemetry;
+  observation?: WorkerObservation;
 }
 
 export interface WorkerListLabels {
@@ -70,6 +82,9 @@ export interface WorkerListLabels {
   input: string;
   output: string;
   latest: string;
+  poll: string;
+  progressAge: string;
+  stall: string;
   observed: string;
   none: string;
   listFailed: string;
@@ -164,6 +179,9 @@ export function workerListLabels(locale: OutputLocale): WorkerListLabels {
       input: "输入令牌",
       output: "输出令牌",
       latest: "最新",
+      poll: "下次轮询",
+      progressAge: "最近进展",
+      stall: "停滞",
       observed: "观察时间",
       none: "无",
       listFailed: "无法列出持久 worker。worker 状态未更改。请重试 /horsepower-workers，或运行 horsepower doctor。",
@@ -184,6 +202,9 @@ export function workerListLabels(locale: OutputLocale): WorkerListLabels {
     input: "input tokens",
     output: "output tokens",
     latest: "latest",
+    poll: "next poll",
+    progressAge: "progress age",
+    stall: "stall",
     observed: "observed",
     none: "none",
     listFailed: "Failed to list persistent workers. Workers were left unchanged. Retry /horsepower-workers or run horsepower doctor.",
@@ -219,6 +240,12 @@ export function projectWorkerList(
         ...(handoffMode === undefined ? {} : { handoffMode }),
         ...(activeMessageId === undefined ? {} : { activeMessageId }),
         ...(telemetry === undefined ? {} : { telemetry }),
+        ...(worker.observation ? { observation: {
+          ...(worker.observation.campaignId ? { campaignId: safeField(worker.observation.campaignId) } : {}),
+          ...(Number.isFinite(worker.observation.nextPollAt) ? { nextPollAt: worker.observation.nextPollAt } : {}),
+          ...(Number.isFinite(worker.observation.lastProgressAt) ? { lastProgressAt: worker.observation.lastProgressAt } : {}),
+          stallState: worker.observation.stallState === "stalled" ? "stalled" : "none",
+        } } : {}),
       };
     });
 
@@ -261,6 +288,9 @@ export function formatWorkerListText(presentation: WorkerListPresentation, expan
       lines.push(`${labels.status}: ${worker.status}`);
       if (worker.activeMessageId) lines.push(`${labels.message}: ${worker.activeMessageId}`);
       lines.push(`${labels.queue}: ${worker.queuedMessageCount}`);
+      if (worker.observation?.nextPollAt !== undefined) lines.push(`${labels.poll}: ${new Date(worker.observation.nextPollAt).toISOString()}`);
+      if (worker.observation?.lastProgressAt !== undefined) lines.push(`${labels.progressAge}: ${Math.max(0, presentation.observedAt - worker.observation.lastProgressAt)}ms`);
+      if (worker.observation?.stallState) lines.push(`${labels.stall}: ${worker.observation.stallState}`);
       if (expanded && worker.telemetry) {
         lines.push(`${labels.elapsed}: ${worker.telemetry.elapsedMs}ms`);
         if (worker.telemetry.usage?.input !== undefined) lines.push(`${labels.input}: ${worker.telemetry.usage.input}`);
@@ -306,6 +336,9 @@ export function renderWorkerListEntry(
         lines.push(text(`${labels.status}: ${worker.status}`));
         if (worker.activeMessageId) lines.push(dim(`${labels.message}: ${worker.activeMessageId}`));
         lines.push(dim(`${labels.queue}: ${worker.queuedMessageCount}`));
+        if (worker.observation?.nextPollAt !== undefined) lines.push(dim(`${labels.poll}: ${new Date(worker.observation.nextPollAt).toISOString()}`));
+        if (worker.observation?.lastProgressAt !== undefined) lines.push(dim(`${labels.progressAge}: ${Math.max(0, presentation.observedAt - worker.observation.lastProgressAt)}ms`));
+        if (worker.observation?.stallState) lines.push(dim(`${labels.stall}: ${worker.observation.stallState}`));
         if (options.expanded && worker.telemetry) {
           lines.push(dim(`${labels.elapsed}: ${worker.telemetry.elapsedMs}ms`));
           if (worker.telemetry.usage?.input !== undefined) lines.push(dim(`${labels.input}: ${worker.telemetry.usage.input}`));

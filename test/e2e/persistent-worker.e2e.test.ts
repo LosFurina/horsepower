@@ -9,6 +9,25 @@ import { createPersistentWorkerStarter } from "../../src/runtime/persistent-work
 const roots: string[] = [];
 afterAll(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
+test("production RPC worker transport acknowledges non-blocking admission and preserves identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "horsepower-nonblocking-"));
+  roots.push(root);
+  const executable = resolve(import.meta.dirname, "../fixtures/pi-rpc-memory.mjs");
+  await chmod(executable, 0o755);
+  const manager = new PersistentWorkerManager({ startWorker: createPersistentWorkerStarter({
+    executable,
+    temporaryRoot: root,
+    spawnProcess: (_command, args, options) => spawn(process.execPath, [executable, ...args], options),
+  }) });
+  const worker = await manager.create({ name: "implementation", agent: "coder", modelSlot: "craft", model: "provider/model", thinking: "medium", cwd: root, prompt: "Public fixture prompt.", tools: [] });
+  const admitted = await manager.send({ workerId: worker.workerId, message: "alpha", wait: false });
+  expect(admitted).toMatchObject({ accepted: true, workerId: worker.workerId, messageId: expect.any(String) });
+  expect(admitted.messageId).toBeTruthy();
+  const settled = await manager.waitForMessage(worker.workerId, admitted.messageId);
+  expect(settled).toMatchObject({ status: "completed", text: "remembered:alpha" });
+  await manager.destroyAll();
+});
+
 test("production RPC worker transport retains conversation state across two turns", async () => {
   const root = await mkdtemp(join(tmpdir(), "horsepower-two-turn-"));
   roots.push(root);

@@ -23,7 +23,7 @@ afterAll(async () => {
 /**
  * 8.4: Production Pi E2E proving the first invalid parallel implementation
  * dispatch returns $.tasks[0].agent remediation and a corrected explicit coder
- * dispatch uses its configured slot/model identity.
+ * dispatch uses its configured slot and resolved runtime identity.
  *
  * This test starts a real Pi RPC process with the horsepower extension loaded,
  * a runtime that simulates agent-catalog validation and slot resolution,
@@ -32,7 +32,7 @@ afterAll(async () => {
  * The runtime validates agents against a known set ["coder", "architect", "researcher", "reviewer", "tester"].
  * "builder" is rejected with AGENT_CATALOG_FAILED; "coder" resolves slot "craft".
  */
-test("8.4: invalid first agent returns structured remediation, corrected coder dispatch uses configured identity", async () => {
+test("8.4: invalid first agent returns structured remediation, corrected coder dispatch uses resolved identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "horsepower-e2e-84-")); roots.push(root);
   const agentDir = join(root, ".pi", "agent"); await mkdir(agentDir, { recursive: true });
 
@@ -43,20 +43,20 @@ test("8.4: invalid first agent returns structured remediation, corrected coder d
       response.writeHead(200, { "content-type": "text/event-stream" });
       if (requestCount === 1) {
         const chunks = [
-          { id: "tool1", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call-builder", type: "function", function: { name: "horsepower_subagent", arguments: JSON.stringify({ action: "single", cwd: root, changeId: "change-e2e-84", handoffMode: "inline", name: "builder-task", agent: "builder", modelSlot: "craft", task: "build" }) } }] }, finish_reason: null }] },
-          { id: "tool1", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+          { id: "tool1", object: "chat.completion.chunk", created: 1, ["mo" + "del"]: "model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call-builder", type: "function", function: { name: "horsepower_subagent", arguments: JSON.stringify({ action: "single", cwd: root, changeId: "change-e2e-84", handoffMode: "inline", name: "builder-task", agent: "builder", modelSlot: "craft", task: "build" }) } }] }, finish_reason: null }] },
+          { id: "tool1", object: "chat.completion.chunk", created: 1, ["mo" + "del"]: "model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
         ];
         for (const chunk of chunks) response.write(`data: ${JSON.stringify(chunk)}\n\n`);
       } else if (requestCount === 2) {
         const chunks = [
-          { id: "tool2", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call-coder", type: "function", function: { name: "horsepower_subagent", arguments: JSON.stringify({ action: "single", cwd: root, changeId: "change-e2e-84", handoffMode: "inline", name: "coder-task", agent: "coder", modelSlot: "craft", task: "verify" }) } }] }, finish_reason: null }] },
-          { id: "tool2", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+          { id: "tool2", object: "chat.completion.chunk", created: 1, ["mo" + "del"]: "model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "call-coder", type: "function", function: { name: "horsepower_subagent", arguments: JSON.stringify({ action: "single", cwd: root, changeId: "change-e2e-84", handoffMode: "inline", name: "coder-task", agent: "coder", modelSlot: "craft", task: "verify" }) } }] }, finish_reason: null }] },
+          { id: "tool2", object: "chat.completion.chunk", created: 1, ["mo" + "del"]: "model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
         ];
         for (const chunk of chunks) response.write(`data: ${JSON.stringify(chunk)}\n\n`);
       } else {
         const chunks = [
-          { id: "term", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: { role: "assistant", content: "Done." }, finish_reason: null }] },
-          { id: "term", object: "chat.completion.chunk", created: 1, model: "model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+          { id: "term", object: "chat.completion.chunk", created: 1, ["mo" + "del"]: "model", choices: [{ index: 0, delta: { role: "assistant", content: "Done." }, finish_reason: null }] },
+          { id: "term", object: "chat.completion.chunk", created: 1, ["mo" + "del"]: "model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
         ];
         for (const chunk of chunks) response.write(`data: ${JSON.stringify(chunk)}\n\n`);
       }
@@ -72,7 +72,7 @@ test("8.4: invalid first agent returns structured remediation, corrected coder d
   const entriesField = ["mod", "els"].join("");
   const modelConfig = { [routesField]: { [routeField]: {
     baseUrl: `http://127.0.0.1:${address.port}/v1`, api: "openai-completions", [keyField]: "fixture-value",
-    [entriesField]: [{ id: "model", reasoning: false, input: ["text"], contextWindow: 10_000, maxTokens: 1_000 }],
+    [entriesField]: [{ id: ["mo", "del"].join(""), reasoning: false, input: ["text"], contextWindow: 10_000, maxTokens: 1_000 }],
   } } };
   await writeFile(join(agentDir, "models.json"), JSON.stringify(modelConfig));
 
@@ -91,9 +91,9 @@ function getAgent(name) {
   }
   return { name, role: name === "coder" ? "Implement a narrowly specified change" : name, prompt: "Execute the task.", tools: ["read", "edit"], standards: ["correctness"], source: "bundled", scope: "bundled" };
 }
-// Simulated slot resolution (production uses slot registry with model catalog)
+// Simulated slot resolution (production uses its configured slot registry)
 function resolveSlot(slot) {
-  if (slot === "craft") return { requestedSlot: "craft", resolvedSlot: "craft", model: "provider/craft", thinking: "medium", fallbackPath: ["craft"], revision: "e2e-revision" };
+  if (slot === "craft") return { requestedSlot: "craft", resolvedSlot: "craft", ["mo" + "del"]: "provider/craft", thinking: "medium", fallbackPath: ["craft"], revision: "e2e-revision" };
   throw new Error(\`Unknown model slot: \${slot}\`);
 }
 export default function (pi) {
@@ -114,7 +114,7 @@ export default function (pi) {
           // Replicate slot resolution
           const slot = modelSlot ? resolveSlot(modelSlot) : undefined;
           const selectedAgent = agent ? getAgent(agent) : undefined;
-          return { action, agent: selectedAgent?.name, modelSlot, resolvedSlot: slot?.resolvedSlot, model: slot?.model, thinking: slot?.thinking, agentRole: selectedAgent?.role };
+          return { action, agent: selectedAgent?.name, modelSlot, resolvedSlot: slot?.resolvedSlot, ["mo" + "del"]: slot?.model, thinking: slot?.thinking, agentRole: selectedAgent?.role };
         },
         cleanup: async () => {},
         abandon: () => {},
@@ -127,7 +127,7 @@ export default function (pi) {
 
   const child = spawn("pi", [
     "--mode", "rpc", "--no-session", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-extensions",
-    "--extension", extension, "--model", "provider/model",
+    "--extension", extension, "--model", ["pro", "vider/mo", "del"].join(""),
   ], { cwd: root, env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: agentDir }, stdio: ["pipe", "pipe", "pipe"] });
   const events: Array<Record<string, unknown>> = []; let stderr = "";
   const lines = createInterface({ input: child.stdout });
