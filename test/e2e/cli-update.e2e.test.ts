@@ -125,6 +125,21 @@ test("local fixture E2E: successful update, no-op, help without side effect, ret
   expect(result.activeVersion).toBe("0.2.0");
   expect(result.currentVersion).toBe("0.1.0");
 
+  // CLI text rendering must use the command result's resolved version rather
+  // than the static command definition, otherwise successful updates display
+  // `undefined` despite activating the correct release.
+  const { createCli } = await import("../../src/cli/app.js");
+  const rendered = await createCli({
+    homeDir,
+    cwd,
+    platform: "linux",
+    updateTransport: transport,
+    runOpenSpec: async () => ({ code: 0, stdout: "", stderr: "" }),
+    updateExecFile: async () => ({ stdout: '{"ok":true}', stderr: "", exitCode: 0 }),
+  }).run(["update"]);
+  expect(rendered.stdout).not.toContain("undefined");
+  expect(rendered.stdout).toContain("latest version");
+
   // Assert: current points to new version
   const currentTarget = await readlink(join(hp, "current"));
   expect(currentTarget).toBe("versions/v0.2.0");
@@ -151,6 +166,29 @@ test("local fixture E2E: successful update, no-op, help without side effect, ret
     lock: createFileLock(join(hp, ".update.lock"), defaultFilesystem),
   });
   expect(noopResult.status).toBe("already_current");
+
+  const noopRendered = await createCli({
+    homeDir,
+    cwd,
+    platform: "linux",
+    updateTransport: transportNoop,
+    runOpenSpec: async () => ({ code: 0, stdout: "", stderr: "" }),
+    updateExecFile: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+  }).run(["update"]);
+  expect(noopRendered.exitCode).toBe(0);
+  expect(noopRendered.stdout).not.toContain("undefined");
+  expect(noopRendered.stdout).toContain("latest version");
+
+  const noopJson = await createCli({
+    homeDir,
+    cwd,
+    platform: "linux",
+    updateTransport: transportNoop,
+    runOpenSpec: async () => ({ code: 0, stdout: "", stderr: "" }),
+    updateExecFile: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+  }).run(["update", "--json"]);
+  expect(noopJson.stdout).not.toContain("undefined");
+  expect(JSON.parse(noopJson.stdout).summary).not.toContain("undefined");
 });
 
 test("local fixture E2E: parameterized failure variants", async () => {

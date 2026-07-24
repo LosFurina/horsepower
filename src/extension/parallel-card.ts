@@ -1,6 +1,7 @@
 import type { OutputLocale } from "../localization/index.js";
 import type { OneShotProgress, WorkerIdentity } from "../runtime/one-shot.js";
 import type { CaptainFailure } from "../failures/captain-failure.js";
+import { modelFromOneShot, renderWorkerCards, type WorkerCardModel } from "./worker-card.js";
 
 const MAX_CHILDREN = 8;
 const MAX_FIELD_BYTES = 256;
@@ -153,6 +154,7 @@ export function createParallelCardProjection(locale: OutputLocale) {
 
   function snapshot(): ParallelCardResult {
     const list = order.map((key) => children.get(key)!);
+    const cards: WorkerCardModel[] = list.map((child) => modelFromOneShot({ type: child.status === "pending" ? "accepted" : child.status === "running" ? "starting" : child.status, identity: child.identity, ...(child.operation ? { operation: child.operation } : {}), ...(child.summary ? { summary: child.summary } : {}), ...(child.target ? { target: child.target } : {}), ...(child.telemetry ? { telemetry: child.telemetry } : {}) } as never));
     const count = (value: ChildStatus) => list.filter((child) => child.status === value).length;
     const dispatchStatus = list.some((child) => !child.terminal) ? "running" : list.some((child) => child.status === "failed") ? "failed" : list.some((child) => child.status === "canceled") ? "canceled" : "completed";
     const details: ParallelCardDetails = { dispatchStatus, parallel: {
@@ -183,7 +185,9 @@ export function createParallelCardProjection(locale: OutputLocale) {
       }
     }
     const text = utf8Prefix(lines.join("\n"), MAX_CARD_BYTES);
-    return { content: [{ type: "text", text }], details: deepCopy(details) };
+    const rendered = renderWorkerCards(cards, locale);
+    rendered.content[0]!.text = `${locale === "zh-CN" ? "并行" : "Parallel"}\n${rendered.content[0]!.text}`;
+    return { content: rendered.content, details: deepCopy(details) };
   }
 
   return { reduce, snapshot };

@@ -661,3 +661,35 @@ test("abandonAll invalidates a deferred worker creation and asynchronously clean
   expect(manager.list()).toEqual([]);
   await expect(manager.create({ ...createInput, name: "after-abandon" })).rejects.toThrow("shutting down");
 });
+
+test("onSettlement that throws does not reject the settlement or alter terminal state", async () => {
+  const { PersistentWorkerManager } = await import("../../src/runtime/persistent-manager.js");
+  let settlementCalls = 0;
+  const worker = new FakeWorker();
+  const manager = new PersistentWorkerManager({
+    startWorker: async () => worker,
+    onSettlement: () => {
+      settlementCalls += 1;
+      throw new Error("deliberate settlement crash");
+    },
+  });
+
+  const { workerId } = await manager.create(createInput);
+  const sent = await manager.send({ workerId, message: "first", wait: false });
+  await expect(manager.waitForMessage(workerId, sent.messageId)).resolves.toMatchObject({
+    status: "completed",
+  });
+
+  // Settlement callback was invoked despite throwing.
+  expect(settlementCalls).toBe(1);
+
+  // Terminal state is correct — the worker returned to idle with no unhandled rejection.
+  expect(manager.status(workerId)).toMatchObject({ status: "idle" });
+
+  // A second message still works after a throwing settlement.
+  const second = await manager.send({ workerId, message: "second", wait: true });
+  expect(second.status).toBe("completed");
+  expect(settlementCalls).toBe(2);
+
+  await manager.destroyAll(true);
+});

@@ -648,7 +648,11 @@ export class PersistentWorkerManager {
       message.resolve(message);
       this.#append(worker, "turn.completed", activeId, message.latestAssistantSummary ?? "");
     }
-    this.#onSettlement?.({ workerId: worker.summary.workerId, status: message.status as "completed" | "failed" | "canceled", messageId: message.messageId, elapsedMs: Math.max(0, (message.stoppedAt ?? this.#now()) - message.startedAt), lastProgressAgeMs: Math.max(0, (message.stoppedAt ?? this.#now()) - worker.summary.lastActivityAt) });
+    try {
+      this.#onSettlement?.({ workerId: worker.summary.workerId, status: message.status as "completed" | "failed" | "canceled", messageId: message.messageId, elapsedMs: Math.max(0, (message.stoppedAt ?? this.#now()) - message.startedAt), lastProgressAgeMs: Math.max(0, (message.stoppedAt ?? this.#now()) - worker.summary.lastActivityAt) });
+    } catch {
+      /* Settlement delivery is observational and must never crash Pi. */
+    }
     delete worker.summary.activeMessageId;
     if (worker.queue.length === 0 && worker.summary.status !== "destroying") {
       worker.summary.status = "idle";

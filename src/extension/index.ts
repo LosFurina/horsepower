@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { resolveHorsepowerPaths } from "../config/paths.js";
 import { parseWebhookSettings } from "../config/webhook.js";
 import { horsepowerSubagentSchema } from "../orchestration/schema.js";
@@ -14,6 +15,7 @@ import { deliverSettlementNotice } from "../runtime/settlement-delivery.js";
 import type { CreateHorsepowerRuntimeOptions, HorsepowerRuntime, HorsepowerRuntimeContext } from "./runtime.js";
 import { createHorsepowerRuntime } from "./runtime.js";
 import { createParallelCardProjection } from "./parallel-card.js";
+import { modelFromOneShot, modelFromPersistent, workerCardLines, type WorkerCardModel } from "./worker-card.js";
 import {
   WORKER_LIST_ENTRY_TYPE,
   formatWorkerListText,
@@ -231,6 +233,7 @@ export function registerHorsepowerExtension(
   // willRetry=false; enqueue at most once after agent_settled when idle with no
   // pending steering/follow-up. Pi native overflow retry owns willRetry=true.
   let compactGeneration: { serial: number; reason: "threshold" | "overflow"; campaignId: string; projectId: string; handled: boolean } | undefined;
+  const oneShotCards = new Map<string, WorkerCardModel>();
   const clearCompactGeneration = () => { compactGeneration = undefined; };
   pi.on("session_start", (_event, ctx) => {
     lease ??= dependencies.acquireRuntime(ctx);
@@ -351,16 +354,21 @@ export function registerHorsepowerExtension(
         catch { /* parallel delivery falls back to English */ }
       }
       const parallelCard = action === "parallel" ? createParallelCardProjection(outputLocale) : undefined;
-      const progress = parallelCard ? (event: OneShotProgress & { identity: WorkerIdentity }) => {
-        try {
-          if (parallelCard.reduce(event) && onUpdate) onUpdate(parallelCard.snapshot());
-        } catch { /* projection and rendering are observational */ }
-      } : onUpdate ? (event: OneShotProgress & { identity: WorkerIdentity }) => {
-        try { onUpdate(progressResult(event)); } catch { /* rendering is observational */ }
-      } : undefined;
+      const progress = (event: OneShotProgress & { identity: WorkerIdentity }) => {
+        if (action === "single" || action === "parallel" || action === "chain") {
+          oneShotCards.set(event.identity.invocationId, modelFromOneShot(event));
+        }
+        if (parallelCard) {
+          try {
+            if (parallelCard.reduce(event) && onUpdate) onUpdate(parallelCard.snapshot());
+          } catch { /* projection and rendering are observational */ }
+        } else if (onUpdate) {
+          try { onUpdate(progressResult(event)); } catch { /* rendering is observational */ }
+        }
+      };
       let data: unknown;
       try {
-        data = await runtime(ctx).execute(input, runtimeContext(ctx, signal, progress));
+        data = await runtime(ctx).execute(input, runtimeContext(ctx, signal, action === "single" || action === "parallel" || action === "chain" ? progress : undefined));
       } catch (cause) {
         data = structuredFailure(action, cause);
       }
@@ -369,6 +377,9 @@ export function registerHorsepowerExtension(
           const snapshot = parallelCard.snapshot();
           return { content: snapshot.content, details: { data, ...snapshot.details } };
         } catch { return textResult(data); }
+      }
+      if (action === "single" || action === "chain" || action === "parallel") {
+        for (const key of [...oneShotCards.keys()]) oneShotCards.delete(key);
       }
       if (!dependencies.resolveOutputLocale) return textResult(data);
       try { outputLocale = await dependencies.resolveOutputLocale(ctx.cwd); }
@@ -389,7 +400,7 @@ export function registerHorsepowerExtension(
   );
 
   pi.registerCommand("horsepower-workers", {
-    description: "List process-lifetime Horsepower workers",
+    description: "Show read-only Horsepower workers",
     handler: async (_args, ctx) => {
       let locale: OutputLocale = "en";
       try {
@@ -416,6 +427,59 @@ export function registerHorsepowerExtension(
       } catch {
         ctx.ui.notify(labels.listFailed, "error");
         return;
+      }
+      if (ctx.mode === "tui") {
+        try {
+          await new Promise<void>((resolve) => {
+            void ctx.ui.custom((tui, theme, keys, done): Component => {
+            let offset = 0;
+            let lines = ["No workers."];
+            const refresh = () => {
+              const cards = [...oneShotCards.values(), ...presentation.workers.map((worker) => modelFromPersistent(worker as never))];
+              lines = cards.length ? cards.flatMap((card) => [...workerCardLines(card, locale), ""]) : ["No workers."];
+              offset = Math.min(offset, Math.max(0, lines.length - 1));
+              tui.requestRender();
+            };
+            refresh();
+            const component: Component = {
+              render(width) {
+                const innerWidth = Math.max(1, width - 2);
+                const row = (content: string) => theme.fg("border", "│") + truncateToWidth(` ${content}`, innerWidth, "…", true) + theme.fg("border", "│");
+                const title = " Horsepower Workers ";
+                const borderWidth = Math.max(0, innerWidth - visibleWidth(title));
+                const left = Math.floor(borderWidth / 2);
+                const right = borderWidth - left;
+                const bodyHeight = Math.max(3, Math.min(24, Math.floor(width / 3)));
+                const visible = lines.slice(offset, offset + bodyHeight);
+                const output = [
+                  theme.fg("border", `╭${"─".repeat(left)}`) + theme.fg("accent", title) + theme.fg("border", `${"─".repeat(right)}╮`),
+                  row(""),
+                  ...visible.map(row),
+                ];
+                for (let index = visible.length; index < bodyHeight; index += 1) output.push(row(""));
+                output.push(theme.fg("border", `├${"─".repeat(innerWidth)}┤`));
+                output.push(row(locale === "zh-CN" ? "↑↓/j/k 滚动  r 刷新  q/esc/ctrl+c 关闭" : "↑↓/j/k scroll  r refresh  q/esc/ctrl+c close"));
+                output.push(theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
+                return output;
+              },
+              invalidate() {},
+              handleInput(data) {
+                if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q") { done(undefined); return; }
+                if (keys.matches(data, "tui.select.up") || data === "k") offset = Math.max(0, offset - 1);
+                else if (keys.matches(data, "tui.select.down") || data === "j") offset = Math.min(Math.max(0, lines.length - 1), offset + 1);
+                else if (data === "\u001b[5~") offset = Math.max(0, offset - 10);
+                else if (data === "\u001b[6~") offset = Math.min(Math.max(0, lines.length - 1), offset + 10);
+                else if (data === "r") refresh();
+                tui.requestRender();
+              },
+            };
+              return component;
+            }, { overlay: true, overlayOptions: { anchor: "center", width: 82 } }).then(() => resolve(), () => resolve());
+          });
+          return;
+        } catch (cause) {
+          ctx.ui.notify(`${labels.listFailed} ${safeTitlePart(cause instanceof Error ? cause.message : String(cause), 200)}`.trim(), "error");
+        }
       }
       try {
         pi.appendEntry<WorkerListPresentation>(WORKER_LIST_ENTRY_TYPE, presentation);
@@ -630,6 +694,7 @@ export function registerHorsepowerExtension(
     if ((event.reason === "new" || event.reason === "resume" || event.reason === "fork") && lease) {
       lease.value.clearCampaignContinuation?.();
     }
+    oneShotCards.clear();
     if ((event.reason === "reload" || event.reason === "quit") && lease) {
       cleanup ??= lease.cleanup();
       await cleanup;
@@ -684,7 +749,12 @@ function defaultLease(ctx?: ExtensionContext): RuntimeLease<HorsepowerRuntime> {
       settlementDelivery: (notice) => {
         const owner = currentDeliveryOwner;
         if (!owner) return;
-        deliverSettlementNotice(owner.context as typeof owner.context & { sendMessage: typeof owner.sendMessage }, notice, { cwd: owner.cwd, generation: owner.generation }, () => {
+        deliverSettlementNotice({
+          cwd: owner.context.cwd,
+          isIdle: () => owner.context.isIdle(),
+          hasPendingMessages: () => owner.context.hasPendingMessages(),
+          sendMessage: owner.sendMessage,
+        }, notice, { cwd: owner.cwd, generation: owner.generation }, () => {
           const active = currentDeliveryOwner;
           return active ? { cwd: active.cwd, generation: active.generation } : undefined;
         });

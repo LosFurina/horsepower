@@ -1006,7 +1006,10 @@ export function createCli(options: CliOptions) {
       ok,
       exitCode: ok ? 0 : 1,
       summaryId,
-      summaryVariables: () => ({ version: result.resolvedVersion ?? "", reason: result.reason ?? "" }),
+      summaryVariables: () => ({
+        version: result.resolvedVersion ?? result.activeVersion ?? result.currentVersion ?? "",
+        reason: result.reason ?? "",
+      }),
       outputLocale: locale,
     };
   }
@@ -1042,7 +1045,7 @@ export function createCli(options: CliOptions) {
     handoff: { run: handoff, summaryId: completed },
     "skill-audit": { run: skillAudit, summaryId: "audit.summary", summaryVariables: () => ({ status: "", count: 0 }) },
     doctor: { run: doctor, summaryId: "doctor.healthy" },
-    update: { run: updateCommand, requiresPlatform: true, summaryId: (parsed) => "update.alreadyCurrent", },
+    update: { run: updateCommand, requiresPlatform: true, summaryId: "update.alreadyCurrent" },
     preflight: { run: preflight, requiresPlatform: true, summaryId: completed },
     enable: { run: (parsed) => setIntegrationState(parsed, "enabled"), requiresPlatform: true, summaryId: "cli.enabled" },
     disable: { run: (parsed) => setIntegrationState(parsed, "disabled"), requiresPlatform: true, summaryId: "cli.disabled" },
@@ -1078,7 +1081,8 @@ export function createCli(options: CliOptions) {
       const ok = result.ok ?? true; const exitCode = result.exitCode ?? (ok ? 0 : 1);
       const summaryId = result.summaryId ?? (typeof definition.summaryId === "function" ? definition.summaryId(parsed) : definition.summaryId);
       const audit = command === "skill-audit" ? result.data as SkillAuditResult : undefined;
-      const summary = audit ? localizedMessage(locale, "audit.summary", { status: audit.status, count: audit.externalCount }) : localizedMessage(locale, summaryId, { command: commandName, ...definition.summaryVariables?.(parsed) });
+      const summaryVariables = result.summaryVariables?.() ?? definition.summaryVariables?.(parsed) ?? {};
+      const summary = audit ? localizedMessage(locale, "audit.summary", { status: audit.status, count: audit.externalCount }) : localizedMessage(locale, summaryId, { command: commandName, ...summaryVariables });
       if (machine) return { exitCode, stdout: json({ data: result.data, ok, outputLocale: locale, summary }), stderr: "" };
       if (command === "help") {
         const data = result.data as Record<string, unknown>;
