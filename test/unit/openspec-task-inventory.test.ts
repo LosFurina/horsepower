@@ -5,6 +5,8 @@ const valid = `# Tasks
 ## 1. Parser
 
 - [ ] 1.1 Parse pending tasks
+  - Check: Run the focused parser test
+  - Check: Observe the stable digest
 - [x] 1.2 Preserve completed tasks
 
 ## 2. Boundary
@@ -21,11 +23,11 @@ test("parses ordered numbered sections and canonical pending/completed tasks wit
     changeId: "change-a", projectRoot: "/project",
     sections: [
       { id: "1", title: "Parser", tasks: [
-        { id: "1.1", description: "Parse pending tasks", status: "pending", sectionId: "1" },
-        { id: "1.2", description: "Preserve completed tasks", status: "complete", sectionId: "1" },
+        { id: "1.1", description: "Parse pending tasks", status: "pending", sectionId: "1", checks: ["Run the focused parser test", "Observe the stable digest"] },
+        { id: "1.2", description: "Preserve completed tasks", status: "complete", sectionId: "1", checks: [] },
       ] },
       { id: "2", title: "Boundary", tasks: [
-        { id: "2.1", description: "Load the official artifact", status: "pending", sectionId: "2" },
+        { id: "2.1", description: "Load the official artifact", status: "pending", sectionId: "2", checks: [] },
       ] },
     ],
   });
@@ -47,11 +49,25 @@ test.each([
   expect(() => parseOpenSpecTaskInventory(source, { changeId: "c", projectRoot: "/p", tasksPath: "/p/tasks.md" })).toThrow(message);
 });
 
-test("enforces file, section, task, and UTF-8 description bounds", async () => {
+test("checks participate in ordered ownership and digest identity", async () => {
+  const { parseOpenSpecTaskInventory } = await import("../../src/openspec/task-inventory.js");
+  const context = { changeId: "c", projectRoot: "/p", tasksPath: "/p/tasks.md" };
+  const first = parseOpenSpecTaskInventory("## 1. A\n- [ ] 1.1 One\n  - Check: Alpha\n  - Check: Beta\n", context);
+  const reordered = parseOpenSpecTaskInventory("## 1. A\n- [ ] 1.1 One\n  - Check: Beta\n  - Check: Alpha\n", context);
+  expect(first.sections[0]!.tasks[0]!.checks).toEqual(["Alpha", "Beta"]);
+  expect(reordered.digest).not.toBe(first.digest);
+  expect(() => parseOpenSpecTaskInventory("  - Check: Orphan\n## 1. A\n- [ ] 1.1 One\n", context)).toThrow("outside a task");
+});
+
+test("enforces file, section, task, check, and UTF-8 bounds", async () => {
   const { parseOpenSpecTaskInventory } = await import("../../src/openspec/task-inventory.js");
   const context = { changeId: "c", projectRoot: "/p", tasksPath: "/p/tasks.md" };
   expect(() => parseOpenSpecTaskInventory("x".repeat(1_048_577), context)).toThrow("exceeds 1 MiB");
   expect(() => parseOpenSpecTaskInventory(`## 1. A\n- [ ] 1.1 ${"🙂".repeat(126)}\n`, context)).toThrow("description exceeds 500 bytes");
   expect(() => parseOpenSpecTaskInventory(`${Array.from({ length: 101 }, (_, index) => `## ${index + 1}. S\n- [ ] ${index + 1}.1 T`).join("\n")}\n`, context)).toThrow("at most 100 sections");
   expect(() => parseOpenSpecTaskInventory(`## 1. A\n${Array.from({ length: 1001 }, (_, index) => `- [ ] 1.${index + 1} T`).join("\n")}\n`, context)).toThrow("at most 1000 tasks");
+  expect(() => parseOpenSpecTaskInventory(`## 1. A\n- [ ] 1.1 T\n  - Check: ${"🙂".repeat(126)}\n`, context)).toThrow("check exceeds 500 bytes");
+  expect(() => parseOpenSpecTaskInventory(`## 1. A\n- [ ] 1.1 T\n${Array.from({ length: 21 }, (_, index) => `  - Check: C${index}`).join("\n")}\n`, context)).toThrow("at most 20 checks");
+  expect(() => parseOpenSpecTaskInventory("## 1. A\n- [ ] 1.1 T\n- Check: not indented\n", context)).toThrow("Malformed OpenSpec task check");
+  expect(() => parseOpenSpecTaskInventory("## 1. A\n- [ ] 1.1 T\n  - Check: ../private\n", context)).toThrow("unsafe content");
 });

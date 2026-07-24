@@ -12,15 +12,11 @@ interface ReviewerAuthorization {
   remaining: number;
 }
 
-export interface CampaignTaskSnapshot extends Pick<OpenSpecTask, "id" | "description" | "status" | "sectionId"> { sectionTitle?: string }
+export interface CampaignTaskSnapshot extends Pick<OpenSpecTask, "id" | "description" | "status" | "sectionId" | "checks"> { sectionTitle?: string }
 
-export interface CampaignPlanSnapshot {
-  digest: string;
-  testIntensity: "targeted" | "standard" | "exhaustive" | "custom";
-  gateStrictness: "required" | "strict" | "release" | "custom";
-  caseRefs: string[];
-  gateRefs: string[];
-  selectedTaskMappings: Array<{ taskId: string; caseRefs: string[]; gateRefs: string[]; nonApplicabilityRefs: string[] }>;
+export interface CampaignTestingGuidance {
+  prompt: string;
+  selectedTaskChecks: Array<{ taskId: string; checks: string[] }>;
 }
 
 export interface ImplementationCampaign {
@@ -30,7 +26,7 @@ export interface ImplementationCampaign {
   selectedTaskIds: string[];
   selectedTasks: CampaignTaskSnapshot[];
   inventoryDigest: string;
-  plan: CampaignPlanSnapshot;
+  testing: CampaignTestingGuidance;
   mode: ImplementationMode;
   status: "active" | "ended";
   outcome?: "switched" | "ended";
@@ -47,7 +43,7 @@ export interface ContinuationLease {
   changeId: string;
   selectedTaskIds: string[];
   inventoryDigest: string;
-  planDigest: string;
+  testingPrompt: string;
   mode: ImplementationMode;
   generation: number;
   disposition: "active" | "paused" | "blocked" | "terminal" | "superseded";
@@ -56,7 +52,6 @@ export interface ContinuationLease {
 
 const taskIdPattern = /^\d+(?:\.\d+)+$/u;
 const digestPattern = /^[a-f0-9]{64}$/u;
-const planRefPattern = /^(?:TC|G|NA)-[1-9]\d*$/u;
 // Must remain representable by the claim-matched verification manifest.
 const MAX_SELECTED_TASKS = 100;
 const MAX_ID_BYTES = 128;
@@ -75,32 +70,18 @@ function positive(value: number, label: string): number {
 }
 function copy(campaign: ImplementationCampaign): ImplementationCampaign { return structuredClone(campaign); }
 
-function planSnapshot(input: CampaignPlanSnapshot, selectedTaskIds: readonly string[]): CampaignPlanSnapshot {
-  if (!digestPattern.test(input.digest)) throw new Error("Implementation test-and-gate plan digest is invalid");
-  if (!["targeted", "standard", "exhaustive", "custom"].includes(input.testIntensity)) throw new Error("Implementation test intensity is invalid");
-  if (!["required", "strict", "release", "custom"].includes(input.gateStrictness)) throw new Error("Implementation gate strictness is invalid");
-  const refs = (values: readonly string[], prefix: "TC" | "G") => {
-    if (!values.length || values.length > 100 || new Set(values).size !== values.length || values.some((value) => !planRefPattern.test(value) || !value.startsWith(`${prefix}-`))) throw new Error(`Implementation plan ${prefix} references are invalid`);
-    return [...values];
-  };
-  const caseRefs = refs(input.caseRefs, "TC");
-  const gateRefs = refs(input.gateRefs, "G");
-  if (input.selectedTaskMappings.length !== selectedTaskIds.length) throw new Error("Implementation plan task mappings do not match selected tasks");
-  const records = new Map(input.selectedTaskMappings.map((mapping) => [mapping.taskId, mapping]));
-  if (records.size !== input.selectedTaskMappings.length) throw new Error("Implementation plan task mappings contain duplicate task IDs");
-  const selectedTaskMappings = selectedTaskIds.map((taskId) => {
-    const mapping = records.get(taskId);
-    if (!mapping) throw new Error(`Implementation plan is missing selected task mapping: ${taskId}`);
-    const mappedCases = [...mapping.caseRefs];
-    const mappedGates = [...mapping.gateRefs];
-    const nonApplicabilityRefs = [...mapping.nonApplicabilityRefs];
-    if (new Set(mappedCases).size !== mappedCases.length || new Set(mappedGates).size !== mappedGates.length || new Set(nonApplicabilityRefs).size !== nonApplicabilityRefs.length
-      || mappedCases.some((ref) => !caseRefs.includes(ref)) || mappedGates.some((ref) => !gateRefs.includes(ref))
-      || nonApplicabilityRefs.some((ref) => !/^NA-[1-9]\d*$/u.test(ref))) throw new Error(`Implementation plan task mapping is invalid: ${taskId}`);
-    if (!mappedCases.length && !nonApplicabilityRefs.length) throw new Error(`Implementation plan selected task is uncovered: ${taskId}`);
-    return { taskId, caseRefs: mappedCases, gateRefs: mappedGates, nonApplicabilityRefs };
+function testingGuidance(input: CampaignTestingGuidance, selectedTaskIds: readonly string[]): CampaignTestingGuidance {
+  const prompt = text(input.prompt, "Implementation testing-intensity prompt", 2_000).replace(/\s+/gu, " ");
+  if (input.selectedTaskChecks.length !== selectedTaskIds.length) throw new Error("Implementation testing guidance does not match selected tasks");
+  const records = new Map(input.selectedTaskChecks.map((entry) => [entry.taskId, entry]));
+  if (records.size !== input.selectedTaskChecks.length) throw new Error("Implementation testing guidance contains duplicate task IDs");
+  const selectedTaskChecks = selectedTaskIds.map((taskId) => {
+    const entry = records.get(taskId);
+    if (!entry) throw new Error(`Implementation testing guidance is missing selected task: ${taskId}`);
+    if (entry.checks.length > 20 || new Set(entry.checks).size !== entry.checks.length) throw new Error(`Implementation task checks are invalid: ${taskId}`);
+    return { taskId, checks: entry.checks.map((check) => text(check, `Implementation task ${taskId} check`, 500).replace(/\s+/gu, " ")) };
   });
-  return { ...input, caseRefs, gateRefs, selectedTaskMappings };
+  return { prompt, selectedTaskChecks };
 }
 
 function exactTaskIds(values: readonly string[], label: string): string[] {
@@ -156,12 +137,12 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       selectedTaskIds: readonly string[];
       selectedTasks: readonly CampaignTaskSnapshot[];
       inventoryDigest: string;
-      plan: CampaignPlanSnapshot;
+      testing: CampaignTestingGuidance;
       mode: ImplementationMode;
     }): ImplementationCampaign {
       const selectedTaskIds = exactTaskIds(input.selectedTaskIds, "implementation task ID");
       if (!digestPattern.test(input.inventoryDigest)) throw new Error("Implementation inventory digest is invalid");
-      const plan = planSnapshot(input.plan, selectedTaskIds);
+      const testing = testingGuidance(input.testing, selectedTaskIds);
       const records = new Map(input.selectedTasks.map((task) => [task.id, task]));
       if (records.size !== input.selectedTasks.length) throw new Error("Implementation task snapshot contains duplicate IDs");
       const selectedTasks = selectedTaskIds.map((id) => {
@@ -177,12 +158,12 @@ export function createImplementationCampaignManager(options: ImplementationCampa
       const campaign: ImplementationCampaign = {
         campaignId, changeId: text(input.changeId, "Implementation change ID", MAX_ID_BYTES),
         projectId: text(input.projectId, "Implementation project ID", MAX_PROJECT_ID_BYTES), selectedTaskIds, selectedTasks,
-        inventoryDigest: input.inventoryDigest, plan, mode: input.mode, status: "active",
+        inventoryDigest: input.inventoryDigest, testing, mode: input.mode, status: "active",
         reviewerAuthorizations: [], dispatches: [], captainDirect: [],
       };
       const nextContinuation: ContinuationLease = {
         campaignId: campaign.campaignId, projectId: campaign.projectId, changeId: campaign.changeId,
-        selectedTaskIds: [...campaign.selectedTaskIds], inventoryDigest: campaign.inventoryDigest, planDigest: campaign.plan.digest,
+        selectedTaskIds: [...campaign.selectedTaskIds], inventoryDigest: campaign.inventoryDigest, testingPrompt: campaign.testing.prompt,
         mode: campaign.mode, generation: 0, disposition: "active",
       };
       if (Buffer.byteLength(JSON.stringify(nextContinuation), "utf8") > MAX_CONTINUATION_IDENTITY_BYTES) {

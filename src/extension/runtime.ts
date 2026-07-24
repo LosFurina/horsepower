@@ -12,12 +12,7 @@ import { resolveOutputLocale } from "../localization/index.js";
 import { createWebhookNotifier, type WebhookNotifierOptions } from "../lifecycle/webhook-notifier.js";
 import { createOpenSpecBoundary, type OpenSpecChangeCandidate } from "../openspec/boundary.js";
 import type { OpenSpecTaskInventory } from "../openspec/task-inventory.js";
-import {
-  campaignPlanFromTestAndGatePlan,
-  plannedAcceptanceChecksFromPlan,
-  type TestAndGatePlan,
-} from "../openspec/test-and-gate-plan.js";
-import { message, type OutputLocale } from "../localization/index.js";
+import { type OutputLocale } from "../localization/index.js";
 import { createOpenSpecCliRunner } from "../openspec/cli-runner.js";
 import { createOrchestration } from "../orchestration/facade.js";
 import { createOneShotExecutor, type OneShotProgress, type WorkerIdentity } from "../runtime/one-shot.js";
@@ -55,7 +50,6 @@ export interface CreateHorsepowerRuntimeOptions {
   oneShot?: ReturnType<typeof createOneShotExecutor>;
   capabilityProbe?: ModelCapabilityProbe;
   loadTaskInventory?: (input: { cwd: string; changeId: string }) => Promise<OpenSpecTaskInventory>;
-  loadTestAndGatePlan?: (input: { cwd: string; changeId: string }) => Promise<TestAndGatePlan>;
   discoverUnfinishedChanges?: (input: { cwd: string }) => Promise<OpenSpecChangeCandidate[]>;
   acceptanceSnapshot?: (input: { runId: string; changeId: string; projectId: string }) => AcceptanceSnapshot | Promise<AcceptanceSnapshot>;
 }
@@ -116,19 +110,8 @@ export class HorsepowerRuntime {
           : await this.#boundary.snapshotAcceptance({ cwd: projectId, changeId, selectedTaskIds: campaign.selectedTaskIds, selectedTasks: campaign.selectedTasks, requireComplete: true });
         const expected = campaign.selectedTaskIds.map((id) => `task:${id}`);
         if (snapshot.refs.join("\0") !== expected.join("\0")) throw new Error("VERIFICATION_SCOPE_DRIFT: acceptance snapshot does not match the active implementation campaign");
-        const plan = await this.#revalidateCampaignPlan({
-          campaignId: campaign.campaignId,
-          changeId,
-          projectId,
-          cwd: projectId,
-        });
-        return {
-          digest: snapshot.digest,
-          refs: snapshot.refs,
-          // Official OpenSpec remains authoritative; caller-supplied planned checks
-          // are never accepted as a parallel plan store.
-          plannedChecks: plannedAcceptanceChecksFromPlan(plan, campaign.selectedTaskIds),
-        };
+        await this.#revalidateCampaignTasks({ campaignId: campaign.campaignId, changeId, projectId, cwd: projectId });
+        return { digest: snapshot.digest, refs: snapshot.refs };
       },
     });
     const readText = options.readText ?? ((path: string) => readFile(path, "utf8"));
@@ -148,20 +131,15 @@ export class HorsepowerRuntime {
     return this.#loadTaskInventory(requestedProjectId, input.changeId);
   }
 
-  async loadImplementationTestAndGatePlan(input: { changeId: string; projectId: string }) {
-    const requestedProjectId = resolve(input.projectId);
-    await this.#boundary.authorize({ action: "begin_change", cwd: requestedProjectId, changeId: input.changeId });
-    return this.#loadPlan(requestedProjectId, input.changeId);
-  }
 
   async beginImplementationCampaign(input: {
     changeId: string;
     projectId: string;
     selectedTaskIds: string[];
-    selectedTasks: Array<{ id: string; description: string; status: "pending"; sectionId: string }>;
+    selectedTasks: Array<{ id: string; description: string; status: "pending"; sectionId: string; checks?: string[] }>;
     inventoryDigest: string;
     mode: ImplementationMode;
-    planDigest: string;
+    testingPrompt: string;
   } | {
     changeId: string;
     projectId: string;
@@ -188,26 +166,13 @@ export class HorsepowerRuntime {
       if (task.status !== "pending") throw new Error(`OpenSpec task is already complete: ${id}`);
       return task;
     });
-    let plan: TestAndGatePlan;
-    try {
-      plan = await this.#loadPlan(requestedProjectId, input.changeId);
-    } catch (cause) {
-      throw this.#planLoadError(cause, "en");
-    }
-    if (!/^[a-f0-9]{64}$/u.test(input.planDigest)) {
-      throw new Error("PLAN_CONFIRMATION_REQUIRED: campaign creation requires the exact displayed test-and-gate plan digest");
-    }
-    if (plan.digest !== input.planDigest) {
-      throw new Error("PLAN_DRIFT: official test-and-gate plan changed before campaign confirmation; run /horsepower-campaign again");
-    }
-    const campaignPlan = campaignPlanFromTestAndGatePlan(plan, input.selectedTaskIds);
     return this.#implementations.begin({
       changeId: input.changeId,
       projectId,
       selectedTaskIds: input.selectedTaskIds,
       selectedTasks,
       inventoryDigest: input.inventoryDigest,
-      plan: campaignPlan,
+      testing: { prompt: input.testingPrompt, selectedTaskChecks: selectedTasks.map((task) => ({ taskId: task.id, checks: task.checks ?? [] })) },
       mode: input.mode,
     });
   }
@@ -246,13 +211,7 @@ export class HorsepowerRuntime {
         const current = ordered.find((task) => task.id === selected.id);
         if (!current || current.status !== "pending" || current.description !== selected.description || current.sectionId !== selected.sectionId || current.sectionTitle !== selected.sectionTitle) return undefined;
       }
-      await this.#revalidateCampaignPlan({
-        campaignId: lease.campaignId,
-        changeId: lease.changeId,
-        projectId: lease.projectId,
-        cwd: projectId,
-        selectedTaskIds: lease.selectedTaskIds,
-      });
+      await this.#revalidateCampaignTasks({ campaignId: lease.campaignId, changeId: lease.changeId, projectId: lease.projectId, cwd: projectId, selectedTaskIds: lease.selectedTaskIds });
       return this.#implementations.beginContinuationGeneration(lease.campaignId, lease.projectId, input.generation);
     } catch { return undefined; }
   }
@@ -263,55 +222,28 @@ export class HorsepowerRuntime {
       : this.#boundary.loadTaskInventory({ cwd, changeId });
   }
 
-  async #loadPlan(cwd: string, changeId: string): Promise<TestAndGatePlan> {
-    return this.#options.loadTestAndGatePlan
-      ? this.#options.loadTestAndGatePlan({ cwd, changeId })
-      : this.#boundary.loadTestAndGatePlan({ cwd, changeId });
-  }
-
-  #planLoadError(cause: unknown, locale: OutputLocale): Error {
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    const code = /^(PLAN_[A-Z0-9_]+)/u.exec(detail)?.[1]
-      ?? (detail.includes("PLAN_MISSING_SECTION") ? "PLAN_MISSING_SECTION" : "PLAN_INVALID");
-    const localized = message(locale, code === "PLAN_MISSING_SECTION" || code === "PLAN_INVALID" || detail.includes("no valid") ? "testPlan.migration" : "testPlan.invalid", { code });
-    return new Error(`${code}: ${localized} (${detail})`);
-  }
-
-  async #revalidateCampaignPlan(input: {
+  async #revalidateCampaignTasks(input: {
     campaignId: string;
     changeId: string;
     projectId: string;
     cwd: string;
     selectedTaskIds?: readonly string[];
-  }) {
+  }): Promise<OpenSpecTaskInventory> {
     const campaign = this.#implementations.status(input.campaignId, input.projectId);
     if (campaign.changeId !== input.changeId) throw new Error(`Implementation campaign ${input.campaignId} belongs to change ${campaign.changeId}`);
+    const inventory = await this.#loadTaskInventory(input.cwd, input.changeId);
     const selectedTaskIds = input.selectedTaskIds ?? campaign.selectedTaskIds;
-    let plan: TestAndGatePlan;
-    try {
-      plan = await this.#loadPlan(input.cwd, input.changeId);
-    } catch (cause) {
-      throw this.#planLoadError(cause, "en");
+    const ordered = inventory.sections.flatMap((section) => section.tasks.map((task) => ({ ...task, sectionTitle: section.title })));
+    const selectedOrder = ordered.filter((task) => selectedTaskIds.includes(task.id)).map((task) => task.id);
+    if (selectedOrder.join("\0") !== selectedTaskIds.join("\0")) throw new Error("Selected OpenSpec task ordering drifted; create a new implementation campaign");
+    for (const selected of campaign.selectedTasks.filter((task) => selectedTaskIds.includes(task.id))) {
+      const current = ordered.find((task) => task.id === selected.id);
+      if (!current || current.status !== "pending" || current.description !== selected.description || current.sectionId !== selected.sectionId
+        || current.sectionTitle !== selected.sectionTitle || JSON.stringify(current.checks ?? []) !== JSON.stringify(selected.checks ?? [])) {
+        throw new Error(`Selected OpenSpec task drifted: ${selected.id}; create a new implementation campaign`);
+      }
     }
-    if (plan.digest !== campaign.plan.digest) {
-      throw new Error("PLAN_DRIFT: official test-and-gate plan changed before authorization; confirm a new campaign");
-    }
-    const currentSnapshot = campaignPlanFromTestAndGatePlan(plan, selectedTaskIds);
-    if (JSON.stringify(currentSnapshot.selectedTaskMappings) !== JSON.stringify(campaign.plan.selectedTaskMappings)
-      || JSON.stringify(currentSnapshot.caseRefs) !== JSON.stringify(campaign.plan.caseRefs)
-      || JSON.stringify(currentSnapshot.gateRefs) !== JSON.stringify(campaign.plan.gateRefs)) {
-      throw new Error("PLAN_DRIFT: official selected-task mappings changed before authorization; confirm a new campaign");
-    }
-    if (selectedTaskIds.length === 0 || new Set(selectedTaskIds).size !== selectedTaskIds.length) {
-      throw new Error("PLAN_SCOPE: selected task IDs must be exact and unique");
-    }
-    for (const taskId of selectedTaskIds) {
-      const ref = `task:${taskId}`;
-      const covered = plan.cases.some((item) => item.maps.includes(ref))
-        || plan.nonApplicability.some((item) => item.covers.includes(ref));
-      if (!covered) throw new Error(`PLAN_SCOPE: selected task lacks plan coverage: ${taskId}`);
-    }
-    return plan;
+    return inventory;
   }
 
   async authorizeImplementationReviewer(input: { campaignId: string; projectId: string; reviewCampaignId: string; acceptanceScope: string; budget: number }) {
@@ -373,13 +305,8 @@ export class HorsepowerRuntime {
       }
       try {
         const campaign = this.#implementations.status(campaignId, projectId);
-        // Revalidate official plan before budget, run, handoff, or process creation.
-        await this.#revalidateCampaignPlan({
-          campaignId,
-          changeId: String(raw.changeId),
-          projectId,
-          cwd,
-        });
+        // Revalidate official selected tasks and checks before side effects.
+        await this.#revalidateCampaignTasks({ campaignId, changeId: String(raw.changeId), projectId, cwd });
         const inventory = await this.#loadTaskInventory(cwd, String(raw.changeId));
         const inventoryProjectId = await realpath(resolve(inventory.projectRoot)).catch(() => resolve(inventory.projectRoot));
         if (inventory.changeId !== campaign.changeId || inventoryProjectId !== campaign.projectId || inventory.digest !== campaign.inventoryDigest) {

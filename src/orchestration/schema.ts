@@ -25,20 +25,9 @@ const AlternativeEvidence = Type.Object({
 const AcceptanceMapping = Type.Object({
   ref: Type.String({ minLength: 1, maxLength: 256 }), evidenceIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 20 }),
 }, { additionalProperties: false });
-const PlannedCheckWaiver = Type.Object({
-  reason: Type.String({ minLength: 1, maxLength: 500 }),
-  condition: Type.String({ minLength: 1, maxLength: 500 }),
-  alternativeEvidenceIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 20 }),
-}, { additionalProperties: false });
-const PlannedCheckMapping = Type.Object({
-  ref: Type.String({ minLength: 1, maxLength: 128 }),
-  evidenceIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 20 })),
-  waiver: Type.Optional(PlannedCheckWaiver),
-}, { additionalProperties: false });
 const Verification = Type.Object({
   observedAt: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$", maxLength: 24 }),
   commands: Type.Optional(Type.Array(Evidence, { minItems: 1, maxItems: 8 })), acceptance: Type.Array(AcceptanceMapping, { minItems: 1, maxItems: 100 }),
-  plannedChecks: Type.Optional(Type.Array(PlannedCheckMapping, { maxItems: 200 })),
   e2eWaiver: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, maxLength: 500 }), alternativeEvidence: Type.Array(AlternativeEvidence, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false })),
   scopeSnapshot: Type.Optional(Type.Never()),
 }, { additionalProperties: false });

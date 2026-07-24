@@ -459,13 +459,7 @@ test("user commands create implementation mode and bounded reviewer authorizatio
   const loadImplementationTaskInventory = vi.fn(async () => inventory);
   const beginImplementationCampaign = vi.fn(async (input) => ({ campaignId: "implementation-1", ...input, plan: { digest: "f".repeat(64) } }));
   const authorizeImplementationReviewer = vi.fn(async (input) => ({ remaining: input.budget }));
-  const loadImplementationTestAndGatePlan = vi.fn(async () => ({
-    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
-    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
-    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
-    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
-  }));
-  const runtime = { execute: vi.fn(), discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]), loadImplementationTaskInventory, loadImplementationTestAndGatePlan, beginImplementationCampaign, authorizeImplementationReviewer };
+  const runtime = { execute: vi.fn(), discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]), loadImplementationTaskInventory, beginImplementationCampaign, authorizeImplementationReviewer };
   const { registerHorsepowerExtension } = await import("../../src/extension/index.js");
   registerHorsepowerExtension(pi as never, {
     acquireRuntime: () => ({ value: runtime, cleanup: vi.fn(), abandon: vi.fn() }),
@@ -475,7 +469,7 @@ test("user commands create implementation mode and bounded reviewer authorizatio
     .mockResolvedValueOnce("horsepower-alpha1 — 1/2 tasks complete")
     .mockResolvedValueOnce("All unfinished tasks")
     .mockResolvedValueOnce("Main Agent direct execution");
-  ctx.ui.input = vi.fn();
+  ctx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
   ctx.ui.confirm = vi.fn(async () => true);
   const campaign = pi.commands.find((command) => command.name === "horsepower-campaign")!.options.handler as (args: string, ctx: unknown) => Promise<void>;
   await campaign("", ctx);
@@ -483,7 +477,7 @@ test("user commands create implementation mode and bounded reviewer authorizatio
   expect(beginImplementationCampaign).toHaveBeenCalledWith({
     changeId: "horsepower-alpha1", projectId: "/active/project", selectedTaskIds: ["4.7"],
     selectedTasks: [{ id: "4.7", description: "Do work", status: "pending", sectionId: "4" }],
-    inventoryDigest: "a".repeat(64), planDigest: "f".repeat(64), mode: "main_agent",
+    inventoryDigest: "a".repeat(64), testingPrompt: "Run focused tests", mode: "main_agent",
   });
   expect(pi.messages).toEqual([{ message: expect.objectContaining({ customType: "horsepower-campaign", details: expect.objectContaining({ campaignId: "implementation-1", mode: "main_agent" }) }), options: { deliverAs: "followUp", triggerTurn: true } }]);
 
@@ -513,18 +507,12 @@ test.each([
       execute: vi.fn(),
       discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
       loadImplementationTaskInventory: vi.fn(async () => inventory),
-      loadImplementationTestAndGatePlan: vi.fn(async () => ({
-    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
-    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
-    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
-    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
-  })),
       beginImplementationCampaign,
     }, cleanup: vi.fn(), abandon: vi.fn() }),
     resolveOutputLocale: async () => locale,
   });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn().mockResolvedValueOnce(entry);
+  ctx.ui.input = vi.fn().mockResolvedValueOnce(entry).mockResolvedValueOnce("Run focused tests");
   ctx.ui.select = vi.fn()
     .mockResolvedValueOnce(locale === "zh-CN" ? "change-a — 1/2 个任务已完成" : "change-a — 1/2 tasks complete")
     .mockResolvedValueOnce(scope)
@@ -550,16 +538,10 @@ test("large campaign inventory preserves every selectable task ID in bounded UI 
     execute: vi.fn(),
     discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
     loadImplementationTaskInventory: vi.fn(async () => inventory),
-    loadImplementationTestAndGatePlan: vi.fn(async () => ({
-      changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
-      cases: [{ id: "TC-1", title: "Case", maps: inventory.sections[0]!.tasks.map((t) => `task:${t.id}`), level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
-      gates: [{ id: "G-1", title: "Gate", maps: inventory.sections[0]!.tasks.map((t) => `task:${t.id}`), intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
-      nonApplicability: [], coverageRefs: [], digest: "f".repeat(64),
-    })),
     beginImplementationCampaign,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn();
+  ctx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
   ctx.ui.select = vi.fn().mockResolvedValueOnce("change-large — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
   ctx.ui.confirm = vi.fn(async () => true);
 
@@ -569,7 +551,7 @@ test("large campaign inventory preserves every selectable task ID in bounded UI 
   expect(beginImplementationCampaign).toHaveBeenCalledWith(expect.objectContaining({ selectedTaskIds: expectedIds }));
   expect(ctx.ui.notify.mock.calls.every(([message]: [string]) => Buffer.byteLength(message, "utf8") <= 40 * 1024)).toBe(true);
   expect(ctx.ui.confirm).toHaveBeenCalledWith(
-    "Confirm these exact profiles, test cases, gates, task scope, and execution mode? No option is selected by default.",
+    "Confirm these exact tasks, checks, execution mode, and testing intensity?",
     expect.stringContaining("1000 task(s)"),
   );
   expect(pi.messages).toHaveLength(1);
@@ -588,16 +570,10 @@ test("campaign with no unfinished tasks returns an actionable outcome without cr
     execute: vi.fn(),
     discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 1 }]),
     loadImplementationTaskInventory: vi.fn(async () => inventory),
-    loadImplementationTestAndGatePlan: vi.fn(async () => ({
-    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
-    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
-    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
-    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
-  })),
     beginImplementationCampaign,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const ctx = context() as any;
-  ctx.ui.input = vi.fn();
+  ctx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
   ctx.ui.select = vi.fn(async () => "change-done — 1/1 tasks complete");
   ctx.ui.confirm = vi.fn();
 
@@ -620,16 +596,10 @@ test("campaign cancellation and creation failure never kick off while repeated c
     execute: vi.fn(),
     discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
     loadImplementationTaskInventory: vi.fn(async () => inventory),
-    loadImplementationTestAndGatePlan: vi.fn(async () => ({
-    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
-    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
-    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
-    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
-  })),
     beginImplementationCampaign: canceledBegin,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const canceledCtx = context() as any;
-  canceledCtx.ui.input = vi.fn();
+  canceledCtx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
   canceledCtx.ui.select = vi.fn()
     .mockResolvedValueOnce("change-a — 1/2 tasks complete")
     .mockResolvedValueOnce("All unfinished tasks")
@@ -646,16 +616,10 @@ test("campaign cancellation and creation failure never kick off while repeated c
     execute: vi.fn(),
     discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
     loadImplementationTaskInventory: vi.fn(async () => inventory),
-    loadImplementationTestAndGatePlan: vi.fn(async () => ({
-    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
-    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
-    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
-    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
-  })),
     beginImplementationCampaign: repeatedBegin,
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const repeatedCtx = context() as any;
-  repeatedCtx.ui.input = vi.fn();
+  repeatedCtx.ui.input = vi.fn().mockResolvedValue("Run focused tests");
   repeatedCtx.ui.select = vi.fn()
     .mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team")
     .mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
@@ -675,21 +639,15 @@ test("campaign cancellation and creation failure never kick off while repeated c
     execute: vi.fn(),
     discoverImplementationChanges: vi.fn(async () => [{ changeId: inventory.changeId, completedTasks: 1, totalTasks: 2 }]),
     loadImplementationTaskInventory: vi.fn(async () => inventory),
-    loadImplementationTestAndGatePlan: vi.fn(async () => ({
-    changeId: "plan", testIntensity: "standard" as const, gateStrictness: "required" as const,
-    cases: [{ id: "TC-1", title: "Case", maps: ["task:1.1", "task:2.1", "task:4.7"], level: "unit" as const, purpose: "p", preconditions: "s", action: "a", expected: "e", failure: "f", disposition: "required" as const }],
-    gates: [{ id: "G-1", title: "Gate", maps: ["task:1.1", "task:2.1", "task:4.7"], intent: "openspec validate --strict", scope: "selected change", pass: "exit 0", disposition: "required" as const, phase: "campaign" as const, waiver: "none", floor: "openspec" as const }],
-    nonApplicability: [], coverageRefs: ["task:1.1"], digest: "f".repeat(64),
-  })),
-    beginImplementationCampaign: vi.fn(async () => { throw new Error("PLAN_INVALID: creation failed"); }),
+    beginImplementationCampaign: vi.fn(async () => { throw new Error("Campaign creation failed"); }),
   }, cleanup: vi.fn(), abandon: vi.fn() }) });
   const failedCtx = context() as any;
-  failedCtx.ui.input = vi.fn();
+  failedCtx.ui.input = vi.fn().mockResolvedValueOnce("Run focused tests");
   failedCtx.ui.select = vi.fn().mockResolvedValueOnce("change-a — 1/2 tasks complete").mockResolvedValueOnce("All unfinished tasks").mockResolvedValueOnce("Multi-Agent team");
   failedCtx.ui.confirm = vi.fn(async () => true);
   await (failedPi.commands.find((item) => item.name === "horsepower-campaign")!.options.handler as any)("", failedCtx);
   expect(failedPi.messages).toEqual([]);
-  expect(failedCtx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/invalid|revise/i), "error");
+  expect(failedCtx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/failed/i), "error");
 });
 
 test("tool localizes principal conclusions while preserving English evidence and machine fields", async () => {

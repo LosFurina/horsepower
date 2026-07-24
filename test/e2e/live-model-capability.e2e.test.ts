@@ -129,17 +129,12 @@ async function runtimeHarness() {
       changeId: "change-a", projectRoot: project, digest: "a".repeat(64),
       sections: [{ id: "1", title: "Capability", tasks: Array.from({ length: 7 }, (_, index) => ({ id: `1.${index + 1}`, description: `Capability ${index + 1}`, status: "pending" as const, sectionId: "1" })) }],
     }),
-    loadTestAndGatePlan: async () => ({
-      changeId: "change-a", testIntensity: "targeted", gateStrictness: "required", digest: "c".repeat(64), coverageRefs: [], nonApplicability: [],
-      cases: Array.from({ length: 7 }, (_, index) => ({ id: `TC-${index + 1}`, title: `Capability ${index + 1}`, maps: [`task:1.${index + 1}`], level: "e2e" as const, purpose: "Exercise capability", preconditions: "Live model fixture", action: "Dispatch", expected: "Supported", failure: "Capability mismatch", disposition: "required" as const })),
-      gates: [{ id: "G-1", title: "Live gate", maps: Array.from({ length: 7 }, (_, index) => `task:1.${index + 1}`), intent: "Run live capability acceptance", scope: "Selected capability tasks", pass: "All expected outcomes observed", disposition: "required", phase: "completion", waiver: "none", floor: "e2e" }],
-    }),
   });
   const scopes = Array.from({ length: 7 }, (_, index) => `1.${index + 1}`);
   const campaign = await runtime.beginImplementationCampaign({
     changeId: "change-a", projectId: project, selectedTaskIds: scopes,
     selectedTasks: scopes.map((id) => ({ id, description: `Capability ${id.split(".")[1]}`, status: "pending" as const, sectionId: "1" })),
-    inventoryDigest: "a".repeat(64), planDigest: "c".repeat(64), mode: "multi_agent",
+    inventoryDigest: "a".repeat(64), testingPrompt: "Run focused tests", mode: "multi_agent",
   });
   let revisionFlag = false;
   const context = {

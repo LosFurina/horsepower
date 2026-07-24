@@ -202,7 +202,7 @@ test("production HorsepowerRuntime authority continues after real campaign OpenS
   });
   const campaignId = String(created[0]!.campaignId);
   expect(fixtureEvents(result, "openspec-inventory").length).toBeGreaterThanOrEqual(1);
-  expect(fixtureEvents(result, "openspec-plan").length).toBeGreaterThanOrEqual(1);
+  expect(fixtureEvents(result, "campaign-created")[0]).toMatchObject({ testingPrompt: "Run focused tests and available E2E" });
   expect(fixtureEvents(result, "compact")).toEqual([
     { type: "compact", reason: "threshold", willRetry: false, saved: true, authority: "production" },
   ]);

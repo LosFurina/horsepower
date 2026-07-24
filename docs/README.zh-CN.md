@@ -78,67 +78,18 @@ One-shot worker 会实时流式展示受限且脱敏的 assistant/tool 生命周
 
 Review campaign 绑定一个 implementation campaign、精确 task scope、固定 acceptance scope 和正数有限预算。每个 scope 内根因初始为 `pending`。只有 Captain 可用有界技术理由设置 `accepted`、`rejected`、`needs_clarification` 或 `blocked_needs_human`；reviewer verdict、recommendation、confidence、表演式同意、重复样例、disposition 和 resolution 都不会自动调度工作，也不会增加或重置预算。`fix` dispatch 必须命名一个同 project/change/campaign 中、已接受、scope 内且未解决的 `reviewFindingRootCauseId`，验证后才消耗预算。已接受 finding 保持 `open`，直到 Captain 提供映射到 `review-finding:<rootCauseId>` 的新鲜 targeted verification。campaign outcome `accepted` 要求每个 scope 内 finding 都已用理由技术拒绝，或已接受且解决。仍可如实使用 `scope_changed`、`blocked_needs_human`、`canceled`。
 
-## 已确认的 test-and-gate plan
+## Task-local Check 与测试强度
 
-Horsepower 辅助 OpenSpec authoring 不存在隐式测试默认值。每个新 change 或有实质修改的 change 都必须由 Captain 推荐并解释、由用户显式选择一个 `testIntensity` 和一个 `gateStrictness`：
+Horsepower 依赖官方 strict-valid OpenSpec artifacts，不再要求独立 `## Test and Gate Plan`、测试/门禁 profiles 或 `TC-*`/`G-*` registry。
 
-| Profile | 对当前 change 的含义 |
-| --- | --- |
-| `targeted` | 直接变更的 acceptance 与聚焦 regression case。 |
-| `standard` | `targeted` 加上适用的 unit、integration、failure-path 和选定 E2E coverage。 |
-| `exhaustive` | `standard` 加上适用的 boundary、adversarial/error、concurrency、platform、compatibility 与完整 regression coverage。 |
-| `required` | 仓库 baseline 与全部既有 mandatory completion gate。 |
-| `strict` | `required` 加上适用的 full suite，且 scope 内 required failure 必须为零。 |
-| `release` | `strict` 加上适用的 deterministic release/privacy、packaged artifact、immutable install/update、rollback 与真实环境 acceptance。 |
-| `custom` | 显式且有界的 case/gate；不得削弱任何适用 mandatory floor。 |
+作者可以直接在 task 下添加具体且可选的验证说明：
 
-无论选择哪个 profile，OpenSpec validity、security/privacy、compatibility、lifecycle/terminal truth、当前 scope claim matching 和 E2E-or-valid-waiver 都是 mandatory floor。影响 release 或 installation 的工作还必须保留适用的 archive/privacy、packaged CLI、immutable installation/update、rollback 与真实 Pi acceptance gate。
-
-展开后的 plan 只能位于官方 change `design.md` 的一个 `## Test and Gate Plan` section；官方 `tasks.md` 使用稳定 ID 引用它。Horsepower 不创建私有 plan registry，也绝不修改官方生成的 `.pi/skills/openspec-*` 或 `.pi/prompts/opsx-*`。完整 case 示例：
-
-```md
-## Test and Gate Plan
-
-### Profiles
-- testIntensity: standard
-- gateStrictness: strict
-
-### Test Cases
-
-#### TC-1: 取消不得产生副作用
-- maps: scenario:Implementation campaign includes explicit test-and-gate confirmation/User rejects plan during campaign creation, task:4.3
-- level: e2e
-- purpose: 防止取消确认后仍授权工作
-- preconditions: apply-ready fixture change 与一个既有 active campaign
-- action: 启动 Pi RPC，调用 /horsepower-campaign，并取消最终确认
-- expected: 不创建新 campaign 或 kickoff；既有 campaign 逐字节不变
-- failure: cancellation 泄漏了 implementation authority
-- disposition: required
-
-### Gates
-
-#### G-1: 聚焦与真实 Pi acceptance
-- maps: scenario:Implementation campaign includes explicit test-and-gate confirmation/User rejects plan during campaign creation, task:4.3
-- intent: npm run test:e2e -- test/e2e/test-gate-plan.e2e.test.ts
-- scope: authoring and campaign confirmation paths
-- pass: 退出码为 0，且观察到 TC-1 与全部 mapped case
-- disposition: required
-- phase: completion
-- waiver: 仅当 Pi 不可用，并提供具体原因和 mapped alternative evidence
-- floor: e2e
+```markdown
+- [ ] 1.1 实现该行为。
+  - Check: 运行 focused test 并观察 exit code zero。
 ```
 
-每个 gate 必须声明显式 `maps` acceptance refs；Horsepower 绝不会从 `scope` prose 推断 gate coverage。
-
-写入最终选择前，Captain 必须展示推荐项、有意义的替代项、每个 case 的 level/setup/action/expectation/failure meaning，以及每个 gate 的 phase/pass/waiver 后果。用户必须确认完整展开 plan；取消、不支持的输入、超时或非肯定答复都会使 plan 保持 unconfirmed。`custom` 必须枚举内容。若未来具体命令尚不可知，仍须记录明确的 harness intent 与可观察行为，并在官方 tasks 添加 completion 前核对精确命令的任务。
-
-随后 `/horsepower-campaign` 会显示规范化 tasks、`multi_agent` 或 `main_agent` mode、两个机器 profile value，以及配置语言下每个 scope 内 `TC-*`/`G-*` 的解释，最后只进行一次组合确认。取消或 invalidity 不创建任何状态，也不替换 active campaign。Campaign 只为进程内授权 snapshot 规范化官方 facts。Profile、case、gate、mapping、command intent、fixture/environment、expectation、waiver rule、selected-task acceptance 或 requirement scenario 的语义变化都要求新 campaign；仅格式或无关 prose 的变化不要求重确认。
-
-Completion 时，每个适用且 required 的 `TC-*` 和 `G-*` 都必须在既有 `verification` manifest 中映射到 Captain 新近观察的成功 evidence，并同时覆盖当前 acceptance claim。Advisory check 必须如实报告，但不能满足 required claim，也不会仅凭自身阻止其他 required claim。Plan 允许 waiver 时，仍须提供具体原因与 mapped alternative evidence。
-
-### 迁移现有 change
-
-缺少有效 plan 的 apply-ready change 不会被 grandfather；文本 marker 也不能证明曾经同意。请修改其官方 `design.md` 与 `tasks.md`，向用户展示完整推荐/替代方案及展开 entries，取得新的肯定确认，然后创建新 campaign。诊断会保留稳定 code 和 machine token，同时本地化 remediation。不得从生成 prose、git history、worker/reviewer 推荐、其他 change 推断确认。
+`/horsepower-campaign` 会显示选中的 tasks 及其 checks（没有则显示 `none`），要求用户输入一段新的自由文本测试强度提示词，并与 change、精确 task IDs 和 execution mode 一起确认。该提示词只指导测试广度，不能削弱 OpenSpec validity、privacy、security、compatibility、lifecycle truth 或 fresh claim-matched completion evidence。
 
 ## Managed handoff
 

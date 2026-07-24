@@ -76,41 +76,6 @@ function inventoryFixture(projectRoot, options = {}) {
   };
 }
 
-function planFixture(ids, digest = "c".repeat(64)) {
-  return {
-    changeId: "change-e2e",
-    testIntensity: "standard",
-    gateStrictness: "required",
-    cases: ids.map((id, index) => ({
-      id: `TC-${index + 1}`,
-      title: `Case for ${id}`,
-      maps: [`task:${id}`],
-      level: "unit",
-      purpose: `Prove task ${id}`,
-      preconditions: "fixture",
-      action: "exercise",
-      expected: "pass",
-      failure: "fail",
-      disposition: "required",
-    })),
-    gates: [{
-      id: "G-1",
-      title: "OpenSpec",
-      maps: ids.map((id) => `task:${id}`),
-      intent: "openspec validate --strict",
-      scope: "selected change",
-      pass: "exit 0",
-      disposition: "required",
-      phase: "campaign",
-      waiver: "none",
-      floor: "openspec",
-    }],
-    nonApplicability: [],
-    coverageRefs: ids.map((id) => `task:${id}`),
-    digest,
-  };
-}
-
 async function productionRuntime() {
   if (!helperPath) throw new Error("production authority fixture requires HORSEPOWER_COMPACTION_RUNTIME_HELPER");
   const { createHorsepowerRuntime } = await import(pathToFileURL(helperPath).href);
@@ -133,7 +98,9 @@ async function productionRuntime() {
     "## 3. Integration and Acceptance",
     "",
     `- [${completeFirst ? "x" : " "}] 3.1 Update documentation`,
+    "  - Check: Preserve exact selected scope after automatic compaction",
     "- [ ] 3.2 Add real Pi E2E fixtures",
+    "  - Check: Continue only under multi_agent mode",
     "",
   ].join("\n"));
   await writeTasks(false);
@@ -142,23 +109,7 @@ async function productionRuntime() {
     "Production authority SHALL remain current.", "", "#### Scenario: Active campaign remains current",
     "- **WHEN** automatic compaction settles", "- **THEN** the exact campaign continues", "",
   ].join("\n"));
-  const acceptanceMaps = "scenario:Production continuation authority/Active campaign remains current, task:3.1, task:3.2";
-  const caseBlock = (id, taskId) => [
-    `#### ${id}: production task ${taskId}`, `- maps: ${acceptanceMaps}`, "- level: unit",
-    `- purpose: prove production task ${taskId} authority`, "- preconditions: official on-disk OpenSpec fixture",
-    "- action: force official Pi automatic compaction", "- expected: exact campaign continuation remains authorized",
-    "- failure: stale or broadened campaign authority continued", "- disposition: required", "",
-  ].join("\n");
-  const gate = (id, floor) => [
-    `#### ${id}: ${floor} floor`, `- maps: ${acceptanceMaps}`, `- intent: verify ${floor} continuation behavior`,
-    "- scope: production runtime and official fixture", "- pass: mapped authority remains exact and successful",
-    "- disposition: required", "- phase: completion", "- waiver: no fixture waiver is permitted", `- floor: ${floor}`, "",
-  ].join("\n");
-  await writeFile(designPath, [
-    "## Test and Gate Plan", "", "### Profiles", "- testIntensity: targeted", "- gateStrictness: required", "",
-    "### Test Cases", "", caseBlock("TC-1", "3.1"), caseBlock("TC-2", "3.2"),
-    "### Gates", "", ...["openspec", "privacy", "security", "compatibility", "terminal-truth", "e2e"].map((floor, index) => gate(`G-${index + 1}`, floor)),
-  ].join("\n"));
+  await writeFile(designPath, "# Design\n\nNo separate Horsepower test-and-gate plan is required.\n");
   let version = "1.6.0";
   let doctorHealthy = true;
   let doctorPath = projectRoot;
@@ -238,9 +189,7 @@ async function productionRuntime() {
   });
 
   const inventory = await runtime.loadImplementationTaskInventory({ changeId, projectId: projectRoot });
-  const plan = await runtime.loadImplementationTestAndGatePlan({ changeId, projectId: projectRoot });
   record({ type: "openspec-inventory", changeId, digest: inventory.digest, pending: inventory.sections.flatMap((section) => section.tasks).filter((task) => task.status === "pending").map((task) => task.id) });
-  record({ type: "openspec-plan", changeId, digest: plan.digest });
   const selectedTaskIds = ["3.1", "3.2"];
   const selectedTasks = inventory.sections.flatMap((section) => section.tasks)
     .filter((task) => selectedTaskIds.includes(task.id))
@@ -250,6 +199,7 @@ async function productionRuntime() {
       status: "pending",
       sectionId: task.sectionId,
       sectionTitle: inventory.sections.find((section) => section.id === task.sectionId)?.title,
+      checks: task.checks ?? [],
     }));
 
   const campaign = await runtime.beginImplementationCampaign({
@@ -258,7 +208,7 @@ async function productionRuntime() {
     selectedTaskIds,
     selectedTasks,
     inventoryDigest: inventory.digest,
-    planDigest: plan.digest,
+    testingPrompt: "Run focused tests and available E2E",
     mode: "multi_agent",
   });
   record({
@@ -268,7 +218,7 @@ async function productionRuntime() {
     selectedTaskIds,
     mode: "multi_agent",
     inventoryDigest: inventory.digest,
-    planDigest: plan.digest,
+    testingPrompt: "Run focused tests and available E2E",
     authority: "production",
   });
 

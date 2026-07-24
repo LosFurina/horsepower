@@ -8,7 +8,6 @@ import { resolveHorsepowerPaths } from "../config/paths.js";
 import { parseWebhookSettings } from "../config/webhook.js";
 import { horsepowerSubagentSchema } from "../orchestration/schema.js";
 import { message, resolveOutputLocale, type OutputLocale } from "../localization/index.js";
-import type { TestAndGatePlan } from "../openspec/test-and-gate-plan.js";
 import { acquireGlobalRuntime, type RuntimeLease } from "../runtime/global-runtime.js";
 import type { OneShotProgress, WorkerIdentity } from "../runtime/one-shot.js";
 import type { CreateHorsepowerRuntimeOptions, HorsepowerRuntime, HorsepowerRuntimeContext } from "./runtime.js";
@@ -34,7 +33,7 @@ interface CampaignInventory {
   changeId: string;
   projectRoot: string;
   digest: string;
-  sections: Array<{ id: string; title: string; tasks: Array<{ id: string; description: string; status: "pending" | "complete"; sectionId: string }> }>;
+  sections: Array<{ id: string; title: string; tasks: Array<{ id: string; description: string; status: "pending" | "complete"; sectionId: string; checks?: string[] }> }>;
 }
 
 interface CampaignContinuationIdentity {
@@ -55,75 +54,25 @@ interface ExtensionRuntime {
   prepareCampaignContinuation?(input: { campaignId: string; projectId: string; generation?: number }): Promise<CampaignContinuationIdentity | undefined>;
   discoverImplementationChanges?(input: { projectId: string }): Promise<CampaignCandidate[]>;
   loadImplementationTaskInventory?(input: { changeId: string; projectId: string }): Promise<CampaignInventory>;
-  loadImplementationTestAndGatePlan?(input: { changeId: string; projectId: string }): Promise<TestAndGatePlan>;
   beginImplementationCampaign?(input: {
     changeId: string; projectId: string; selectedTaskIds: string[];
-    selectedTasks: Array<{ id: string; description: string; status: "pending"; sectionId: string }>;
-    inventoryDigest: string; mode: "multi_agent" | "main_agent"; planDigest?: string;
+    selectedTasks: Array<{ id: string; description: string; status: "pending"; sectionId: string; checks?: string[] }>;
+    inventoryDigest: string; mode: "multi_agent" | "main_agent"; testingPrompt: string;
   } | { changeId: string; projectId: string; taskScopes: string[]; mode: "multi_agent" | "main_agent" }): Promise<unknown>;
   authorizeImplementationReviewer?(input: { campaignId: string; projectId: string; reviewCampaignId: string; acceptanceScope: string; budget: number }): Promise<unknown>;
 }
 
-const PLAN_CHUNK_BYTES = 40 * 1024;
 
+const CAMPAIGN_UI_CHUNK_BYTES = 40 * 1024;
 function notifyChunks(ui: { notify(message: string, level?: "info" | "warning" | "error"): void }, heading: string, lines: readonly string[]): void {
   let chunk = heading;
   for (const line of lines) {
-    if (Buffer.byteLength(`${chunk}\n${line}`, "utf8") > PLAN_CHUNK_BYTES) {
-      if (chunk) ui.notify(chunk, "info");
+    if (Buffer.byteLength(`${chunk}\n${line}`, "utf8") > CAMPAIGN_UI_CHUNK_BYTES) {
+      ui.notify(chunk, "info");
       chunk = line;
-    } else chunk += `${chunk ? "\n" : ""}${line}`;
+    } else chunk += `\n${line}`;
   }
   if (chunk) ui.notify(chunk, "info");
-}
-
-function planPresentationLines(plan: TestAndGatePlan, selectedTaskIds: readonly string[], locale: OutputLocale): string[] {
-  const selected = new Set(selectedTaskIds.map((id) => `task:${id}`));
-  const lines = [
-    message(locale, "testPlan.intensity", { value: plan.testIntensity }),
-    message(locale, "testPlan.strictness", { value: plan.gateStrictness }),
-  ];
-  for (const item of plan.cases) {
-    if (!item.maps.some((ref) => selected.has(ref))) continue;
-    lines.push(
-      `${item.id}: ${item.title}`,
-      `  maps: ${item.maps.join(", ")}`,
-      `  ${message(locale, "testPlan.level", { value: item.level })}`,
-      `  ${message(locale, "testPlan.setup", { value: item.preconditions })}`,
-      `  ${message(locale, "testPlan.action", { value: item.action })}`,
-      `  ${message(locale, "testPlan.expectation", { value: item.expected })}`,
-      `  ${message(locale, "testPlan.failureMeaning", { value: item.failure })}`,
-      `  disposition: ${item.disposition}`,
-    );
-  }
-  for (const item of plan.gates) {
-    if (!item.maps.some((ref) => selected.has(ref))) continue;
-    lines.push(
-      `${item.id}: ${item.title}`,
-      `  maps: ${item.maps.join(", ")}`,
-      `  intent: ${item.intent}`,
-      `  scope: ${item.scope}`,
-      `  ${message(locale, "testPlan.gatePass", { value: item.pass })}`,
-      `  ${message(locale, "testPlan.gatePhase", { value: item.phase })}`,
-      `  ${message(locale, "testPlan.gateWaiver", { value: item.waiver })}`,
-      `  disposition: ${item.disposition}`,
-      `  floor: ${item.floor}`,
-    );
-  }
-  for (const item of plan.nonApplicability) {
-    if (!item.covers.some((ref) => selected.has(ref))) continue;
-    lines.push(`${item.id}: ${item.title}`, `  covers: ${item.covers.join(", ")}`, `  reason: ${item.reason}`);
-  }
-  return lines;
-}
-
-function planErrorMessage(cause: unknown, locale: OutputLocale): string {
-  const detail = cause instanceof Error ? cause.message : String(cause);
-  const code = /^(PLAN_[A-Z0-9_]+)/u.exec(detail)?.[1] ?? "PLAN_INVALID";
-  if (code === "PLAN_MISSING_SECTION" || /no valid test-and-gate plan|PLAN_MISSING_SECTION/iu.test(detail)) {
-    return message(locale, "testPlan.migration", { code });
-  }
-  return message(locale, "testPlan.invalid", { code });
 }
 
 interface ExtensionLease {
@@ -501,7 +450,7 @@ export function registerHorsepowerExtension(
         invalid: "Invalid task selection", empty: "No unfinished tasks are available", kickoff: "Begin the confirmed Horsepower campaign now.",
       };
       const active = runtime(ctx);
-      if (!active.discoverImplementationChanges || !active.loadImplementationTaskInventory || !active.loadImplementationTestAndGatePlan || !active.beginImplementationCampaign) {
+      if (!active.discoverImplementationChanges || !active.loadImplementationTaskInventory || !active.beginImplementationCampaign) {
         throw new Error("Implementation campaign runtime is unavailable");
       }
       const candidates = await active.discoverImplementationChanges({ projectId: ctx.cwd });
@@ -563,56 +512,56 @@ export function registerHorsepowerExtension(
       if (!modeChoice) return;
       if (!modeChoices.includes(modeChoice)) { ctx.ui.notify(t.invalid, "error"); return; }
       const mode = modeChoice === t.multi ? "multi_agent" : "main_agent";
-      let plan: TestAndGatePlan;
-      try {
-        plan = await active.loadImplementationTestAndGatePlan({ changeId, projectId: ctx.cwd });
-      } catch (cause) {
-        ctx.ui.notify(planErrorMessage(cause, locale), "error");
+      const promptLabel = locale === "zh-CN"
+        ? "描述本次 campaign 的测试强度（例如：仅运行相关测试；或覆盖单元、集成、失败路径与可用的 E2E）"
+        : "Describe the testing intensity for this campaign (for example: only relevant tests; or unit, integration, failure paths, and available E2E)";
+      const rawTestingPrompt = await ctx.ui.input(promptLabel);
+      const testingPrompt = rawTestingPrompt?.replace(/\s+/gu, " ").trim() ?? "";
+      if (!testingPrompt || Buffer.byteLength(testingPrompt, "utf8") > 2_000 || /https?:\/\/|Authorization:|Bearer\s+|api[_-]?key|token[=:]/iu.test(testingPrompt)) {
+        ctx.ui.notify(locale === "zh-CN" ? "测试强度提示词无效或已取消；未创建 campaign。" : "Testing-intensity prompt is invalid or canceled; no campaign was created.", "error");
         return;
       }
-      const planLines = planPresentationLines(plan, selectedTaskIds, locale);
-      if (!planLines.some((line) => line.startsWith("TC-") || line.startsWith("G-") || line.startsWith("NA-"))) {
-        ctx.ui.notify(message(locale, "testPlan.invalid", { code: "PLAN_SCOPE" }), "error");
-        return;
-      }
-      notifyChunks(ctx.ui, t.planHeading, [
-        `mode: ${mode}`,
-        ...planLines,
+      const checkLines = selectedTasks.flatMap((task) => [
+        `${task.id} ${task.description}`,
+        ...((task.checks?.length ? task.checks : [locale === "zh-CN" ? "无" : "none"]).map((check) => `  ${locale === "zh-CN" ? "检查" : "Check"}: ${check}`)),
       ]);
-      const inScopeCaseRefs = plan.cases.filter((item) => item.maps.some((ref) => selectedTaskIds.some((id) => ref === `task:${id}`))).map((item) => item.id);
-      const inScopeGateRefs = plan.gates.filter((item) => item.maps.some((ref) => selectedTaskIds.some((id) => ref === `task:${id}`))).map((item) => item.id);
-      const inScopeNonApplicabilityRefs = plan.nonApplicability.filter((item) => item.covers.some((ref) => selectedTaskIds.some((id) => ref === `task:${id}`))).map((item) => item.id);
+      notifyChunks(ctx.ui, locale === "zh-CN" ? "当前任务检查与测试强度" : "Current task checks and testing intensity", [
+        `changeId: ${changeId}`,
+        `mode: ${mode}`,
+        ...checkLines,
+        `${locale === "zh-CN" ? "测试强度" : "Testing intensity"}: ${testingPrompt}`,
+      ]);
       const confirmed = await ctx.ui.confirm(
-        message(locale, "testPlan.confirm"),
-        `${t.count(selectedTaskIds.length)}; taskIds=${selectedTaskIds.join(",")}; mode=${mode}; testIntensity=${plan.testIntensity}; gateStrictness=${plan.gateStrictness}; cases=${inScopeCaseRefs.join(",") || "none"}; gates=${inScopeGateRefs.join(",") || "none"}; nonApplicability=${inScopeNonApplicabilityRefs.join(",") || "none"}`,
+        locale === "zh-CN" ? "确认这些精确任务、检查、实施模式和测试强度吗？" : "Confirm these exact tasks, checks, execution mode, and testing intensity?",
+        `${t.count(selectedTaskIds.length)}; changeId=${changeId}; taskIds=${selectedTaskIds.join(",")}; mode=${mode}; testingIntensity=${testingPrompt}`,
       );
       if (!confirmed) {
-        ctx.ui.notify(message(locale, "testPlan.canceled"), "info");
+        ctx.ui.notify(locale === "zh-CN" ? "已取消 campaign 确认；未创建 campaign。" : "Campaign confirmation canceled; no campaign was created.", "info");
         return;
       }
-      let result: { campaignId: string; mode: "multi_agent" | "main_agent"; changeId: string; selectedTaskIds: string[]; plan?: { digest: string } };
+      let result: { campaignId: string; mode: "multi_agent" | "main_agent"; changeId: string; selectedTaskIds: string[]; testing?: { prompt: string } };
       try {
         result = await active.beginImplementationCampaign({
           changeId, projectId: ctx.cwd, selectedTaskIds,
           selectedTasks: selectedTasks.map((task) => ({ ...task, status: "pending" as const })),
           inventoryDigest: inventory.digest,
-          planDigest: plan.digest,
+          testingPrompt,
           mode,
         }) as typeof result;
       } catch (cause) {
-        ctx.ui.notify(planErrorMessage(cause, locale), "error");
+        const detail = cause instanceof Error ? cause.message : String(cause);
+        ctx.ui.notify(`${locale === "zh-CN" ? "Campaign 创建失败" : "Campaign creation failed"}: ${utf8Prefix(detail.replace(/Authorization:\s*[^;]+|Bearer\s+\S+/giu, "[redacted]"), 300)}`, "error");
         return;
       }
       const campaignResult = {
         campaignId: result.campaignId, changeId: result.changeId, mode: result.mode,
         selectedTaskIds: result.selectedTaskIds, selectedTaskCount: result.selectedTaskIds.length,
-        planDigest: result.plan?.digest ?? plan.digest,
-        testIntensity: plan.testIntensity,
-        gateStrictness: plan.gateStrictness,
+        testingPrompt,
+        selectedTaskChecks: selectedTasks.map((task) => ({ taskId: task.id, checks: task.checks ?? [] })),
       };
       pi.sendMessage({
         customType: "horsepower-campaign",
-        content: `${t.kickoff} campaignId=${campaignResult.campaignId}; changeId=${campaignResult.changeId}; taskIds=${campaignResult.selectedTaskIds.join(",")}; mode=${campaignResult.mode}; planDigest=${campaignResult.planDigest}.`,
+        content: `${t.kickoff} campaignId=${campaignResult.campaignId}; changeId=${campaignResult.changeId}; taskIds=${campaignResult.selectedTaskIds.join(",")}; mode=${campaignResult.mode}; testingIntensity=${testingPrompt}.`,
         display: true,
         details: campaignResult,
       }, { deliverAs: "followUp", triggerTurn: true });

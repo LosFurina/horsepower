@@ -34,4 +34,3 @@ async function ensureBundle() {
 const module = await ensureBundle();
 export const createHorsepowerRuntime = module.createHorsepowerRuntime;
 export const parseOpenSpecTaskInventory = module.parseOpenSpecTaskInventory;
-export const parseTestAndGatePlan = module.parseTestAndGatePlan;

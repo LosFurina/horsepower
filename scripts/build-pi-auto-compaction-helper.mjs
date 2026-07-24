@@ -11,7 +11,6 @@ await build({
     contents: `
 export { createHorsepowerRuntime } from ${JSON.stringify(resolve(root, "src/extension/runtime.ts"))};
 export { parseOpenSpecTaskInventory } from ${JSON.stringify(resolve(root, "src/openspec/task-inventory.ts"))};
-export { parseTestAndGatePlan } from ${JSON.stringify(resolve(root, "src/openspec/test-and-gate-plan.ts"))};
 `,
     resolveDir: root,
     sourcefile: "pi-auto-compaction-runtime-entry.ts",

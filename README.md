@@ -78,67 +78,18 @@ One-shot workers stream bounded, redacted assistant/tool lifecycle updates. Each
 
 Review campaigns bind one implementation campaign, exact task scope, fixed acceptance scope, and positive finite budget. Every in-scope root cause begins `pending`. Only the Captain may apply `accepted`, `rejected`, `needs_clarification`, or `blocked_needs_human` with a bounded technical rationale; reviewer verdicts, recommendations, confidence, agreement, duplicate examples, disposition, and resolution never dispatch work or extend/reset budget. A `fix` dispatch must name one `reviewFindingRootCauseId` that is accepted, in-scope, unresolved, and in the same project/change/campaign before budget is consumed. An accepted finding remains `open` until the Captain supplies fresh targeted verification mapped to `review-finding:<rootCauseId>`. Campaign outcome `accepted` requires every in-scope finding to be technically rejected with rationale or accepted and resolved. Truthful `scope_changed`, `blocked_needs_human`, and `canceled` outcomes remain available.
 
-## Confirmed test-and-gate plans
+## Task-local checks and testing intensity
 
-Horsepower-assisted OpenSpec authoring has no implicit testing default. For every new or materially revised change, the Captain recommends and explains—but the user explicitly selects—one `testIntensity` and one `gateStrictness`:
+Horsepower relies on official strict-valid OpenSpec artifacts and does not require a separate `## Test and Gate Plan`, testing/gate profiles, or `TC-*`/`G-*` registries.
 
-| Profile | Current-change meaning |
-| --- | --- |
-| `targeted` | Directly changed acceptance and focused regression cases. |
-| `standard` | `targeted` plus applicable unit, integration, failure-path, and selected E2E coverage. |
-| `exhaustive` | `standard` plus applicable boundaries, adversarial/error, concurrency, platform, compatibility, and full regression coverage. |
-| `required` | Repository baseline and all existing mandatory completion gates. |
-| `strict` | `required` plus applicable full suites and zero unresolved required failures. |
-| `release` | `strict` plus applicable deterministic release/privacy, packaged artifact, immutable install/update, rollback, and real-environment acceptance. |
-| `custom` | Explicit bounded cases or gates; it cannot weaken any applicable mandatory floor. |
+Authors may place concrete optional verification guidance directly under a task:
 
-Mandatory OpenSpec validity, security/privacy, compatibility, lifecycle and terminal truth, current-scope claim matching, and E2E-or-valid-waiver rules always apply regardless of profile. Release- or installation-affecting work must retain applicable archive/privacy, packaged CLI, immutable installation/update, rollback, and real-Pi acceptance gates.
-
-The expanded plan belongs in exactly one `## Test and Gate Plan` section of the official change `design.md`; official `tasks.md` references its stable IDs. Horsepower does not create a private plan registry and never edits official generated `.pi/skills/openspec-*` or `.pi/prompts/opsx-*`. A complete case looks like:
-
-```md
-## Test and Gate Plan
-
-### Profiles
-- testIntensity: standard
-- gateStrictness: strict
-
-### Test Cases
-
-#### TC-1: cancellation is side-effect-free
-- maps: scenario:Implementation campaign includes explicit test-and-gate confirmation/User rejects plan during campaign creation, task:4.3
-- level: e2e
-- purpose: prevent canceled confirmation from authorizing work
-- preconditions: apply-ready fixture change and an existing active campaign
-- action: launch Pi RPC, invoke /horsepower-campaign, cancel final confirmation
-- expected: no new campaign or kickoff; existing campaign is byte-for-byte unchanged
-- failure: cancellation leaked implementation authority
-- disposition: required
-
-### Gates
-
-#### G-1: focused and real-Pi acceptance
-- maps: scenario:Implementation campaign includes explicit test-and-gate confirmation/User rejects plan during campaign creation, task:4.3
-- intent: npm run test:e2e -- test/e2e/test-gate-plan.e2e.test.ts
-- scope: authoring and campaign confirmation paths
-- pass: exit 0 with TC-1 and all mapped cases observed
-- disposition: required
-- phase: completion
-- waiver: only when Pi is unavailable, with a concrete reason and mapped alternative evidence
-- floor: e2e
+```markdown
+- [ ] 1.1 Implement the behavior.
+  - Check: Run the focused test and observe exit code zero.
 ```
 
-Every gate must declare explicit `maps` acceptance refs. Horsepower never infers gate coverage from `scope` prose.
-
-Before writing the finalized selection, the Captain presents the recommendation, meaningful alternatives, every case's level/setup/action/expectation/failure meaning, and every gate's phase/pass/waiver consequence. The user must affirm the fully expanded plan; cancellation, unsupported input, timeout, or non-affirmation leaves it unconfirmed. `custom` must enumerate its contents. If an exact future command is not yet knowable, record the concrete harness intent and observable behavior and add an official task to reconcile the exact command before completion.
-
-`/horsepower-campaign` then presents the normalized tasks, `multi_agent` or `main_agent` mode, both machine profile values, and every in-scope `TC-*`/`G-*` explanation in the configured locale, followed by one combined confirmation. Cancellation or invalidity creates nothing and does not replace an active campaign. The campaign snapshots normalized official facts only for process-lifetime authorization. Semantic changes to profiles, cases, gates, mappings, command intent, fixtures/environment, expectations, waiver rules, selected-task acceptance, or requirement scenarios require a newly confirmed campaign; formatting and unrelated prose do not.
-
-At completion, each applicable required `TC-*` and `G-*` must map to fresh successful Captain-observed evidence in the existing `verification` manifest, alongside current acceptance claims. Advisory checks remain truthful but neither satisfy nor independently block required claims. A plan-permitted waiver still needs a concrete reason and mapped alternative evidence.
-
-### Migrating an existing change
-
-An apply-ready change without a valid plan is not grandfathered and no text marker can prove earlier consent. Revise its official `design.md` and `tasks.md`, present the complete recommendation/alternatives and expanded entries to the user, obtain fresh affirmative confirmation, and create a new campaign. Diagnostics preserve stable codes and machine tokens while localizing remediation. Do not infer confirmation from generated prose, git history, a worker/reviewer recommendation, or a previous change.
+`/horsepower-campaign` displays selected tasks and their checks (or `none`), asks the user for a fresh free-form testing-intensity prompt, and confirms that prompt together with change, exact task IDs, and execution mode. The prompt guides test breadth but cannot weaken OpenSpec validity, privacy, security, compatibility, lifecycle truth, or fresh claim-matched completion evidence.
 
 ## Managed handoffs
 

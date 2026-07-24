@@ -2,11 +2,6 @@ import { lstat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isSupportedOpenSpecVersion, unsupportedOpenSpecMessage } from "../compatibility.js";
 import { parseOpenSpecTaskInventory, type OpenSpecTaskInventory } from "./task-inventory.js";
-import {
-  parseTestAndGatePlan,
-  type AcceptanceInventory,
-  type TestAndGatePlan,
-} from "./test-and-gate-plan.js";
 import { createHash } from "node:crypto";
 
 export type SafeAction = "status" | "list" | "read" | "abort" | "destroy" | "doctor";
@@ -42,7 +37,6 @@ export interface AuthorizationInput {
 const MAX_DISCOVERY_BYTES = 1024 * 1024;
 const MAX_DISCOVERY_CANDIDATES = 100;
 const MAX_ARTIFACT_BYTES = 1024 * 1024;
-const MAX_SPEC_FILES = 50;
 const DISCOVERY_CONCURRENCY = 4;
 const changeIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/u;
 type VerifiedOpenSpecContext = Awaited<ReturnType<typeof validateOpenSpecInstallation>>;
@@ -85,24 +79,6 @@ async function readProtectedArtifact(options: OpenSpecBoundaryOptions, input: {
   return { path: artifactPath, text };
 }
 
-function parseRequirementScenarios(source: string): AcceptanceInventory["requirements"][number][] {
-  const requirements: AcceptanceInventory["requirements"][number][] = [];
-  let current: { title: string; scenarios: string[] } | undefined;
-  for (const line of source.split(/\r?\n/u)) {
-    const requirement = /^###\s+Requirement:\s+(.+?)\s*$/u.exec(line);
-    if (requirement) {
-      current = { title: requirement[1]!.trim(), scenarios: [] };
-      requirements.push(current);
-      continue;
-    }
-    const scenario = /^####\s+Scenario:\s+(.+?)\s*$/u.exec(line);
-    if (scenario) {
-      if (!current) continue;
-      current.scenarios.push(scenario[1]!.trim());
-    }
-  }
-  return requirements;
-}
 
 function checkedJson(result: OpenSpecCommandResult, operation: string): unknown {
   if (result.timedOut) throw new Error(`OpenSpec ${operation} timed out; run openspec doctor and retry`);
@@ -253,68 +229,6 @@ export function createOpenSpecBoundary(options: OpenSpecBoundaryOptions) {
     return parseOpenSpecTaskInventory(text, { changeId: input.changeId, projectRoot: resolve(projectRoot), tasksPath });
   }
 
-  async function loadTestAndGatePlan(input: { cwd: string; changeId: string }, verifiedContext?: VerifiedOpenSpecContext): Promise<TestAndGatePlan> {
-    const { projectRoot, status } = await applyContext(input, verifiedContext);
-    const artifactPaths = status.artifactPaths as Record<string, unknown> | undefined;
-    const design = artifactPaths?.design as Record<string, unknown> | undefined;
-    const tasks = artifactPaths?.tasks as Record<string, unknown> | undefined;
-    const specs = artifactPaths?.specs as Record<string, unknown> | undefined;
-    const designPath = design?.resolvedOutputPath;
-    const tasksPath = tasks?.resolvedOutputPath;
-    if (typeof designPath !== "string" || !designPath || designPath.includes("*")) {
-      throw new Error(`OpenSpec status has no resolved design artifact for change: ${input.changeId}`);
-    }
-    if (typeof tasksPath !== "string" || !tasksPath || tasksPath.includes("*")) {
-      throw new Error(`OpenSpec status has no resolved tasks artifact for change: ${input.changeId}`);
-    }
-
-    const designArtifact = await readProtectedArtifact(options, {
-      projectRoot,
-      rawPath: designPath,
-      label: "design",
-    });
-    const tasksArtifact = await readProtectedArtifact(options, {
-      projectRoot,
-      rawPath: tasksPath,
-      label: "tasks",
-    });
-
-    const inventory = parseOpenSpecTaskInventory(tasksArtifact.text, {
-      changeId: input.changeId,
-      projectRoot: resolve(projectRoot),
-      tasksPath: tasksArtifact.path,
-    });
-
-    const existingSpecPaths = Array.isArray(specs?.existingOutputPaths)
-      ? specs.existingOutputPaths.filter((value): value is string => typeof value === "string" && value.length > 0)
-      : [];
-    if (existingSpecPaths.length === 0) {
-      throw new Error(`OpenSpec status has no resolved specs artifacts for change: ${input.changeId}`);
-    }
-    if (existingSpecPaths.length > MAX_SPEC_FILES) {
-      throw new Error(`OpenSpec specs inventory permits at most ${MAX_SPEC_FILES} files`);
-    }
-
-    const requirements: AcceptanceInventory["requirements"][number][] = [];
-    for (const rawSpecPath of existingSpecPaths) {
-      if (rawSpecPath.includes("*")) throw new Error(`OpenSpec status has no resolved specs artifacts for change: ${input.changeId}`);
-      const specArtifact = await readProtectedArtifact(options, {
-        projectRoot,
-        rawPath: rawSpecPath,
-        label: "specs",
-      });
-      requirements.push(...parseRequirementScenarios(specArtifact.text));
-    }
-
-    const acceptance: AcceptanceInventory = {
-      requirements,
-      taskIds: inventory.sections.flatMap((section) => section.tasks.map((task) => task.id)),
-    };
-    return parseTestAndGatePlan(designArtifact.text, {
-      changeId: input.changeId,
-      acceptance,
-    });
-  }
 
   return {
     discoverUnfinishedChanges,
@@ -366,32 +280,6 @@ export function createOpenSpecBoundary(options: OpenSpecBoundaryOptions) {
     async loadTaskInventory(input: { cwd: string; changeId: string }) {
       return loadTaskInventory(input);
     },
-    async loadTestAndGatePlan(input: { cwd: string; changeId: string }) {
-      return loadTestAndGatePlan(input);
-    },
-    async revalidateTestAndGatePlan(input: {
-      cwd: string;
-      changeId: string;
-      planDigest: string;
-      selectedTaskIds: readonly string[];
-    }) {
-      const plan = await loadTestAndGatePlan(input);
-      if (plan.digest !== input.planDigest) {
-        throw new Error("PLAN_DRIFT: official test-and-gate plan changed before authorization; confirm a new campaign");
-      }
-      const inventory = await loadTaskInventory(input);
-      const official = new Set(inventory.sections.flatMap((section) => section.tasks.map((task) => task.id)));
-      if (input.selectedTaskIds.length === 0 || new Set(input.selectedTaskIds).size !== input.selectedTaskIds.length) {
-        throw new Error("PLAN_SCOPE: selected task IDs must be exact and unique");
-      }
-      for (const taskId of input.selectedTaskIds) {
-        if (!official.has(taskId)) throw new Error(`PLAN_SCOPE: selected task is not in the official inventory: ${taskId}`);
-        const ref = `task:${taskId}`;
-        const covered = plan.cases.some((item) => item.maps.includes(ref))
-          || plan.nonApplicability.some((item) => item.covers.includes(ref));
-        if (!covered) throw new Error(`PLAN_SCOPE: selected task lacks plan coverage: ${taskId}`);
-      }
-      return plan;
-    },
+
   };
 }
