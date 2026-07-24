@@ -265,17 +265,17 @@ test("interactive Bearer webhook setup stores a private token with dispatch disa
   expect(settings.webhook).toMatchObject({ auth: { mode: "bearer", token: sampleValue }, notifications: { change: true, dispatch: false } });
 });
 
-test.each(["0.80.9", "0.82.0", "0.81.1-beta.1"])("incompatible Pi %s is rejected before release download or managed filesystem mutation", async (piVersion) => {
+test.each(["0.80.9", "0.81.1-beta.1"])("incompatible Pi %s is rejected before release download or managed filesystem mutation", async (piVersion) => {
   const fixturePaths = await fixture();
   await writeFile(fixturePaths.pi, `#!/bin/sh\nprintf '%s\\n' '${piVersion}'\n`, { mode: 0o755 });
   await expect(runInstaller(fixturePaths, [], "file:///release-must-not-be-read"))
-    .rejects.toMatchObject({ stderr: expect.stringContaining("Pi >=0.80.10 <0.82.0 is required") });
+    .rejects.toMatchObject({ stderr: expect.stringContaining("Pi >=0.80.10 is required") });
   await expect(access(join(fixturePaths.home, ".pi"))).rejects.toThrow();
 });
 
-test("installer accepts a newer compatible Pi release", async () => {
+test.each(["0.81.1", "0.82.0", "1.0.0"])("installer accepts Pi %s without an upper-bound ceiling", async (piVersion) => {
   const fixturePaths = await fixture();
-  await writeFile(fixturePaths.pi, "#!/bin/sh\nprintf '%s\\n' '0.81.1'\n", { mode: 0o755 });
+  await writeFile(fixturePaths.pi, `#!/bin/sh\nprintf '%s\\n' '${piVersion}'\n`, { mode: 0o755 });
   await expect(runInstaller(fixturePaths)).resolves.toMatchObject({
     stdout: expect.stringContaining("Horsepower installed successfully."),
   });
@@ -332,14 +332,25 @@ test("failed upgrade doctor atomically restores the previous current symlink", a
   }
 });
 
-test.each(["1.5.9", "2.0.0", "1.6.0-beta.1", "OpenSpec 1.6.0", "01.6.0"])(
+test.each(["1.5.9", "1.6.0-beta.1", "OpenSpec 1.6.0", "01.6.0"])(
   "unsupported OpenSpec %s is rejected before release download or managed filesystem mutation",
   async (openSpecVersion) => {
     const fixturePaths = await fixture();
     await writeFile(fixturePaths.openspec, `#!/bin/sh\nprintf '%s\\n' '${openSpecVersion}'\n`, { mode: 0o755 });
     await expect(runInstaller(fixturePaths, [], "file:///release-must-not-be-read"))
-      .rejects.toMatchObject({ stderr: expect.stringContaining("OpenSpec >=1.6.0 <2.0.0 is required") });
+      .rejects.toMatchObject({ stderr: expect.stringContaining("OpenSpec >=1.6.0 is required") });
     await expect(access(join(fixturePaths.home, ".pi"))).rejects.toThrow();
+  },
+);
+
+test.each(["1.6.0", "2.0.0", "3.1.4"])(
+  "installer accepts OpenSpec %s without an upper-bound ceiling",
+  async (openSpecVersion) => {
+    const fixturePaths = await fixture();
+    await writeFile(fixturePaths.openspec, `#!/bin/sh\nprintf '%s\\n' '${openSpecVersion}'\n`, { mode: 0o755 });
+    await expect(runInstaller(fixturePaths)).resolves.toMatchObject({
+      stdout: expect.stringContaining("Horsepower installed successfully."),
+    });
   },
 );
 

@@ -4,14 +4,14 @@
 TBD - created by archiving change horsepower-alpha1. Update Purpose after archive.
 ## Requirements
 ### Requirement: Official OpenSpec is mandatory
-Horsepower SHALL require the official Fission-AI/OpenSpec CLI at a stable semantic version in the range `>=1.6.0 <2.0.0` and SHALL NOT install, bundle, patch, replace, or automatically upgrade OpenSpec. Installer bootstrap, release manifest and preflight, doctor, and runtime work authorization SHALL enforce the same compatibility contract.
+Horsepower SHALL require the official Fission-AI/OpenSpec CLI at a stable semantic version in the range `>=1.6.0` and SHALL NOT install, bundle, patch, replace, or automatically upgrade OpenSpec. Installer bootstrap, release manifest and preflight, doctor, and runtime work authorization SHALL enforce the same compatibility contract.
 
 #### Scenario: OpenSpec CLI missing
 - **WHEN** Horsepower installation or doctor cannot find `openspec`
 - **THEN** it fails with the detected state and official OpenSpec installation guidance
 
 #### Scenario: Unsupported OpenSpec version
-- **WHEN** the installed CLI is outside the stable semantic version range `>=1.6.0 <2.0.0`
+- **WHEN** the installed CLI is outside the stable semantic version range `>=1.6.0`
 - **THEN** Horsepower blocks advancing work and reports the required version range
 
 #### Scenario: Unsupported OpenSpec version during installation
@@ -19,7 +19,7 @@ Horsepower SHALL require the official Fission-AI/OpenSpec CLI at a stable semant
 - **THEN** installation exits before downloading a Horsepower release and does not offer a warning-confirmation bypass
 
 #### Scenario: Unsupported OpenSpec version during operation
-- **WHEN** doctor or a work-advancing runtime action observes an OpenSpec version outside `>=1.6.0 <2.0.0`
+- **WHEN** doctor or a work-advancing runtime action observes an OpenSpec version outside `>=1.6.0`
 - **THEN** Horsepower blocks the incompatible operation and reports the required range without changing OpenSpec facts
 
 #### Scenario: Compatibility declarations drift

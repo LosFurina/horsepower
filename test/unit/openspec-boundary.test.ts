@@ -62,21 +62,20 @@ test("blocks advancing work when official Pi integration is absent", async () =>
 test.each([
   ["missing", { code: 127, stdout: "", stderr: "not found" }, "Official OpenSpec CLI was not found"],
   ["command failure", { code: 1, stdout: "1.6.0\n", stderr: "failed" }, "Official OpenSpec CLI was not found"],
-  ["empty", { code: 0, stdout: "", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found unknown"],
-  ["unparseable", { code: 0, stdout: "OpenSpec 1.6.0\n", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found OpenSpec 1.6.0"],
-  ["prerelease", { code: 0, stdout: "1.6.0-beta.1\n", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found 1.6.0-beta.1"],
-  ["lower bound", { code: 0, stdout: "1.5.9\n", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found 1.5.9"],
-  ["upper bound", { code: 0, stdout: "2.0.0\n", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found 2.0.0"],
-  ["leading zero", { code: 0, stdout: "01.6.0\n", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found 01.6.0"],
-  ["malformed build", { code: 0, stdout: "1.6.0+\n", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found 1.6.0+"],
-  ["malformed prerelease", { code: 0, stdout: "1.6.0-alpha..1\n", stderr: "" }, "OpenSpec >=1.6.0 <2.0.0 is required; found 1.6.0-alpha..1"],
+  ["empty", { code: 0, stdout: "", stderr: "" }, "OpenSpec >=1.6.0 is required; found unknown"],
+  ["unparseable", { code: 0, stdout: "OpenSpec 1.6.0\n", stderr: "" }, "OpenSpec >=1.6.0 is required; found OpenSpec 1.6.0"],
+  ["prerelease", { code: 0, stdout: "1.6.0-beta.1\n", stderr: "" }, "OpenSpec >=1.6.0 is required; found 1.6.0-beta.1"],
+  ["lower bound", { code: 0, stdout: "1.5.9\n", stderr: "" }, "OpenSpec >=1.6.0 is required; found 1.5.9"],
+  ["leading zero", { code: 0, stdout: "01.6.0\n", stderr: "" }, "OpenSpec >=1.6.0 is required; found 01.6.0"],
+  ["malformed build", { code: 0, stdout: "1.6.0+\n", stderr: "" }, "OpenSpec >=1.6.0 is required; found 1.6.0+"],
+  ["malformed prerelease", { code: 0, stdout: "1.6.0-alpha..1\n", stderr: "" }, "OpenSpec >=1.6.0 is required; found 1.6.0-alpha..1"],
 ] as const)("blocks advancing work for %s OpenSpec version state", async (_name, result, message) => {
   const boundary = await setup({ "--version": result });
   await expect(boundary.authorize({ action: "single", changeId: "x", cwd: "/project" }))
     .rejects.toThrow(message);
 });
 
-test.each(["1.6.0", "1.6.0+build.7", "1.99.999", "1.99.999+build.7"])(
+test.each(["1.6.0", "1.6.0+build.7", "1.99.999", "1.99.999+build.7", "2.0.0", "3.1.4"])(
   "accepts stable compatible OpenSpec version %s",
   async (version) => {
     const boundary = await setup({ ...healthy, "--version": { code: 0, stdout: `${version}\n`, stderr: "" } });

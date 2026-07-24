@@ -24,7 +24,7 @@ export async function writeFixtureRelease(root: string, version: string): Promis
   ])));
   await writeFile(join(root, "release-manifest.json"), JSON.stringify({
     version,
-    compatibility: { node: ">=22.19.0", pi: ">=0.80.10 <0.82.0", openspec: ">=1.6.0 <2.0.0" },
+    compatibility: { node: ">=22.19.0", pi: ">=0.80.10", openspec: ">=1.6.0" },
     entryPoints: fixtureReleaseEntryPoints,
     digests,
   }));
