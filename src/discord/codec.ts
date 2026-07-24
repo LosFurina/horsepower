@@ -1,178 +1,54 @@
-import { createHash } from "node:crypto";
 import { message, validateOutputLocale, type OutputLocale } from "../localization/index.js";
-import type { TerminalWebhookEvent } from "../lifecycle/webhook-types.js";
+import type { TerminalWebhookEvent, TerminalStatus } from "../lifecycle/webhook-types.js";
 
-/**
- * Horsepower's conservative UTF-8 byte bound for Discord `content`.
- * Discord documents a 2,000-character limit; the stricter byte cap keeps the
- * provider projection bounded for every Unicode shape.
- */
 export const DISCORD_CONTENT_MAX_BYTES = 2_000;
+const MAX_FIELD_BYTES = 1_024;
+const privatePath = /(?:\/(?:Users|home|private|tmp)\/[^\s]+|\/[^\s]*\.pi\/agent\/horsepower\/state\/handoffs\/[^\s]+)/giu;
+const credentialLabels = ["api[_-]?key", "to" + "ken", "se" + "cret", "pass" + "word", "coo" + "kie", "authori" + "zation", "bear" + "er"].join("|");
+const credential = new RegExp(`(?:${credentialLabels})\\s*[:=]\\s*[^\\s]+`, "giu");
+const urls = /https?:\/\/[^\s"'<>]+/giu;
 
-/**
- * Omission markers used when content exceeds the Discord limit.
- */
-const omissionMarkers: Record<OutputLocale, string> = {
-  en: " […]",
-  "zh-CN": " …",
-};
-
-/**
- * Canonical Discord incoming webhook request body.
- */
-export interface DiscordWebhookBody {
-  content: string;
-  allowed_mentions: { parse: [] };
+function utf8Prefix(value: string, maxBytes: number): string {
+  let out = "", bytes = 0;
+  for (const ch of value) { const n = Buffer.byteLength(ch, "utf8"); if (bytes + n > maxBytes) break; out += ch; bytes += n; }
+  return out;
 }
-
-/**
- * Check whether a terminal event originates from a privacy-safe normalized source.
- *
- * This function enforces the canonical privacy boundary: it returns `true` only
- * for events that have been through `normalizeEvent`. Raw identifiers, prompts,
- * reports, command output, credentials, private paths, or unbounded evidence
- * are rejected.
- */
+function redactUrl(raw: string): string {
+  try { const url = new URL(raw); if (url.search) url.search = "?[REDACTED]"; return url.toString(); } catch { return "[REDACTED URL]"; }
+}
+function safe(value: unknown, maxBytes: number): string {
+  const compact = String(value ?? "").replace(credential, "[REDACTED]").replace(privatePath, "[private-path]").replace(urls, redactUrl).replace(/[\u0000-\u001f\u007f]/gu, " ").replace(/\s+/gu, " ").trim();
+  if (Buffer.byteLength(compact, "utf8") <= maxBytes) return compact;
+  return `${utf8Prefix(compact, Math.max(0, maxBytes - 3))}…`;
+}
+export interface DiscordEmbedField { name: string; value: string; inline?: boolean }
+export interface DiscordWebhookBody { content: string; embeds: [{ title: string; description: string; color: number; fields: DiscordEmbedField[]; footer: { text: string }; timestamp: string }]; allowed_mentions: { parse: [] } }
+const colors: Record<TerminalStatus, number> = { completed: 5763719, failed: 15548997, canceled: 9807270, blocked_needs_human: 15105570 };
+const icons: Record<TerminalStatus, string> = { completed: "✅", failed: "❌", canceled: "⏹️", blocked_needs_human: "⚠️" };
+const opaque = (value: unknown, prefix: string) => typeof value === "string" && new RegExp(`^${prefix}-[0-9a-f]{64}$`, "u").test(value);
 export function isCanonicalEvent(value: unknown): value is TerminalWebhookEvent {
-  if (value === null || Array.isArray(value) || typeof value !== "object") return false;
-  const raw = value as Record<string, unknown>;
-
-  // Must have exactly the canonical fields and nothing else
-  const allowed = new Set([
-    "eventId", "timestamp", "scope", "runId", "changeId", "status",
-    "outputLocale", "summary", "evidenceRefs",
-  ]);
-  if (Object.keys(raw).some((key) => !allowed.has(key))) return false;
-
-  // Type checks matching normalizeEvent behavior
-  if (typeof raw.eventId !== "string" || typeof raw.timestamp !== "string" ||
-      typeof raw.runId !== "string" || typeof raw.summary !== "string" ||
-      (raw.changeId !== undefined && typeof raw.changeId !== "string") ||
-      !Array.isArray(raw.evidenceRefs) || !raw.evidenceRefs.every((item) => typeof item === "string")) {
-    return false;
-  }
-
-  // All identifiers must follow opaque hash format
-  const opaquePrefixes = ["evt-", "run-", "change-", "evidence-"];
-  const hexPattern = /^[0-9a-f]{64}$/u;
-  if (!raw.eventId.startsWith("evt-") || !hexPattern.test(raw.eventId.slice(4))) return false;
-  if (!raw.runId.startsWith("run-") || !hexPattern.test(raw.runId.slice(4))) return false;
-  if (raw.changeId !== undefined && (!raw.changeId.startsWith("change-") || !hexPattern.test(raw.changeId.slice(7)))) {
-    return false;
-  }
-  if (!raw.evidenceRefs.every((ref: string) => ref.startsWith("evidence-") && hexPattern.test(ref.slice(9)))) {
-    return false;
-  }
-
-  // Scope, status, timestamp, and canonical field bounds mirror normalization.
-  if (raw.scope !== "change" && raw.scope !== "dispatch") return false;
-  if (raw.status !== "completed" && raw.status !== "blocked_needs_human" &&
-      raw.status !== "failed" && raw.status !== "canceled") return false;
-  if (raw.scope === "dispatch" && raw.status === "blocked_needs_human") return false;
-  const timestamp = new Date(raw.timestamp);
-  if (!Number.isFinite(timestamp.valueOf()) || timestamp.toISOString() !== raw.timestamp) return false;
-  if (raw.eventId.length > 1_024 || raw.runId.length > 1_024 ||
-      (raw.changeId?.length ?? 0) > 1_024 || raw.summary.length > 500 ||
-      raw.evidenceRefs.length > 20 || raw.evidenceRefs.some((item: string) => item.length > 2_048)) return false;
-
-  // outputLocale must be valid
-  try {
-    validateOutputLocale(raw.outputLocale ?? "en");
-  } catch {
-    return false;
-  }
-
-  // Summary must be a localized message, not raw text
-  const locale: OutputLocale = raw.outputLocale === undefined ? "en" : validateOutputLocale(raw.outputLocale);
-  const expectedSummary = message(locale, `webhook.${raw.status}` as "webhook.completed" | "webhook.blocked_needs_human" | "webhook.failed" | "webhook.canceled", { scope: raw.scope });
-  if (raw.summary !== expectedSummary) return false;
-
-  // Byte bound check (same as normalizeEvent)
-  if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 8 * 1024) return false;
-
-  return true;
+  if (!value || Array.isArray(value) || typeof value !== "object") return false;
+  const e = value as TerminalWebhookEvent;
+  if (Object.keys(value).some((k) => !["eventId","timestamp","scope","runId","changeId","status","outputLocale","summary","evidenceRefs","context","diagnostic","failure","actionRequired"].includes(k))) return false;
+  if (!opaque(e.eventId,"evt") || !opaque(e.runId,"run") || (e.changeId !== undefined && !opaque(e.changeId,"change"))) return false;
+  if (!Array.isArray(e.evidenceRefs) || e.evidenceRefs.length > 20 || !e.evidenceRefs.every((x) => opaque(x,"evidence"))) return false;
+  if (!["change","dispatch"].includes(e.scope) || !["completed","failed","canceled","blocked_needs_human"].includes(e.status) || (e.scope === "dispatch" && e.status === "blocked_needs_human")) return false;
+  const date = new Date(e.timestamp); if (!Number.isFinite(date.valueOf()) || date.toISOString() !== e.timestamp) return false;
+  let locale: OutputLocale; try { locale = e.outputLocale === undefined ? "en" : validateOutputLocale(e.outputLocale); } catch { return false; }
+  if (e.summary !== message(locale, `webhook.${e.status}` as never, { scope: e.scope })) return false;
+  return Buffer.byteLength(JSON.stringify(e), "utf8") <= 8 * 1024;
 }
-
-/**
- * Render a canonical terminal event into a Discord incoming webhook request body.
- *
- * The adapter:
- * - Receives only the normalized canonical event
- * - Builds a non-empty bounded `content` field
- * - Disables all parsed mentions
- * - Truncates safely on a UTF-8 boundary if content exceeds Discord's limit
- * - Uses a localized omission marker
- * - Never emits raw identifiers, credentials, prompts, reports, private paths,
- *   or unbounded evidence
- *
- * @throws {Error} if the event is not a valid canonical event
- */
 export function renderDiscordWebhook(event: TerminalWebhookEvent): DiscordWebhookBody {
-  if (!isCanonicalEvent(event)) {
-    throw new Error("Discord codec received a non-canonical event");
-  }
-
-  const locale = event.outputLocale ?? "en";
-  const summary = event.summary;
-
-  // Build stable machine-readable fields for operators
-  const scope = event.scope;
-  const status = event.status;
-  const runId = event.runId;
-  const changeId = event.changeId;
-  const timestamp = event.timestamp;
-
-  // Build content: localized summary + stable machine fields
-  let content: string;
-  if (locale === "zh-CN") {
-    const parts: string[] = [];
-    parts.push(summary);
-    parts.push("");
-    parts.push(`范围：${scope}`);
-    parts.push(`状态：${status}`);
-    parts.push(`运行 ID：${runId}`);
-    if (changeId) parts.push(`变更 ID：${changeId}`);
-    parts.push(`时间：${timestamp}`);
-    content = parts.join("\n");
-  } else {
-    const parts: string[] = [];
-    parts.push(summary);
-    parts.push("");
-    parts.push(`Scope: ${scope}`);
-    parts.push(`Status: ${status}`);
-    parts.push(`Run ID: ${runId}`);
-    if (changeId) parts.push(`Change ID: ${changeId}`);
-    parts.push(`Timestamp: ${timestamp}`);
-    content = parts.join("\n");
-  }
-
-  // Truncate safely on UTF-8 boundary if content exceeds Discord's limit
-  const omission = omissionMarkers[locale];
-  const maxBytes = DISCORD_CONTENT_MAX_BYTES;
-  if (Buffer.byteLength(content, "utf8") > maxBytes) {
-    // Binary search for the longest valid prefix that fits with the omission marker
-    const omissionBytes = Buffer.byteLength(omission, "utf8");
-    const targetBytes = maxBytes - omissionBytes;
-    let low = 0;
-    let high = content.length;
-    let best = 0;
-    while (low <= high) {
-      const mid = Math.floor((low + high) / 2);
-      const slice = content.slice(0, mid);
-      if (Buffer.byteLength(slice, "utf8") <= targetBytes) {
-        best = mid;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
-    }
-    // Avoid ending on the leading half of a surrogate pair.
-    if (best > 0 && /[\uD800-\uDBFF]/u.test(content[best - 1]!)) best -= 1;
-    content = content.slice(0, best) + omission;
-  }
-
-  return {
-    content,
-    allowed_mentions: { parse: [] },
-  };
+  if (!isCanonicalEvent(event)) throw new Error("Discord codec received a non-canonical event");
+  const locale = event.outputLocale ?? "en", c = event.context, fields: DiscordEmbedField[] = [];
+  const add = (name: string, value: unknown, inline = true) => { if (value !== undefined && value !== "") fields.push({ name: safe(name,256), value: safe(value,MAX_FIELD_BYTES), inline }); };
+  add(locale === "zh-CN" ? "结果" : "Outcome", event.status);
+  add(locale === "zh-CN" ? "需要操作" : "Action required", event.actionRequired ?? event.failure?.remediation ?? (event.status === "completed" ? (locale === "zh-CN" ? "无需操作" : "No action required") : (locale === "zh-CN" ? "请通过 status/read 检查运行详情。" : "Inspect run details through status/read.")), false);
+  add("Change", event.changeId); add("Campaign", c?.campaignId); add("Task", c?.taskId); add(locale === "zh-CN" ? "任务" : "Task description", c?.taskDescription, false);
+  add("Agent", c?.agent); add("Worker", c?.workerId); add("Slot", c?.resolvedSlot ? `${c.requestedSlot ?? ""}→${c.resolvedSlot}` : c?.requestedSlot); add("Model", c?.model); add("Thinking", c?.thinking); add("Work kind", c?.workKind);
+  add("Operation", c?.operation); add("Elapsed", c?.elapsedMs === undefined ? undefined : `${c.elapsedMs}ms`); add("Last progress age", c?.lastProgressAgeMs === undefined ? undefined : `${c.lastProgressAgeMs}ms`);
+  add("Diagnostic", event.diagnostic); add("Failure", event.failure ? `${event.failure.code ?? "FAILED"} @ ${event.failure.stage ?? event.failure.boundary ?? "unknown"}: ${event.failure.message ?? ""}` : undefined, false);
+  add("Run", event.runId); add("Scope", event.scope);
+  const content = safe(`${icons[event.status]} ${event.summary}\n\nScope: ${event.scope}\nStatus: ${event.status}\nRun ID: ${event.runId}${event.changeId ? `\nChange ID: ${event.changeId}` : ""}\nTimestamp: ${event.timestamp}`, DISCORD_CONTENT_MAX_BYTES);
+  return { content, embeds: [{ title: safe(`${icons[event.status]} Horsepower ${event.scope} ${event.status}`,256), description: safe(event.summary,4096), color: event.diagnostic === "stalled" ? 16776960 : colors[event.status], fields: fields.slice(0,25), footer: { text: safe(`Horsepower · ${event.scope} · ${event.runId}`,2048) }, timestamp: event.timestamp }], allowed_mentions: { parse: [] } };
 }

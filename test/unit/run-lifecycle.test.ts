@@ -372,6 +372,22 @@ test("change and dispatch terminal notifications select Discord without changing
   }
 });
 
+test("enriched notification context is snapshotted and forwarded once", async () => {
+  const received: TerminalWebhookEvent[] = [];
+  const { createRunLifecycle } = await import("../../src/lifecycle/run-lifecycle.js");
+  const lifecycle = createRunLifecycle({ makeId: () => "run-rich", now: () => new Date("2026-07-24T00:00:00.000Z") });
+  const context = { campaignId: "campaign-a", taskId: "2.1", taskDescription: "Render Discord embed", agent: "coder", workerId: "worker-a", requestedSlot: "craft", resolvedSlot: "craft", model: "provider/model", thinking: "low", workKind: "implementation", operation: "edit", elapsedMs: 1234 };
+  const run = lifecycle.beginDispatch({ changeId: "change-a", projectId: "/project", summary: "safe" }, {
+    enabled: true, outputLocale: "en", context, failure: { code: "FAIL", stage: "codec", message: "bounded", remediation: "Inspect status/read", retryable: true }, actionRequired: "Inspect status/read",
+    notify: async (event) => { received.push(event); return { delivered: true, attempts: 1 }; },
+  });
+  context.taskDescription = "mutated after begin";
+  await lifecycle.reportDispatchTerminal({ runId: run.runId, status: "failed", summary: "failed" });
+  await lifecycle.waitForDelivery(run.runId);
+  expect(received).toHaveLength(1);
+  expect(received[0]).toMatchObject({ context: { campaignId: "campaign-a", taskId: "2.1", taskDescription: "Render Discord embed", agent: "coder", workerId: "worker-a", model: "provider/model" }, failure: { code: "FAIL", stage: "codec" }, actionRequired: "Inspect status/read" });
+});
+
 test("shutdown stops notification retries and waits for pending deliveries", async () => {
   let finish!: () => void;
   const pending = new Promise<WebhookDeliveryResult>((resolve) => {

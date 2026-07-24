@@ -124,7 +124,7 @@ handoff 只在显式 cleanup 或 purge 时删除。它不会恢复 worker conver
 
 Terminal webhook 不包含 manifest、command output、prompt、report 或 path。它保持 8 KiB canonical payload 上限，最多暴露 20 个 opaque hashed evidence reference；输入 summary 在 notifier hash 前最多 500 字符，每条 reference 最多 2,048 字符。
 
-可选 change/dispatch webhook 使用显式 `generic` 或 `discord` provider。没有 `provider` 的旧设置仍按 `generic` 处理；Horsepower 不会根据 URL 猜测平台。`generic` 保持 canonical JSON，并支持 HMAC、Bearer 或 `none`。直接 Discord incoming webhook 必须选择 `discord` provider，并使用 `auth.mode: "none"`，因为 webhook URL 本身已包含 credential。Discord 请求只发送有界文本并关闭 parsed mentions，不会增加私有 lifecycle 数据。
+可选 change/dispatch webhook 使用显式 `generic` 或 `discord` provider。没有 `provider` 的旧设置仍按 `generic` 处理；Horsepower 不会根据 URL 猜测平台。`generic` 保持 canonical JSON，并支持 HMAC、Bearer 或 `none`。直接 Discord incoming webhook 必须选择 `discord` provider，并使用 `auth.mode: "none"`，因为 webhook URL 本身已包含 credential。Discord 请求发送有界文本与一个带状态颜色的 embed，并关闭 parsed mentions。若存在权威上下文，消息会按顺序展示 change/campaign/task、agent/worker、slot/model/thinking、work kind/operation、elapsed 或 last-progress age、failure/diagnostic 以及需要执行的操作；缺失字段会省略而不会猜测。它不会增加私有 lifecycle 数据。
 
 Discord 设置步骤：在目标 channel 创建 incoming webhook，在 Horsepower webhook 配置中选择 `discord`，仅通过 mode-`0600` Horsepower settings 流程粘贴 URL，并将 authentication 保持为 `none`。使用 `horsepower webhook test` 显式发送一条可见测试消息；该操作经过生产 normalization、adapter、timeout 和 HTTP path。结果只报告 provider、有界 failure class/status 与 attempt count，绝不输出 URL、token、signature 或 receiver body。`horsepower doctor` 只做静态配置检查，绝不会发送 webhook。
 

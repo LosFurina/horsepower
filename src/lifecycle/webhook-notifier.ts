@@ -2,6 +2,8 @@ import { createHash, createHmac } from "node:crypto";
 import { message, validateOutputLocale, type OutputLocale } from "../localization/index.js";
 import { renderDiscordWebhook } from "../discord/codec.js";
 import type {
+  TerminalWebhookContext,
+  TerminalWebhookFailure,
   TerminalWebhookEvent,
   WebhookAuth,
   WebhookConfig,
@@ -26,6 +28,7 @@ function normalizeEvent(value: unknown, authenticationValue?: string): TerminalW
   const raw = value as Record<string, unknown>;
   const allowed = new Set([
     "eventId", "timestamp", "scope", "runId", "changeId", "status", "outputLocale", "summary", "evidenceRefs",
+    "context", "diagnostic", "failure", "actionRequired",
   ]);
   if (Object.keys(raw).some((key) => !allowed.has(key))) return undefined;
   if (typeof raw.eventId !== "string" || typeof raw.timestamp !== "string" ||
@@ -50,6 +53,39 @@ function normalizeEvent(value: unknown, authenticationValue?: string): TerminalW
     `${prefix}-${createHash("sha256").update(input).digest("hex")}`;
   let outputLocale: OutputLocale;
   try { outputLocale = raw.outputLocale === undefined ? "en" : validateOutputLocale(raw.outputLocale); } catch { return undefined; }
+  const safeText = (input: unknown, limit: number): string | undefined => {
+    if (typeof input !== "string") return undefined;
+    const redacted = input
+      .replace(/(?:api[_-]?key|token|secret|password|cookie|authorization|bearer)\s*[:=]\s*[^\s]+/giu, "[REDACTED]")
+      .replace(/(?:\/(?:Users|home|private|tmp)\/[^\s]+|\/[^\s]*\.pi\/agent\/horsepower\/state\/handoffs\/[^\s]+)/giu, "[private-path]")
+      .replace(/https?:\/\/[^\s"'<>]+/giu, "[REDACTED URL]")
+      .replace(/[\u0000-\u001f\u007f]/gu, " ").replace(/\s+/gu, " ").trim();
+    let output = "", bytes = 0;
+    for (const character of redacted) { const size = Buffer.byteLength(character, "utf8"); if (bytes + size > limit) break; output += character; bytes += size; }
+    return output;
+  };
+  const contextKeys: Array<keyof TerminalWebhookContext> = ["campaignId","taskId","taskDescription","agent","workerId","requestedSlot","resolvedSlot","model","thinking","workKind","operation","projectLabel"];
+  let context: TerminalWebhookContext | undefined;
+  if (raw.context !== undefined) {
+    if (raw.context === null || Array.isArray(raw.context) || typeof raw.context !== "object") return undefined;
+    const source = raw.context as Record<string, unknown>;
+    if (Object.keys(source).some((key) => ![...contextKeys,"elapsedMs","lastProgressAgeMs"].includes(key as keyof TerminalWebhookContext))) return undefined;
+    context = {};
+    for (const key of contextKeys) { const normalized = safeText(source[key], key === "taskDescription" ? 500 : 256); if (normalized) Object.assign(context, { [key]: normalized }); }
+    for (const key of ["elapsedMs","lastProgressAgeMs"] as const) { const number = source[key]; if (number !== undefined) { if (typeof number !== "number" || !Number.isFinite(number) || number < 0) return undefined; Object.assign(context, { [key]: Math.floor(number) }); } }
+  }
+  let failure: TerminalWebhookFailure | undefined;
+  if (raw.failure !== undefined) {
+    if (raw.failure === null || Array.isArray(raw.failure) || typeof raw.failure !== "object") return undefined;
+    const source = raw.failure as Record<string, unknown>;
+    const keys: Array<keyof TerminalWebhookFailure> = ["code","boundary","stage","message","remediation"];
+    if (Object.keys(source).some((key) => ![...keys,"retryable"].includes(key as keyof TerminalWebhookFailure))) return undefined;
+    failure = {};
+    for (const key of keys) { const normalized = safeText(source[key], key === "message" || key === "remediation" ? 500 : 128); if (normalized) Object.assign(failure, { [key]: normalized }); }
+    if (source.retryable !== undefined) { if (typeof source.retryable !== "boolean") return undefined; failure.retryable = source.retryable; }
+  }
+  if (raw.diagnostic !== undefined && raw.diagnostic !== "blocked" && raw.diagnostic !== "stalled") return undefined;
+  const actionRequired = raw.actionRequired === undefined ? undefined : safeText(raw.actionRequired, 500);
   const event: TerminalWebhookEvent = {
     eventId: opaque("evt", raw.eventId),
     timestamp: raw.timestamp,
@@ -60,6 +96,10 @@ function normalizeEvent(value: unknown, authenticationValue?: string): TerminalW
     outputLocale,
     summary: message(outputLocale, `webhook.${raw.status}` as "webhook.completed" | "webhook.blocked_needs_human" | "webhook.failed" | "webhook.canceled", { scope: raw.scope }),
     evidenceRefs: raw.evidenceRefs.map((reference) => opaque("evidence", reference)),
+    ...(context && Object.keys(context).length > 0 ? { context } : {}),
+    ...(raw.diagnostic ? { diagnostic: raw.diagnostic } : {}),
+    ...(failure && Object.keys(failure).length > 0 ? { failure } : {}),
+    ...(actionRequired ? { actionRequired } : {}),
   };
   const allValues = [event.eventId, event.timestamp, event.scope, event.status, event.outputLocale ?? "", event.runId,
     event.changeId ?? "", event.summary, ...event.evidenceRefs];

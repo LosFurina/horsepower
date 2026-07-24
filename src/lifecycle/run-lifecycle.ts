@@ -7,6 +7,7 @@ import type {
   TerminalWebhookEvent,
   WebhookDeliveryResult,
 } from "./webhook-notifier.js";
+import type { TerminalDiagnostic, TerminalWebhookContext, TerminalWebhookFailure } from "./webhook-types.js";
 
 export type RunStatus = "running" | TerminalStatus;
 export type DispatchTerminalStatus = Exclude<TerminalStatus, "blocked_needs_human">;
@@ -27,6 +28,10 @@ export interface RunNotificationBinding {
   enabled: boolean;
   outputLocale?: OutputLocale;
   notify?: (event: TerminalWebhookEvent) => Promise<WebhookDeliveryResult>;
+  context?: TerminalWebhookContext;
+  diagnostic?: TerminalDiagnostic;
+  failure?: TerminalWebhookFailure;
+  actionRequired?: string;
 }
 
 export interface RunIdentity {
@@ -101,7 +106,15 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
     };
     runs.set(runId, run);
     runIdentities.set(runId, { changeId: input.changeId, projectId: input.projectId });
-    if (notification) notificationBindings.set(runId, notification);
+    if (notification) notificationBindings.set(runId, {
+      enabled: notification.enabled,
+      ...(notification.outputLocale ? { outputLocale: notification.outputLocale } : {}),
+      ...(notification.notify ? { notify: notification.notify } : {}),
+      ...(notification.context ? { context: structuredClone(notification.context) } : {}),
+      ...(notification.diagnostic ? { diagnostic: notification.diagnostic } : {}),
+      ...(notification.failure ? { failure: structuredClone(notification.failure) } : {}),
+      ...(notification.actionRequired ? { actionRequired: notification.actionRequired } : {}),
+    });
     return structuredClone(run);
   }
 
@@ -179,6 +192,10 @@ export function createRunLifecycle(options: RunLifecycleOptions) {
           summary: webhookText(report.summary, 500),
           evidenceRefs: [...(report.evidenceRefs ?? [])].slice(0, 20)
             .map((reference) => webhookText(reference, 200)),
+          ...(notification.context ? { context: structuredClone(notification.context) } : {}),
+          ...(notification.diagnostic ? { diagnostic: notification.diagnostic } : {}),
+          ...(notification.failure ? { failure: structuredClone(notification.failure) } : {}),
+          ...(notification.actionRequired ? { actionRequired: notification.actionRequired } : {}),
         };
       } catch {
         const result: WebhookDeliveryResult = {

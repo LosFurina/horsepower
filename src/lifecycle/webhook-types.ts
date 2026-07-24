@@ -2,6 +2,33 @@ import type { OutputLocale } from "../localization/index.js";
 
 export type TerminalScope = "change" | "dispatch";
 export type TerminalStatus = "completed" | "blocked_needs_human" | "failed" | "canceled";
+export type TerminalDiagnostic = "blocked" | "stalled";
+
+export interface TerminalWebhookContext {
+  campaignId?: string;
+  taskId?: string;
+  taskDescription?: string;
+  agent?: string;
+  workerId?: string;
+  requestedSlot?: string;
+  resolvedSlot?: string;
+  model?: string;
+  thinking?: string;
+  workKind?: string;
+  operation?: string;
+  elapsedMs?: number;
+  lastProgressAgeMs?: number;
+  projectLabel?: string;
+}
+
+export interface TerminalWebhookFailure {
+  code?: string;
+  boundary?: string;
+  stage?: string;
+  message?: string;
+  remediation?: string;
+  retryable?: boolean;
+}
 
 export interface TerminalWebhookEvent {
   eventId: string;
@@ -13,6 +40,10 @@ export interface TerminalWebhookEvent {
   outputLocale?: OutputLocale;
   summary: string;
   evidenceRefs: readonly string[];
+  context?: TerminalWebhookContext;
+  diagnostic?: TerminalDiagnostic;
+  failure?: TerminalWebhookFailure;
+  actionRequired?: string;
 }
 
 export type WebhookAuth =

@@ -686,6 +686,21 @@ export function createCli(options: CliOptions) {
         status: "completed",
         summary: "webhook test",
         evidenceRefs: [],
+        context: {
+          campaignId: "webhook-test-campaign",
+          taskId: "test",
+          taskDescription: "Verify structured Discord terminal notification",
+          agent: "captain",
+          workerId: "webhook-test-worker",
+          requestedSlot: "utility",
+          resolvedSlot: "utility",
+          thinking: "configured",
+          workKind: "test",
+          operation: "webhook test",
+          elapsedMs: 0,
+          projectLabel: "horsepower",
+        },
+        actionRequired: "No action required; this is an explicit delivery test.",
       });
       notifier.abandon();
       return {

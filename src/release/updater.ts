@@ -149,7 +149,10 @@ export function isNewerVersion(candidate: string, current: string): boolean {
 export function createDefaultTransport(fetchFn: typeof fetch): UpdateTransport {
   return {
     async resolveLatestRelease(): Promise<ReleaseIdentity> {
-      const url = `https://${OFFICIAL_RELEASE_HOST}/${OFFICIAL_RELEASE_OWNER}/${OFFICIAL_RELEASE_REPO}/releases/latest`;
+      // Cache-bust GitHub's redirect: immediately after publishing/promoting a
+      // release, the bare /releases/latest redirect may remain stale at an
+      // intermediary and incorrectly resolve to an older version.
+      const url = `https://${OFFICIAL_RELEASE_HOST}/${OFFICIAL_RELEASE_OWNER}/${OFFICIAL_RELEASE_REPO}/releases/latest?horsepower=${Date.now()}`;
       const response = await fetchFn(url, {
         method: "HEAD",
         redirect: "manual",
